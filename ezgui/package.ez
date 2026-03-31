@@ -1,0 +1,7 @@
+{
+    "name": "gui",
+    "version": "4.0.0",
+    "description": "Native Win32 GUI library for EZ",
+    "main": "main.ez",
+    "author": "Abdullah Masood"
+}

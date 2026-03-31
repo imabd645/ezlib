@@ -1,0 +1,179 @@
+# ============================================================================
+# ORM - Object Relational Mapping for EZ Language
+# A lightweight Active-Record style wrapper over SQLite
+# ============================================================================
+
+model Database {
+    init(path) {
+        self.handle = db_open(path)
+        when self.handle == 0 {
+            out "Error: Failed to open database at " + path
+        }
+    }
+
+    task execute(query) {
+        give db_execute(self.handle, query)
+    }
+
+    task query(query) {
+        give db_query(self.handle, query)
+    }
+
+    task close() {
+        db_close(self.handle)
+        give self
+    }
+
+    task lastInsertId() {
+        give db_last_insert_id(self.handle)
+    }
+    
+    task begin() {
+        db_begin(self.handle)
+        give self
+    }
+    
+    task commit() {
+        db_commit(self.handle)
+        give self
+    }
+    
+    task rollback() {
+        db_rollback(self.handle)
+        give self
+    }
+
+    task define(tableName, schema) {
+        give Table(self, tableName, schema)
+    }
+}
+
+model Table {
+    init(db, tableName, schema) {
+        self.db = db
+        self.tableName = tableName
+        self.schema = schema
+        self._createTable()
+    }
+
+    task _createTable() {
+        cols = []
+        get k in self.schema {
+            push(cols, k + " " + self.schema[k])
+        }
+        
+        # Always enforce an 'id' primary key if not provided
+        when not ("id" in self.schema) {
+            # SQLite specific auto-increment PK
+            q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (id INTEGER PRIMARY KEY AUTOINCREMENT, " + join(cols, ", ") + ")"
+            self.db.execute(q)
+        } other {
+            q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (" + join(cols, ", ") + ")"
+            self.db.execute(q)
+        }
+    }
+
+    task _escape(val) {
+        t = typeOf(val)
+        when t == "string" {
+            # Basic escape for single quotes
+            # In a production ORM we'd use prepared statements, but EZ db_* currently uses string queries
+            give "'" + val + "'"
+        }
+        when t == "null" { give "NULL" }
+        give str(val)
+    }
+
+    # CRUD Operations
+
+    task insert(data) {
+        keys = []
+        vals = []
+        get k in data {
+            push(keys, k)
+            push(vals, self._escape(data[k]))
+        }
+        
+        q = "INSERT INTO " + self.tableName + " (" + join(keys, ", ") + ") VALUES (" + join(vals, ", ") + ")"
+        self.db.execute(q)
+        give self.db.lastInsertId()
+    }
+
+    task find(conditions) {
+        q = "SELECT * FROM " + self.tableName
+        when conditions {
+            conds = []
+            get k in conditions {
+                push(conds, k + " = " + self._escape(conditions[k]))
+            }
+            when conds.len > 0 {
+                q = q + " WHERE " + join(conds, " AND ")
+            }
+        }
+        give self.db.query(q)
+    }
+
+    task findOne(conditions) {
+        q = "SELECT * FROM " + self.tableName
+        when conditions {
+            conds = []
+            get k in conditions {
+                push(conds, k + " = " + self._escape(conditions[k]))
+            }
+            when conds.len > 0 {
+                q = q + " WHERE " + join(conds, " AND ")
+            }
+        }
+        q = q + " LIMIT 1"
+        res = self.db.query(q)
+        when res.len > 0 { give res[0] }
+        give nil
+    }
+
+    task findById(id) {
+        give self.findOne({"id": id})
+    }
+
+    task update(id, data) {
+        sets = []
+        get k in data {
+            push(sets, k + " = " + self._escape(data[k]))
+        }
+        when sets.len > 0 {
+            q = "UPDATE " + self.tableName + " SET " + join(sets, ", ") + " WHERE id = " + str(id)
+            self.db.execute(q)
+        }
+        give self
+    }
+
+    task delete(id) {
+        q = "DELETE FROM " + self.tableName + " WHERE id = " + str(id)
+        self.db.execute(q)
+        give self
+    }
+
+    task deleteWhere(conditions) {
+        q = "DELETE FROM " + self.tableName
+        when conditions {
+            conds = []
+            get k in conditions {
+                push(conds, k + " = " + self._escape(conditions[k]))
+            }
+            when conds.len > 0 {
+                q = q + " WHERE " + join(conds, " AND ")
+                self.db.execute(q)
+            }
+        }
+        give self
+    }
+
+    task all() {
+        give self.db.query("SELECT * FROM " + self.tableName)
+    }
+    
+    task count() {
+        res = self.db.query("SELECT COUNT(*) as c FROM " + self.tableName)
+        when res.len > 0 { give res[0]["c"] }
+        give 0
+    }
+}

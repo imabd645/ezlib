@@ -1,0 +1,442 @@
+# ============================================================
+# ez-ai  —  AI Standard Library for EZ
+# Version 1.0.1
+#
+# Uses synchronous http_post instead of fetch+await so it works
+# correctly when called from inside a server() request thread.
+# ============================================================
+
+# ----------------------------------------------------------
+# Internal Helpers
+# ----------------------------------------------------------
+
+task _ai_post(url, headers, body)
+{
+    give http_post(url, to_json(body), headers)
+}
+
+task _ai_safe_parse(raw, label)
+{
+    try
+    {
+        give parse_json(raw)
+    }
+    catch e
+    {
+        out "[ez-ai] Failed to parse " + label + " response: " + str(e)
+        out "[ez-ai] Raw response was: " + str(raw)
+        give nil
+    }
+}
+
+task _starts_with(s, prefix)
+{
+    when len(s) < len(prefix) { give false }
+    give substr(s, 0, len(prefix)) == prefix
+}
+
+task _has_error(data)
+{
+    when type(data) != "dictionary" { give false }
+    ks = keys(data)
+    get k in ks
+    {
+        when k == "error" { give true }
+    }
+    give false
+}
+
+# ----------------------------------------------------------
+# OpenAI  (gpt-4o-mini, gpt-4o, etc.)
+# ----------------------------------------------------------
+
+task openai(prompt, apiKey)
+{
+    give openai_full(prompt, apiKey, "gpt-4o-mini", nil)
+}
+
+task openai_model(prompt, apiKey, mdl)
+{
+    give openai_full(prompt, apiKey, mdl, nil)
+}
+
+task openai_full(prompt, apiKey, mdl, systemPrompt)
+{
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+    }
+
+    messages = []
+    when systemPrompt != nil
+    {
+        push(messages, {"role": "system", "content": systemPrompt})
+    }
+    push(messages, {"role": "user", "content": prompt})
+
+    body = {
+        "model": mdl,
+        "messages": messages
+    }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "OpenAI")
+    when data == nil { give nil }
+
+    when _has_error(data)
+    {
+        out "[ez-ai] OpenAI error: " + str(data["error"]["message"])
+        give nil
+    }
+
+    try { give data["choices"][0]["message"]["content"] }
+    catch e
+    {
+        out "[ez-ai] Unexpected OpenAI response: " + str(e)
+        give nil
+    }
+}
+
+task _openai_chat(messages, apiKey, mdl)
+{
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+    }
+    body = { "model": mdl, "messages": messages }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "OpenAI")
+    when data == nil { give nil }
+    when _has_error(data) { out "[ez-ai] OpenAI error: " + str(data["error"]["message"])   give nil }
+    try { give data["choices"][0]["message"]["content"] }
+    catch e { out "[ez-ai] Unexpected OpenAI response: " + str(e)   give nil }
+}
+
+# ----------------------------------------------------------
+# DeepSeek  (deepseek-chat, deepseek-reasoner, etc.)
+# ----------------------------------------------------------
+
+task deepseek(prompt, apiKey)
+{
+    give deepseek_full(prompt, apiKey, "deepseek-chat", nil)
+}
+
+task deepseek_model(prompt, apiKey, mdl)
+{
+    give deepseek_full(prompt, apiKey, mdl, nil)
+}
+
+task deepseek_full(prompt, apiKey, mdl, systemPrompt)
+{
+    url = "https://api.deepseek.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+    }
+
+    messages = []
+    when systemPrompt != nil
+    {
+        push(messages, {"role": "system", "content": systemPrompt})
+    }
+    push(messages, {"role": "user", "content": prompt})
+
+    body = {
+        "model": mdl,
+        "messages": messages
+    }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "DeepSeek")
+    when data == nil { give nil }
+
+    when _has_error(data)
+    {
+        out "[ez-ai] DeepSeek error: " + str(data["error"]["message"])
+        give nil
+    }
+
+    try { give data["choices"][0]["message"]["content"] }
+    catch e
+    {
+        out "[ez-ai] Unexpected DeepSeek response: " + str(e)
+        give nil
+    }
+}
+
+task _deepseek_chat(messages, apiKey, mdl)
+{
+    url = "https://api.deepseek.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+    }
+    body = { "model": mdl, "messages": messages }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "DeepSeek")
+    when data == nil { give nil }
+    when _has_error(data) { out "[ez-ai] DeepSeek error: " + str(data["error"]["message"])   give nil }
+    try { give data["choices"][0]["message"]["content"] }
+    catch e { out "[ez-ai] Unexpected DeepSeek response: " + str(e)   give nil }
+}
+
+# ----------------------------------------------------------
+# Anthropic  (claude-3-5-sonnet, haiku, opus, etc.)
+# ----------------------------------------------------------
+
+task anthropic(prompt, apiKey)
+{
+    give anthropic_full(prompt, apiKey, "claude-3-5-sonnet-20241022", nil)
+}
+
+task anthropic_model(prompt, apiKey, mdl)
+{
+    give anthropic_full(prompt, apiKey, mdl, nil)
+}
+
+task anthropic_full(prompt, apiKey, mdl, systemPrompt)
+{
+    url = "https://api.anthropic.com/v1/messages"
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+    }
+
+    body = {
+        "model": mdl,
+        "max_tokens": 4096,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+
+    when systemPrompt != nil
+    {
+        body["system"] = systemPrompt
+    }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "Anthropic")
+    when data == nil { give nil }
+
+    when _has_error(data)
+    {
+        out "[ez-ai] Anthropic error: " + str(data["error"]["message"])
+        give nil
+    }
+
+    try { give data["content"][0]["text"] }
+    catch e
+    {
+        out "[ez-ai] Unexpected Anthropic response: " + str(e)
+        give nil
+    }
+}
+
+task _anthropic_chat(messages, apiKey, mdl, systemPrompt)
+{
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+    }
+    body = { "model": mdl, "max_tokens": 4096, "messages": messages }
+    when systemPrompt != nil { body["system"] = systemPrompt }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "Anthropic")
+    when data == nil { give nil }
+    when _has_error(data) { out "[ez-ai] Anthropic error: " + str(data["error"]["message"])   give nil }
+    try { give data["content"][0]["text"] }
+    catch e { out "[ez-ai] Unexpected Anthropic response: " + str(e)   give nil }
+}
+
+# ----------------------------------------------------------
+# Gemini  (gemini-1.5-flash, gemini-1.5-pro, etc.)
+# ----------------------------------------------------------
+
+task gemini(prompt, apiKey)
+{
+    give gemini_full(prompt, apiKey, "gemini-1.5-flash", nil)
+}
+
+task gemini_model(prompt, apiKey, mdl)
+{
+    give gemini_full(prompt, apiKey, mdl, nil)
+}
+
+task gemini_full(prompt, apiKey, mdl, systemPrompt)
+{
+    url = "https://generativelanguage.googleapis.com/v1beta/models/" + mdl + ":generateContent?key=" + apiKey
+
+    headers = { "Content-Type": "application/json" }
+
+    contents = []
+    when systemPrompt != nil
+    {
+        push(contents, {"role": "user",  "parts": [{"text": systemPrompt}]})
+        push(contents, {"role": "model", "parts": [{"text": "Understood."}]})
+    }
+    push(contents, {"role": "user", "parts": [{"text": prompt}]})
+
+    body = { "contents": contents }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "Gemini")
+    when data == nil { give nil }
+
+    when _has_error(data)
+    {
+        out "[ez-ai] Gemini error: " + str(data["error"]["message"])
+        give nil
+    }
+
+    try { give data["candidates"][0]["content"]["parts"][0]["text"] }
+    catch e
+    {
+        out "[ez-ai] Unexpected Gemini response: " + str(e)
+        give nil
+    }
+}
+
+task _gemini_chat(contents, apiKey, mdl)
+{
+    url = "https://generativelanguage.googleapis.com/v1beta/models/" + mdl + ":generateContent?key=" + apiKey
+    headers = { "Content-Type": "application/json" }
+    body = { "contents": contents }
+
+    raw = _ai_post(url, headers, body)
+    data = _ai_safe_parse(raw, "Gemini")
+    when data == nil { give nil }
+    when _has_error(data) { out "[ez-ai] Gemini error: " + str(data["error"]["message"])   give nil }
+    try { give data["candidates"][0]["content"]["parts"][0]["text"] }
+    catch e { out "[ez-ai] Unexpected Gemini response: " + str(e)   give nil }
+}
+
+# ----------------------------------------------------------
+# ask()  —  Universal one-liner (auto-detects provider by key)
+# ----------------------------------------------------------
+
+task ask(prompt, apiKey)
+{
+    # DeepSeek and OpenAI both use "sk-" prefix.
+    # DeepSeek keys contain "sk-" but NOT "sk-proj-" (OpenAI new format).
+    # For ambiguous keys, defaults to DeepSeek.
+    when _starts_with(apiKey, "AIza") { give gemini(prompt, apiKey) }
+    when _starts_with(apiKey, "sk-ant-") { give anthropic(prompt, apiKey) }
+    when _starts_with(apiKey, "sk-") { give deepseek(prompt, apiKey) }
+    give anthropic(prompt, apiKey)
+}
+
+task ask_with_system(prompt, apiKey, systemPrompt)
+{
+    when _starts_with(apiKey, "AIza")    { give gemini_full(prompt, apiKey, "gemini-1.5-flash", systemPrompt) }
+    when _starts_with(apiKey, "sk-ant-") { give anthropic_full(prompt, apiKey, "claude-3-5-sonnet-20241022", systemPrompt) }
+    when _starts_with(apiKey, "sk-")     { give deepseek_full(prompt, apiKey, "deepseek-chat", systemPrompt) }
+    give anthropic_full(prompt, apiKey, "claude-3-5-sonnet-20241022", systemPrompt)
+}
+
+# ----------------------------------------------------------
+# Chat Sessions  —  Multi-turn conversations
+# ----------------------------------------------------------
+
+task new_chat(provider, apiKey)
+{
+    give {
+        "provider":         provider,
+        "apiKey":           apiKey,
+        "mdl":              _default_model(provider),
+        "system":           nil,
+        "messages":         [],
+        "gemini_contents":  []
+    }
+}
+
+task new_chat_with_system(provider, apiKey, systemPrompt)
+{
+    chat = new_chat(provider, apiKey)
+    chat["system"] = systemPrompt
+
+    when provider == "gemini"
+    {
+        push(chat["gemini_contents"], {"role": "user",  "parts": [{"text": systemPrompt}]})
+        push(chat["gemini_contents"], {"role": "model", "parts": [{"text": "Understood."}]})
+    }
+
+    when provider == "openai"
+    {
+        push(chat["messages"], {"role": "system", "content": systemPrompt})
+    }
+
+    give chat
+}
+
+task chat_send(chat, userMessage)
+{
+    provider = chat["provider"]
+    apiKey   = chat["apiKey"]
+    mdl      = chat["mdl"]
+
+    when provider == "deepseek"
+    {
+        push(chat["messages"], {"role": "user", "content": userMessage})
+        response = _deepseek_chat(chat["messages"], apiKey, mdl)
+        when response != nil { push(chat["messages"], {"role": "assistant", "content": response}) }
+        give response
+    }
+
+    when provider == "openai"
+    {
+        push(chat["messages"], {"role": "user", "content": userMessage})
+        response = _openai_chat(chat["messages"], apiKey, mdl)
+        when response != nil { push(chat["messages"], {"role": "assistant", "content": response}) }
+        give response
+    }
+
+    when provider == "anthropic"
+    {
+        push(chat["messages"], {"role": "user", "content": userMessage})
+        response = _anthropic_chat(chat["messages"], apiKey, mdl, chat["system"])
+        when response != nil { push(chat["messages"], {"role": "assistant", "content": response}) }
+        give response
+    }
+
+    when provider == "gemini"
+    {
+        push(chat["gemini_contents"], {"role": "user", "parts": [{"text": userMessage}]})
+        response = _gemini_chat(chat["gemini_contents"], apiKey, mdl)
+        when response != nil { push(chat["gemini_contents"], {"role": "model", "parts": [{"text": response}]}) }
+        give response
+    }
+
+    out "[ez-ai] Unknown provider: " + provider
+    give nil
+}
+
+task chat_set_model(chat, mdl)
+{
+    chat["mdl"] = mdl
+    give chat
+}
+
+# ----------------------------------------------------------
+# Utility
+# ----------------------------------------------------------
+
+task _default_model(provider)
+{
+    when provider == "deepseek"  { give "deepseek-chat" }
+    when provider == "openai"    { give "gpt-4o-mini" }
+    when provider == "anthropic" { give "claude-3-5-sonnet-20241022" }
+    when provider == "gemini"    { give "gemini-1.5-flash" }
+    give "deepseek-chat"
+}
+
+out "[ez-ai] AI library loaded (v1.0.1)"

@@ -1,0 +1,15 @@
+# ============================================================================
+# FS - Advanced File System Library for EZ Language
+# ============================================================================
+
+fs = {
+    "mkdir": |path| { give fs_mkdir(path) },
+    "exists": |path| { give fs_exists(path) },
+    "isDir": |path| { give fs_is_dir(path) },
+    "listDir": |path| { give fs_list_dir(path) },
+    "copy": |src, dest| { give fs_copy(src, dest) },
+    "move": |src, dest| { give fs_move(src, dest) },
+    "remove": |path| { give fs_remove(path) },
+    "size": |path| { give fs_size(path) },
+    "modifiedTime": |path| { give fs_modified_time(path) }
+}

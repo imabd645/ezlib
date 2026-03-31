@@ -1,0 +1,98 @@
+// ============================================================================
+// DATABASE - Modern SQLite wrapper for EZ Language (v2.0)
+// Simplified and modernized using Model system
+// ============================================================================
+
+model Database {
+    init(path) {
+        self.path = path
+        self.handle = nil
+        self.connected = false
+    }
+
+    task connect() {
+        self.handle = dbOpen(self.path)
+        self.connected = true
+        give self
+    }
+
+    task disconnect() {
+        when self.connected {
+            dbClose(self.handle)
+            self.connected = false
+        }
+        give self
+    }
+
+    task execute(sql, params) {
+        when !self.connected { self.connect() }
+        when params == nil { params = [] }
+        dbExec(self.handle, sql, params)
+        give self
+    }
+
+    task query(sql, params) {
+        when !self.connected { self.connect() }
+        when params == nil { params = [] }
+        give dbQuery(self.handle, sql, params)
+    }
+
+    task queryOne(sql, params) {
+        result = self.query(sql, params)
+        when result.len > 0 { give result[0] }
+        give nil
+    }
+
+    task createTable(name, cols) {
+        sql = "CREATE TABLE IF NOT EXISTS " + name + " (" + join(cols, ", ") + ")"
+        self.execute(sql, [])
+        give self
+    }
+
+    task insert(table, data) {
+        keys_list = keys(data)
+        values_list = values(data)
+        
+        cols = join(keys_list, ", ")
+        placeholders = []
+        repeat i = 1 to keys_list.len { push(placeholders, "?") }
+        p_str = join(placeholders, ", ")
+        
+        sql = "INSERT INTO " + table + " (" + cols + ") VALUES (" + p_str + ")"
+        self.execute(sql, values_list)
+        give self.lastId()
+    }
+
+    task update(table, id, data) {
+        keys_list = keys(data)
+        values_list = values(data)
+        
+        clauses = []
+        get k in keys_list { push(clauses, k + " = ?") }
+        set_str = join(clauses, ", ")
+        
+        sql = "UPDATE " + table + " SET " + set_str + " WHERE id = ?"
+        push(values_list, id)
+        self.execute(sql, values_list)
+        give self
+    }
+
+    task delete(table, id) {
+        self.execute("DELETE FROM " + table + " WHERE id = ?", [id])
+        give self
+    }
+
+    task lastId() {
+        give dbLastInsertId(self.handle)
+    }
+
+    task begin() { give dbBegin(self.handle) }
+    task commit() { give dbCommit(self.handle) }
+    task rollback() { give dbRollback(self.handle) }
+}
+
+// Global helper
+task openDatabase(path) {
+    db = Database(path)
+    give db.connect()
+}

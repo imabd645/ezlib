@@ -1,0 +1,575 @@
+# EZ Elegant GUI Library
+# High-level Object Oriented wrapper
+
+# Color Map helper
+guiColors = {
+    "white": [255, 255, 255],
+    "black": [0, 0, 0],
+    "gray": [128, 128, 128],
+    "dark": [40, 40, 40],
+    "light": [240, 240, 240],
+    "red": [255, 0, 0],
+    "green": [0, 200, 0],
+    "blue": [0, 0, 255],
+    "neon": [0, 255, 255],
+    "yellow": [255, 255, 0],
+    "purple": [128, 0, 128],
+    "orange": [255, 165, 0]
+}
+
+model Widget {
+    init() {}
+    task setup(h) {
+        self.handle = h
+        give self
+    }
+    task color(name) {
+        rgb = guiColors[name]
+        when not rgb {
+             gui_set_color(self.handle, 255, 255, 255, 0, 0, 0)
+        } other {
+             when name == "dark" or name == "black" or name == "blue" or name == "purple" {
+                 gui_set_color(self.handle, rgb[0], rgb[1], rgb[2], 255, 255, 255)
+             } other {
+                 gui_set_color(self.handle, 255, 255, 255, rgb[0], rgb[1], rgb[2])
+             }
+        }
+        give self
+    }
+    task font(name, size) {
+        gui_set_font(self.handle, name, size)
+        give self
+    }
+    task text(v) {
+        gui_set_value(self.handle, v)
+        give self
+    }
+    task value() {
+        give gui_get_value(self.handle)
+    }
+    task getText() {
+        give self.value()
+    }
+    task setText(v) {
+        self.text(v)
+        give self
+    }
+    task show() {
+        gui_show(self.handle)
+        give self
+    }
+    task hide() {
+        gui_hide(self.handle)
+        give self
+    }
+    task onClick(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+    task pos(x, y, w, h) {
+        gui_set_pos(self.handle, x, y, w, h)
+        give self
+    }
+    task enable() {
+        gui_set_enabled(self.handle, 1)
+        give self
+    }
+    task disable() {
+        gui_set_enabled(self.handle, 0)
+        give self
+    }
+    task style(bg, fg, fnt, sz) {
+        when bg { self.color(bg) }
+        when fg {
+            rgb = guiColors[fg]
+            when rgb {
+                gui_set_color(self.handle, 0, 0, 0, rgb[0], rgb[1], rgb[2])
+            }
+        }
+        when fnt {
+            when not sz { sz = 16 }
+            self.font(fnt, sz)
+        }
+        give self
+    }
+}
+model Label extends Widget {
+    init(h) { self.setup(h) }
+}
+
+model Button extends Widget {
+    init(h) { self.setup(h) }
+    task click(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model Input extends Widget {
+    init(h) { self.setup(h) }
+}
+
+model Dropdown extends Widget {
+    init(h) { self.setup(h) }
+    task add(item) {
+        gui_add_dropdown_item(self.handle, item)
+        give self
+    }
+    task selected() {
+        give gui_get_dropdown_selected(self.handle)
+    }
+}
+
+model Checkbox extends Widget {
+    init(h) { self.setup(h) }
+    task checked() {
+        give gui_get_checked(self.handle) == 1
+    }
+    task setChecked(v) {
+        when v { gui_set_checked(self.handle, 1) }
+        other { gui_set_checked(self.handle, 0) }
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model Radio extends Widget {
+    init(h) { self.setup(h) }
+    task selected() {
+        give gui_get_checked(self.handle) == 1
+    }
+    task select() {
+        gui_set_checked(self.handle, 1)
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model Slider extends Widget {
+    init(h) { self.setup(h) }
+    task value() {
+        give gui_get_slider(self.handle)
+    }
+    task setValue(v) {
+        gui_set_slider(self.handle, v)
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model ProgressBar extends Widget {
+    init(h) { self.setup(h) }
+    task setValue(v) {
+        gui_set_progress(self.handle, v)
+        give self
+    }
+    task setRange(minV, maxV) {
+        gui_set_progress_range(self.handle, minV, maxV)
+        give self
+    }
+}
+
+model ListView extends Widget {
+    init(h) { self.setup(h) }
+    task addColumn(text, width) {
+        gui_listview_add_column(self.handle, text, width)
+        give self
+    }
+    task addRow(items) {
+        give gui_listview_add_row(self.handle, items)
+    }
+    task clear() {
+        gui_listview_clear(self.handle)
+        give self
+    }
+    task selected() {
+        give gui_listview_get_selected(self.handle)
+    }
+    task getRow(index) {
+        give gui_listview_get_row(self.handle, index)
+    }
+    task removeRow(index) {
+        gui_listview_remove_row(self.handle, index)
+        give self
+    }
+}
+
+model TreeView extends Widget {
+    init(h) { self.setup(h) }
+    task add(parentHandle, text) {
+        give gui_treeview_add(self.handle, parentHandle, text)
+    }
+    task selected() {
+        give gui_treeview_get_selected(self.handle)
+    }
+    task clear() {
+        gui_treeview_clear(self.handle)
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model DatePicker extends Widget {
+    init(h) { self.setup(h) }
+    task value() {
+        give gui_datepicker_get(self.handle)
+    }
+    task setValue(y, m, d) {
+        gui_datepicker_set(self.handle, y, m, d)
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+}
+
+model Spinner extends Widget {
+    init(h) { self.setup(h) }
+    task value() {
+        give gui_spinner_get(self.handle)
+    }
+    task setValue(v) {
+        gui_spinner_set(self.handle, v)
+        give self
+    }
+}
+
+model Image extends Widget {
+    init(h) { self.setup(h) }
+    task load(path) {
+        gui_set_image(self.handle, path)
+        give self
+    }
+}
+
+model Panel extends Widget {
+    init(h) { self.setup(h) }
+    
+    task label(text, x, y, w, h) {
+        give Label(gui_create_label(self.handle, text, x, y, w, h))
+    }
+    task button(text, x, y, w, h, cb) {
+        give Button(gui_create_button(self.handle, text, x, y, w, h, cb))
+    }
+    task input(x, y, w, h) {
+        give Input(gui_create_input(self.handle, x, y, w, h))
+    }
+    task dropdown(x, y, w, h) {
+        give Dropdown(gui_create_dropdown(self.handle, x, y, w, h))
+    }
+    task checkbox(text, x, y, w, h) {
+        give Checkbox(gui_create_checkbox(self.handle, text, x, y, w, h))
+    }
+    task radio(text, x, y, w, h, groupStart) {
+        when not groupStart { groupStart = 0 }
+        give Radio(gui_create_radio(self.handle, text, x, y, w, h, groupStart))
+    }
+    task slider(x, y, w, h, minV, maxV) {
+        give Slider(gui_create_slider(self.handle, x, y, w, h, minV, maxV))
+    }
+    task progressBar(x, y, w, h) {
+        give ProgressBar(gui_create_progress(self.handle, x, y, w, h))
+    }
+    task listView(x, y, w, h) {
+        give ListView(gui_create_listview(self.handle, x, y, w, h))
+    }
+    task panel(x, y, w, h) {
+        give Panel(gui_create_panel(self.handle, x, y, w, h))
+    }
+    task scrollPanel(x, y, w, h) {
+        give ScrollPanel(gui_create_scroll_panel(self.handle, x, y, w, h))
+    }
+    task clear() {
+        gui_clear_widgets(self.handle)
+        give self
+    }
+    task vbox(p) { give VBox(self, p) }
+    task grid(cols, padX, padY) { give Grid(self, cols, padX, padY) }
+}
+
+model Tabs extends Widget {
+    init(h) { self.setup(h) }
+    task add(name) {
+        gui_add_tab(self.handle, name)
+        give self
+    }
+    task onChange(cb) {
+        gui_set_callback(self.handle, cb)
+        give self
+    }
+    task selected() {
+        give gui_get_tab_selected(self.handle)
+    }
+}
+
+model ScrollPanel extends Panel {
+    init(h) { self.setup(h) }
+    task contentSize(w, h) {
+        gui_set_scroll_range(self.handle, w, h)
+        give self
+    }
+}
+
+model Window extends Widget {
+    init(title, width, height) {
+        self.handle = gui_create_window(title, width, height)
+    }
+    task label(text, x, y, w, h) {
+        give Label(gui_create_label(self.handle, text, x, y, w, h))
+    }
+    task button(text, x, y, w, h, cb) {
+        give Button(gui_create_button(self.handle, text, x, y, w, h, cb))
+    }
+    task input(x, y, w, h) {
+        give Input(gui_create_input(self.handle, x, y, w, h))
+    }
+    task dropdown(x, y, w, h) {
+        give Dropdown(gui_create_dropdown(self.handle, x, y, w, h))
+    }
+    task checkbox(text, x, y, w, h) {
+        give Checkbox(gui_create_checkbox(self.handle, text, x, y, w, h))
+    }
+    task radio(text, x, y, w, h, groupStart) {
+        when not groupStart { groupStart = 0 }
+        give Radio(gui_create_radio(self.handle, text, x, y, w, h, groupStart))
+    }
+    task slider(x, y, w, h, minV, maxV) {
+        give Slider(gui_create_slider(self.handle, x, y, w, h, minV, maxV))
+    }
+    task progressBar(x, y, w, h) {
+        give ProgressBar(gui_create_progress(self.handle, x, y, w, h))
+    }
+    task listView(x, y, w, h) {
+        give ListView(gui_create_listview(self.handle, x, y, w, h))
+    }
+    task panel(x, y, w, h) {
+        give Panel(gui_create_panel(self.handle, x, y, w, h))
+    }
+    task tabs(x, y, w, h, cb) {
+        give Tabs(gui_create_tabs(self.handle, x, y, w, h, cb))
+    }
+    task scrollPanel(x, y, w, h) {
+        give ScrollPanel(gui_create_scroll_panel(self.handle, x, y, w, h))
+    }
+    task treeView(x, y, w, h) {
+        give TreeView(gui_create_treeview(self.handle, x, y, w, h))
+    }
+    task datePicker(x, y, w, h) {
+        give DatePicker(gui_create_datepicker(self.handle, x, y, w, h))
+    }
+    task spinner(x, y, w, h, minV, maxV) {
+        give Spinner(gui_create_spinner(self.handle, x, y, w, h, minV, maxV))
+    }
+    task image(path, x, y, w, h) {
+        give Image(gui_create_image(self.handle, path, x, y, w, h))
+    }
+    task setTimer(ms, cb) {
+        give gui_set_timer(self.handle, ms, cb)
+    }
+    task killTimer(id) {
+        gui_kill_timer(self.handle, id)
+    }
+    task vbox(p) { give VBox(self, p) }
+    task grid(cols, padX, padY) { give Grid(self, cols, padX, padY) }
+    task run() { gui_run() }
+}
+
+model VBox {
+    init(win, p) {
+        self.win = win
+        self.p = p
+        self.y = p
+    }
+    task label(t, w, h) {
+        lbl = self.win.label(t, self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give lbl
+    }
+    task button(t, w, h, cb) {
+        btn = self.win.button(t, self.p, self.y, w, h, cb)
+        self.y = self.y + h + self.p
+        give btn
+    }
+    task input(w, h) {
+        inp = self.win.input(self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give inp
+    }
+    task dropdown(w, h) {
+        realH = h
+        when h < 100 { realH = 150 }
+        drp = self.win.dropdown(self.p, self.y, w, realH)
+        self.y = self.y + h + self.p
+        give drp
+    }
+    task checkbox(t, w, h) {
+        cb = self.win.checkbox(t, self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give cb
+    }
+    task radio(t, w, h, groupStart) {
+        when not groupStart { groupStart = 0 }
+        r = self.win.radio(t, self.p, self.y, w, h, groupStart)
+        self.y = self.y + h + self.p
+        give r
+    }
+    task slider(w, h, minV, maxV) {
+        s = self.win.slider(self.p, self.y, w, h, minV, maxV)
+        self.y = self.y + h + self.p
+        give s
+    }
+    task progressBar(w, h) {
+        pb = self.win.progressBar(self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give pb
+    }
+    task listView(w, h) {
+        lv = self.win.listView(self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give lv
+    }
+    task treeView(w, h) {
+        tv = self.win.treeView(self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give tv
+    }
+    task datePicker(w, h) {
+        dp = self.win.datePicker(self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give dp
+    }
+    task spinner(w, h, minV, maxV) {
+        sp = self.win.spinner(self.p, self.y, w, h, minV, maxV)
+        self.y = self.y + h + self.p
+        give sp
+    }
+    task image(path, w, h) {
+        img = self.win.image(path, self.p, self.y, w, h)
+        self.y = self.y + h + self.p
+        give img
+    }
+    task addSpace(h) {
+        self.y = self.y + h
+    }
+}
+
+model Grid {
+    init(win, cols, padX, padY) {
+        self.win = win
+        self.cols = cols
+        self.padX = padX
+        self.padY = padY
+        self.curCol = 0
+        self.curRow = 0
+        self.cellW = 0
+        self.cellH = 0
+    }
+    task setCellSize(w, h) {
+        self.cellW = w
+        self.cellH = h
+        give self
+    }
+    task nextPos() {
+        x = self.padX + self.curCol * (self.cellW + self.padX)
+        y = self.padY + self.curRow * (self.cellH + self.padY)
+        self.curCol = self.curCol + 1
+        when self.curCol >= self.cols {
+            self.curCol = 0
+            self.curRow = self.curRow + 1
+        }
+        give [x, y]
+    }
+    task label(t) {
+        pos = self.nextPos()
+        give self.win.label(t, pos[0], pos[1], self.cellW, self.cellH)
+    }
+    task button(t, cb) {
+        pos = self.nextPos()
+        give self.win.button(t, pos[0], pos[1], self.cellW, self.cellH, cb)
+    }
+    task input() {
+        pos = self.nextPos()
+        give self.win.input(pos[0], pos[1], self.cellW, self.cellH)
+    }
+    task checkbox(t) {
+        pos = self.nextPos()
+        give self.win.checkbox(t, pos[0], pos[1], self.cellW, self.cellH)
+    }
+    task spinner(minV, maxV) {
+        pos = self.nextPos()
+        give self.win.spinner(pos[0], pos[1], self.cellW, self.cellH, minV, maxV)
+    }
+    task image(path) {
+        pos = self.nextPos()
+        give self.win.image(path, pos[0], pos[1], self.cellW, self.cellH)
+    }
+    task dropdown() {
+        pos = self.nextPos()
+        give self.win.dropdown(pos[0], pos[1], self.cellW, self.cellH)
+    }
+    task skipCell() {
+        self.nextPos()
+        give self
+    }
+    task newRow() {
+        self.curCol = 0
+        self.curRow = self.curRow + 1
+        give self
+    }
+}
+
+# Global entry
+gui = {
+    "window": |t, w, h| { 
+        win = Window(t, w, h)
+        give win
+    },
+    "alert": |t, m| {
+        when not m { gui_alert("EZ", t) } other { gui_alert(t, m) }
+    },
+    "setTheme": |name| {
+        gui_set_theme(name)
+        when name == "neon" {
+            guiColors["dark"] = [20, 20, 30]
+            guiColors["neon"] = [0, 255, 255]
+            guiColors["light"] = [180, 255, 255]
+        }
+        when name == "retro" {
+            guiColors["dark"] = [50, 40, 30]
+            guiColors["neon"] = [255, 100, 0]
+            guiColors["light"] = [255, 220, 150]
+        }
+        when name == "ocean" {
+            guiColors["dark"] = [10, 30, 50]
+            guiColors["neon"] = [0, 150, 255]
+            guiColors["light"] = [200, 240, 255]
+        }
+    },
+    "dialog": {
+        "confirm": |t, m| { give gui_dialog_confirm(t, m) },
+        "input": |t, m| { give gui_dialog_input(t, m) },
+        "openFile": |t, f| { 
+            when not f { f = "*.*" }
+            give gui_dialog_open_file(t, f)
+        },
+        "saveFile": |t, f| {
+            when not f { f = "*.*" }
+            give gui_dialog_save_file(t, f)
+        },
+        "openFolder": || { give gui_dialog_open_folder() },
+        "colorPicker": || { give gui_dialog_color_picker() }
+    }
+}

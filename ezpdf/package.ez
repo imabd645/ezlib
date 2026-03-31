@@ -1,0 +1,7 @@
+{
+    "name": "pdf",
+    "version": "1.0.0",
+    "description": "Library for making pdf EZ",
+    "main": "main.ez",
+    "author": "Abdullah Masood"
+}

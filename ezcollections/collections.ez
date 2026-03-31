@@ -1,0 +1,226 @@
+// ============================================================================
+// COLLECTIONS - Data Structures Library for EZ Language (v2.0)
+// Modernized using Model system and inclusive loops
+// ============================================================================
+
+model Set {
+    init() {
+        self.data = {}
+    }
+    
+    task add(val) {
+        self.data[str(val)] = val
+        give self
+    }
+    
+    task has(val) {
+        give str(val) in self.data
+    }
+    
+    task remove(val) {
+        dictRemove(self.data, str(val))
+        give self
+    }
+    
+    task size() {
+        give self.data.len
+    }
+    
+    task clear() {
+        self.data = {}
+        give self
+    }
+    
+    task toArray() {
+        arr = []
+        get k in self.data {
+            push(arr, self.data[k])
+        }
+        give arr
+    }
+    
+    task print() {
+        out "Set{" + join(self.toArray(), ", ") + "}"
+    }
+}
+
+model Map {
+    init() {
+        self.data = {}
+    }
+    
+    task set(key, val) {
+        self.data[str(key)] = val
+        give self
+    }
+    
+    task get(key) {
+        give self.data[str(key)]
+    }
+    
+    task has(key) {
+        give str(key) in self.data
+    }
+    
+    task remove(key) {
+        dictRemove(self.data, str(key))
+        give self
+    }
+    
+    task size() {
+        give self.data.len
+    }
+    
+    task keys() {
+        ks = []
+        get k in self.data { push(ks, k) }
+        give ks
+    }
+    
+    task values() {
+        vs = []
+        get k in self.data { push(vs, self.data[k]) }
+        give vs
+    }
+}
+
+model Queue {
+    init() {
+        self.items = []
+    }
+    
+    task enqueue(val) {
+        push(self.items, val)
+        give self
+    }
+    
+    task dequeue() {
+        when self.items.len == 0 { give nil }
+        val = self.items[0]
+        newItems = []
+        when self.items.len > 1 {
+            repeat i = 1 to self.items.len - 1 {
+                push(newItems, self.items[i])
+            }
+        }
+        self.items = newItems
+        give val
+    }
+    
+    task peek() {
+        when self.items.len == 0 { give nil }
+        give self.items[0]
+    }
+    
+    task isEmpty() { give self.items.len == 0 }
+    task size() { give self.items.len }
+    
+    task print() {
+        out "Queue[" + join(self.items, " <- ") + "]"
+    }
+}
+
+model Stack {
+    init() {
+        self.items = []
+    }
+    
+    task push(val) {
+        push(self.items, val)
+        give self
+    }
+    
+    task pop() {
+        when self.items.len == 0 { give nil }
+        give pop(self.items)
+    }
+    
+    task peek() {
+        when self.items.len == 0 { give nil }
+        give self.items[self.items.len - 1]
+    }
+    
+    task isEmpty() { give self.items.len == 0 }
+    task size() { give self.items.len }
+}
+
+model List {
+    init() {
+        self.items = []
+    }
+    
+    task append(val) { 
+        push(self.items, val)
+        give self 
+    }
+    
+    task prepend(val) {
+        newItems = [val]
+        get it in self.items { push(newItems, it) }
+        self.items = newItems
+        give self
+    }
+    
+    task get(index) {
+        when index < 0 or index >= self.items.len { give nil }
+        give self.items[index]
+    }
+    
+    task remove(index) {
+        when index < 0 or index >= self.items.len { give self }
+        newPoints = []
+        repeat i = 0 to self.items.len - 1 {
+            when i != index { push(newPoints, self.items[i]) }
+        }
+        self.items = newPoints
+        give self
+    }
+    
+    task reverse() {
+        reversed = []
+        when self.items.len > 0 {
+            repeat i = self.items.len - 1 to 0 {
+                push(reversed, self.items[i])
+            }
+        }
+        self.items = reversed
+        give self
+    }
+    
+    task size() { give self.items.len }
+    task print() {
+        out "List[" + join(self.items, " -> ") + "]"
+    }
+}
+
+model Counter {
+    init() {
+        self.counts = {}
+    }
+    
+    task add(item) {
+        key = str(item)
+        when key in self.counts {
+            self.counts[key] = self.counts[key] + 1
+        } other {
+            self.counts[key] = 1
+        }
+        give self
+    }
+    
+    task get(item) {
+        key = str(item)
+        when key in self.counts { give self.counts[key] }
+        give 0
+    }
+    
+    task print() {
+        entries = []
+        get k in self.counts {
+            push(entries, k + ": " + str(self.counts[k]))
+        }
+        out "Counter{" + join(entries, ", ") + "}"
+    }
+}
+
+

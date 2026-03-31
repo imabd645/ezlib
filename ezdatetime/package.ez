@@ -1,0 +1,12 @@
+{
+  "name": "datetime",
+  "version": "1.0.0",
+  "description": "Date and Time library for EZ Language. Provides timestamp manipulation, formatting, and arithmetic.",
+  "author": "Abdullah Masood",
+  "main": "datetime.ez",
+  "repository": "https://github.com/imabd645/EZ",
+  "keywords": ["date", "time", "datetime"],
+  "license": "MIT",
+  "dependencies": {}
+}
+

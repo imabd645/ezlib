@@ -1,0 +1,10 @@
+{
+    "name": "os",
+    "version": "1.0.0",
+    "description": "Comprehensive System Utilities, Process Management, and Environment API for EZ Language",
+    "author": "EZ Development Team",
+    "main": "main.ez",
+    "dependencies": {
+        "fs": "*"
+    }
+}

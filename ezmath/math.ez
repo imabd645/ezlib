@@ -1,0 +1,145 @@
+// ============================================================================
+// MATH - Mathematical Utilities and Vector Library for EZ (v2.0)
+// Modernized using Model system and native built-ins
+// ============================================================================
+
+// --- Constants ---
+task PI() { give 3.141592653589793 }
+task E()  { give 2.718281828459045 }
+
+// --- Conversion ---
+task degToRad(d) { give d * (PI() / 180.0) }
+task radToDeg(r) { give r * (180.0 / PI()) }
+
+// --- Utilities (Leveraging Built-ins) ---
+// Note: sqrt, pow, abs, floor, ceil are built-ins in EZ
+
+// --- Trigonometry (Taylor Series Approximations) ---
+task factorial(n) {
+    when n <= 1 { give 1 }
+    give n * factorial(n - 1)
+}
+
+task cos(x) {
+    // Normalize to [-PI, PI]
+    p2 = 2 * PI()
+    while x > PI() { x = x - p2 }
+    while x < -PI() { x = x + p2 }
+    
+    // Taylor series (6 terms)
+    res = 1.0
+    term = 1.0
+    sign = -1.0
+    repeat n = 1 to 6 {
+        exp = 2 * n
+        term = term * x * x / ((exp - 1) * exp)
+        res = res + sign * term
+        sign = sign * -1.0
+    }
+    give res
+}
+
+task sin(x) { give cos(PI() / 2.0 - x) }
+task tan(x) {
+    c = cos(x)
+    when abs(c) < 0.0000001 { throw "Division by zero in tan()" }
+    give sin(x) / c
+}
+
+// Degrees versions
+task cosd(d) { give cos(degToRad(d)) }
+task sind(d) { give sin(degToRad(d)) }
+task tand(d) { give tan(degToRad(d)) }
+
+// --- Models ---
+
+model Vector2 {
+    init(x, y) {
+        self.x = x
+        self.y = y
+    }
+
+    task length() { give sqrt(self.x * self.x + self.y * self.y) }
+    
+    task normalize() {
+        len = self.length()
+        when len > 0 {
+            self.x = self.x / len
+            self.y = self.y / len
+        }
+        give self
+    }
+
+    task dot(v) {
+        give self.x * v.x + self.y * v.y
+    }
+    
+    task print() {
+        out "Vec2(" + str(self.x) + ", " + str(self.y) + ")"
+    }
+}
+
+model Vector3 {
+    init(x, y, z) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+
+    task length() { give sqrt(self.x * self.x + self.y * self.y + self.z * self.z) }
+
+    task normalize() {
+        len = self.length()
+        when len > 0 {
+            self.x = self.x / len
+            self.y = self.y / len
+            self.z = self.z / len
+        }
+        give self
+    }
+
+    task dot(v) {
+        give self.x * v.x + self.y * v.y + self.z * v.z
+    }
+    
+    task print() {
+        out "Vec3(" + str(self.x) + ", " + str(self.y) + ", " + str(self.z) + ")"
+    }
+}
+
+model Statistics {
+    init(data) {
+        self.data = data
+    }
+
+    task mean() {
+        when self.data.len == 0 { give 0 }
+        sum = 0
+        get v in self.data { sum = sum + v }
+        give sum / self.data.len
+    }
+
+    task variance() {
+        when self.data.len == 0 { give 0 }
+        avg = self.mean()
+        sumSq = 0
+        get v in self.data {
+            d = v - avg
+            sumSq = sumSq + d * d
+        }
+        give sumSq / self.data.len
+    }
+
+    task stddev() { give sqrt(self.variance()) }
+}
+
+// --- Helpers ---
+task clamp(v, minV, maxV) {
+    when v < minV { give minV }
+    when v > maxV { give maxV }
+    give v
+}
+
+task lerp(a, b, t) {
+    give a + (b - a) * clamp(t, 0, 1)
+}

@@ -1,0 +1,8 @@
+{
+    "name": "fs",
+    "version": "1.2.0",
+    "description": "File handling for EZ",
+    "author": "Abdullah Masood",
+    "main": "fs.ez",
+    "dependencies": {}
+}

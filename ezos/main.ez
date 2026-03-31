@@ -1,0 +1,106 @@
+# ============================================================================
+# OS - Comprehensive System Utilities Library for EZ
+# Strict OOP Model architecture including .env loading and process management
+# ============================================================================
+
+use "fs"
+
+__native_readFile = readFile
+__native_writeFile = writeFile
+
+model OSEnv {
+    task get(key) { give os_get_env(key) }
+    task set(key, val) { os_set_env(key, str(val)) }
+    
+    # Powerful pure-EZ .env parser
+    task load(path) {
+        when not path { path = ".env" }
+        when not fs.exists(path) { give false }
+        
+        content = __native_readFile(path)
+        lines = split(content, "\n")
+        get line in lines {
+            # Basic trimming (could be replaced with a robust strTrim if available)
+            when line != "" and line[0] != "#" {
+                parts = split(line, "=")
+                when parts.len >= 2 {
+                    k = parts[0]
+                    v = parts[1]
+                    
+                    when parts.len > 2 {
+                        repeat i = 2 to parts.len - 1 {
+                            v = v + "=" + parts[i]
+                        }
+                    }
+                    
+                    # Remove potential \r on windows
+                    testV = split(v, "\r")
+                    when testV.len > 0 { v = testV[0] }
+                    
+                    self.set(k, v)
+                }
+            }
+        }
+        give true
+    }
+}
+
+model OSPath {
+    task join(p1, p2) { 
+        # Very basic path joining
+        give p1 + "\\" + p2 
+    }
+    task isAbsolute(p) {
+        when p.len >= 2 and p[1] == ":" { give true }
+        give false
+    }
+}
+
+model OSProcess {
+    task exec(cmd) { give os_exec(cmd) }
+    task system(cmd) { give os_system(cmd) }
+    task exit(code) { os_exit(code) }
+}
+
+model OSClipboard {
+    task read() { give os_clipboard_read() }
+    task write(text) { give os_clipboard_write(str(text)) }
+    task clear() { give os_clipboard_write("") }
+}
+
+model OSShell {
+    task open(path) { give os_shell_open(path) }
+}
+
+# The Main OS Gateway
+model OS {
+    init() {
+        self.env = OSEnv()
+        self.path = OSPath()
+        self.process = OSProcess()
+        self.clipboard = OSClipboard()
+        self.shell = OSShell()
+    }
+    
+    # General Properties
+    task platform() { give os_platform() }
+    task uptime() { give os_uptime() }
+    task totalMemory() { give os_total_memory() }
+    task freeMemory() { give os_free_memory() }
+    
+    # Directory & Workspace
+    task cwd() { give os_cwd() }
+    task chdir(path) { give os_chdir(path) }
+    
+    # Common File Aliases (mapped to globals and fs module)
+    task readFile(p) { give __native_readFile(p) }
+    task writeFile(p, data) { __native_writeFile(p, str(data)) }
+    task mkdir(p) { give fs.mkdir(p) }
+    task exists(p) { give fs.exists(p) }
+    task copyFile(s, d) { give fs.copy(s, d) }
+    task deleteFile(p) { give fs.remove(p) }
+    task listDir(p) { give fs.listDir(p) }
+}
+
+# Export exactly one global singleton object
+os = OS()
