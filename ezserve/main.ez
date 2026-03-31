@@ -1,0 +1,81 @@
+# ============================================================================
+# Serve - Native Web App Framework for EZ
+# Mimics Express.js / Flask leveraging the built-in multithreaded server()
+# ============================================================================
+
+use "json"
+use "fs"
+
+model App {
+    init() {
+        self.routes = {}
+        self.staticPaths = {}
+    }
+    
+    # Registering HTTP Methods
+    task get(path, handler) { self.routes["GET_" + path] = handler }
+    task post(path, handler) { self.routes["POST_" + path] = handler }
+    task put(path, handler) { self.routes["PUT_" + path] = handler }
+    task delete(path, handler) { self.routes["DELETE_" + path] = handler }
+    
+    # Static Directory routing
+    task serveStatic(routePrefix, targetDir) {
+        self.staticPaths[routePrefix] = targetDir
+    }
+    
+    # Start the server (Blocking)
+    task listen(port) {
+        out "🚀 EZ Web Framework listening on http://localhost:" + str(port)
+        
+        server(port, |req| {
+            routeKey = req.method + "_" + req.path
+            
+            # 1. Check for exactly mapped Routes
+            when has_key(self.routes, routeKey) {
+                result = self.routes[routeKey](req)
+                
+                # 1. If dictionary
+                when t == "dictionary" {
+                    when has_key(result, "status") {
+                        give result
+                    }
+                    give {
+                        "status": 200,
+                        "headers": { "Content-Type": "application/json" },
+                        "body": json.stringify(result)
+                    }
+                }
+                
+                # 2. If array
+                when t == "array" {
+                    give {
+                        "status": 200,
+                        "headers": { "Content-Type": "application/json" },
+                        "body": json.stringify(result)
+                    }
+                }
+                
+                # 3. standard fallback
+                give { "status": 200, "headers": { "Content-Type": "text/html" }, "body": str(result) }
+            }
+            
+            # 2. Check Static Files
+            k_list = keys(self.staticPaths)
+            get k in k_list {
+                when startsWith(req.path, k) {
+                    filePath = self.staticPaths[k] + "/" + substr(req.path, len(k), len(req.path))
+                    when fs.exists(filePath) {
+                        give serveFile(filePath)
+                    }
+                }
+            }
+            
+            # 3. Handle 404 Formally
+            give { 
+                "status": 404, 
+                "headers": { "Content-Type": "text/html" },
+                "body": "<h1>404 Not Found</h1><p>The route <strong>" + req.path + "</strong> does not exist on this EZ server.</p>" 
+            }
+        })
+    }
+}
