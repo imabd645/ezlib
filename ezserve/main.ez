@@ -3,7 +3,6 @@
 # Mimics Express.js / Flask leveraging the built-in multithreaded server()
 # ============================================================================
 
-use "json"
 use "fs"
 
 model App {
@@ -33,6 +32,7 @@ model App {
             # 1. Check for exactly mapped Routes
             when has_key(self.routes, routeKey) {
                 result = self.routes[routeKey](req)
+                t = type(result)
                 
                 # 1. If dictionary
                 when t == "dictionary" {
@@ -42,7 +42,7 @@ model App {
                     give {
                         "status": 200,
                         "headers": { "Content-Type": "application/json" },
-                        "body": json.stringify(result)
+                        "body": to_json(result)
                     }
                 }
                 
@@ -51,7 +51,7 @@ model App {
                     give {
                         "status": 200,
                         "headers": { "Content-Type": "application/json" },
-                        "body": json.stringify(result)
+                        "body": to_json(result)
                     }
                 }
                 
