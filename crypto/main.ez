@@ -1,0 +1,25 @@
+# ============================================================================
+# Crypto - Native Cryptography & Hashing Library for EZ Language
+# Uses wincrypt.h natively internally for incredible performance and safety
+# ============================================================================
+
+model Crypto {
+    # ------------------ Hashing ------------------
+    task hash(algo, text) { give crypto_hash(algo, text) }
+    
+    task sha256(text) { give crypto_hash("sha256", text) }
+    task md5(text) { give crypto_hash("md5", text) }
+    task sha1(text) { give crypto_hash("sha1", text) }
+    
+    # ------------------ Base64 -------------------
+    task base64Encode(text) { give crypto_base64_encode(str(text)) }
+    task base64Decode(text) { give crypto_base64_decode(str(text)) }
+    
+    # ------------- AES-256 Encryption ------------
+    # Automagically pads blocks and derives secure keys via PBKDF structure natively
+    task encrypt(text, secret) { give crypto_encrypt(str(text), str(secret)) }
+    task decrypt(cipherText, secret) { give crypto_decrypt(str(cipherText), str(secret)) }
+}
+
+# Provide exact singleton object for imports
+crypto = Crypto()
