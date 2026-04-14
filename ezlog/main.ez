@@ -44,9 +44,9 @@ model Logger {
         when len(ms) < 3 { ms = "0" + ms }
         when len(ms) < 3 { ms = "0" + ms }
 
-        remSec = int(secTotal % 60)
-        remMin = int((secTotal / 60) % 60)
-        remHr = int((secTotal / 3600) % 24)
+        remSec = floor(secTotal % 60)
+        remMin = floor((secTotal / 60) % 60)
+        remHr = floor((secTotal / 3600) % 24)
         
         # 2. Pad strings
         sh = str(remHr)
@@ -99,4 +99,4 @@ model Logger {
 
 # Default Singleton Instance
 log = Logger()
-log.init()
+
