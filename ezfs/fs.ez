@@ -11,5 +11,8 @@ fs = {
     "move": |src, dest| { give fs_move(src, dest) },
     "remove": |path| { give fs_remove(path) },
     "size": |path| { give fs_size(path) },
-    "modifiedTime": |path| { give fs_modified_time(path) }
+    "modifiedTime": |path| { give fs_modified_time(path) },
+    "readFile": |path| { give readFile(path) },
+    "writeFile": |path, content| { give writeFile(path, content) },
+    "appendFile": |path, content| { give appendFile(path, content) }
 }
