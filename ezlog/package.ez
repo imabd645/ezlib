@@ -1,0 +1,10 @@
+{
+    "name": "log",
+    "version": "1.0.0",
+    "description": "Advanced Logging Library with terminal colors and file sinking",
+    "author": "EZ Development Team",
+    "main": "main.ez",
+    "dependencies": {
+        "fs": "*"
+    }
+}

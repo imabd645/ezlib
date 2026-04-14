@@ -1,0 +1,102 @@
+# ============================================================================
+# Log - Advanced Logging Library for EZ
+# Pure EZ implementation utilizing native color() and clock() built-ins
+# ============================================================================
+
+use "fs"
+
+# Level Constants
+DEBUG = 0
+INFO = 1
+WARN = 2
+ERROR = 3
+FATAL = 4
+
+model Logger {
+    init() {
+        self.level = INFO
+        self.filePath = ""
+        self.showConsole = true
+        self.showTime = true
+        
+        # Windows Color Codes
+        # 8 = Gray (Debug), 10 = Green (Info), 14 = Yellow (Warn), 12 = Red (Error), 207 = Red/White (Fatal)
+        self.colors = {
+            "0": 8,   # DEBUG
+            "1": 10,  # INFO
+            "2": 14,  # WARN
+            "3": 12,  # ERROR
+            "4": 79   # FATAL (White on Red)
+        }
+    }
+    
+    task setLevel(l) { self.level = l }
+    task setFile(path) { self.filePath = path }
+    task enableConsole(b) { self.showConsole = b }
+    
+    # --- Time Formatting (Pure EZ) ---
+    task _formatTime() {
+        msTotal = clock()
+        
+        # 1. Extract raw units
+        secTotal = msTotal / 1000
+        ms = str(msTotal % 1000)
+        when len(ms) < 3 { ms = "0" + ms }
+        when len(ms) < 3 { ms = "0" + ms }
+
+        remSec = int(secTotal % 60)
+        remMin = int((secTotal / 60) % 60)
+        remHr = int((secTotal / 3600) % 24)
+        
+        # 2. Pad strings
+        sh = str(remHr)
+        when len(sh) < 2 { sh = "0" + sh }
+        sm = str(remMin)
+        when len(sm) < 2 { sm = "0" + sm }
+        ss = str(remSec)
+        when len(ss) < 2 { ss = "0" + ss }
+        
+        give sh + ":" + sm + ":" + ss + "." + ms
+    }
+    
+    # --- Core Logging Engine ---
+    task _log(l, msg) {
+        when l < self.level { give false }
+        
+        names = ["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
+        levelName = names[l]
+        
+        timePrefix = ""
+        when self.showTime {
+            timePrefix = "[" + self._formatTime() + "] "
+        }
+        
+        fullMsg = timePrefix + "[" + levelName + "] " + str(msg)
+        
+        # 1. Console Output
+        when self.showConsole {
+            colorCode = self.colors[str(l)]
+            color(colorCode)
+            out fullMsg
+            reset()
+        }
+        
+        # 2. File Output
+        when self.filePath != "" {
+            fs.appendFile(self.filePath, fullMsg + "\n")
+        }
+        
+        give true
+    }
+    
+    # --- Public API ---
+    task debug(msg) { self._log(DEBUG, msg) }
+    task info(msg) { self._log(INFO, msg) }
+    task warn(msg) { self._log(WARN, msg) }
+    task error(msg) { self._log(ERROR, msg) }
+    task fatal(msg) { self._log(FATAL, msg) }
+}
+
+# Default Singleton Instance
+log = Logger()
+log.init()
