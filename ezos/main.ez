@@ -1,41 +1,69 @@
 # ============================================================================
 # OS - Comprehensive System Utilities Library for EZ
-# Strict OOP Model architecture including .env loading and process management
+# Written 100% natively in pure EZ through FFI bindings using core structs
 # ============================================================================
 
-use "fs"
-
-__native_readFile = readFile
-__native_writeFile = writeFile
+model OSFFI {
+    static kernel32 = os_load_lib("Kernel32.dll")
+    static user32 = os_load_lib("User32.dll")
+    static msvcrt = os_load_lib("msvcrt.dll")
+    static shell32 = os_load_lib("shell32.dll")
+    
+    # Kernel32
+    static getTickCount64 = os_get_func(kernel32, "GetTickCount64")
+    static globalMemStatus = os_get_func(kernel32, "GlobalMemoryStatusEx")
+    static setEnv = os_get_func(kernel32, "SetEnvironmentVariableA")
+    static getCwd = os_get_func(kernel32, "GetCurrentDirectoryA")
+    static setCwd = os_get_func(kernel32, "SetCurrentDirectoryA")
+    static globalAlloc = os_get_func(kernel32, "GlobalAlloc")
+    static globalLock = os_get_func(kernel32, "GlobalLock")
+    static globalUnlock = os_get_func(kernel32, "GlobalUnlock")
+    
+    # MSVCRT
+    static getEnv = os_get_func(msvcrt, "getenv")
+    static system = os_get_func(msvcrt, "system")
+    static exitProc = os_get_func(msvcrt, "exit")
+    static popen = os_get_func(msvcrt, "_popen")
+    static pclose = os_get_func(msvcrt, "_pclose")
+    static fgets = os_get_func(msvcrt, "fgets")
+    static feof = os_get_func(msvcrt, "feof")
+    
+    # User32 (Clipboard CF_TEXT = 1)
+    static openClipboard = os_get_func(user32, "OpenClipboard")
+    static closeClipboard = os_get_func(user32, "CloseClipboard")
+    static emptyClipboard = os_get_func(user32, "EmptyClipboard")
+    static getClipboardData = os_get_func(user32, "GetClipboardData")
+    static setClipboardData = os_get_func(user32, "SetClipboardData")
+    
+    # Shell32 (SW_SHOWNORMAL = 1)
+    static shellExec = os_get_func(shell32, "ShellExecuteA")
+}
 
 model OSEnv {
-    task get(key) { give os_get_env(key) }
-    task set(key, val) { os_set_env(key, str(val)) }
+    task get(key) { give os_call(OSFFI.getEnv, "string", key) }
+    task set(key, val) { os_call(OSFFI.setEnv, "int", key, str(val)) }
     
-    # Powerful pure-EZ .env parser
     task load(path) {
         when not path { path = ".env" }
-        when not fs.exists(path) { give false }
+        when not fs_exists(path) { give false }
         
-        content = __native_readFile(path)
+        content = readFile(path)
         lines = split(content, "\n")
         get line in lines {
-            # Basic trimming (could be replaced with a robust strTrim if available)
-            when line != "" and line[0] != "#" {
+            when line != "" and substr(line, 0, 1) != "#" {
                 parts = split(line, "=")
-                when parts.len >= 2 {
+                when len(parts) >= 2 {
                     k = parts[0]
                     v = parts[1]
                     
-                    when parts.len > 2 {
-                        repeat i = 2 to parts.len - 1 {
+                    when len(parts) > 2 {
+                        repeat i = 2 to len(parts) - 1 {
                             v = v + "=" + parts[i]
                         }
                     }
                     
-                    # Remove potential \r on windows
                     testV = split(v, "\r")
-                    when testV.len > 0 { v = testV[0] }
+                    when len(testV) > 0 { v = testV[0] }
                     
                     self.set(k, v)
                 }
@@ -46,33 +74,79 @@ model OSEnv {
 }
 
 model OSPath {
-    task join(p1, p2) { 
-        # Very basic path joining
-        give p1 + "\\" + p2 
-    }
+    task join(p1, p2) { give p1 + "\\" + p2 }
     task isAbsolute(p) {
-        when p.len >= 2 and p[1] == ":" { give true }
+        when len(p) >= 2 and substr(p, 1, 1) == ":" { give true }
         give false
     }
 }
 
 model OSProcess {
-    task exec(cmd) { give os_exec(cmd) }
-    task system(cmd) { give os_system(cmd) }
-    task exit(code) { os_exit(code) }
+    task exec(cmd) { 
+        filePtr = os_call(OSFFI.popen, "ptr", cmd, "r")
+        when filePtr == 0 { give "" }
+        buf = os_alloc(512)
+        res = ""
+        while os_call(OSFFI.feof, "int", filePtr) == 0 {
+            charPtr = os_call(OSFFI.fgets, "ptr", buf, 512, filePtr)
+            when charPtr != 0 { res = res + os_read_string_ptr(charPtr) }
+        }
+        os_call(OSFFI.pclose, "int", filePtr)
+        os_free(buf)
+        give res
+    }
+    
+    task system(cmd) { give os_call(OSFFI.system, "int", cmd) }
+    task exit(code) { os_call(OSFFI.exitProc, "int", code) }
 }
 
 model OSClipboard {
-    task read() { give os_clipboard_read() }
-    task write(text) { give os_clipboard_write(str(text)) }
-    task clear() { give os_clipboard_write("") }
+    task read() { 
+        opened = os_call(OSFFI.openClipboard, "int", 0)
+        when opened == 0 { give "" }
+        hData = os_call(OSFFI.getClipboardData, "ptr", 1)  # CF_TEXT = 1
+        when hData == 0 {
+            os_call(OSFFI.closeClipboard, "int")
+            give ""
+        }
+        ptr = os_call(OSFFI.globalLock, "ptr", hData)
+        when ptr == 0 {
+            os_call(OSFFI.closeClipboard, "int")
+            give ""
+        }
+        text = os_read_string_ptr(ptr)
+        os_call(OSFFI.globalUnlock, "int", hData)
+        os_call(OSFFI.closeClipboard, "int")
+        give text
+    }
+    
+    task write(text) { 
+        textStr = str(text)
+        l = len(textStr)
+        hMem = os_call(OSFFI.globalAlloc, "ptr", 2, l + 1) # GMEM_MOVEABLE = 2
+        when hMem == 0 { give false }
+        ptr = os_call(OSFFI.globalLock, "ptr", hMem)
+        when ptr == 0 { give false }
+        
+        os_write_string(ptr, 0, textStr)
+        os_call(OSFFI.globalUnlock, "int", hMem)
+        
+        opened = os_call(OSFFI.openClipboard, "int", 0)
+        when opened == 0 { give false }
+        
+        os_call(OSFFI.emptyClipboard, "int")
+        os_call(OSFFI.setClipboardData, "ptr", 1, hMem)
+        os_call(OSFFI.closeClipboard, "int")
+        give true
+    }
+    
+    task clear() { give self.write("") }
 }
 
 model OSShell {
-    task open(path) { give os_shell_open(path) }
+    task open(path) { give os_call(OSFFI.shellExec, "int", 0, "open", path, 0, 0, 1) }
 }
 
-# The Main OS Gateway
 model OS {
     init() {
         self.env = OSEnv()
@@ -82,25 +156,37 @@ model OS {
         self.shell = OSShell()
     }
     
-    # General Properties
-    task platform() { give os_platform() }
-    task uptime() { give os_uptime() }
-    task totalMemory() { give os_total_memory() }
-    task freeMemory() { give os_free_memory() }
+    task platform() { give "windows" } # Tied purely to DLL implementations now
     
-    # Directory & Workspace
-    task cwd() { give os_cwd() }
-    task chdir(path) { give os_chdir(path) }
+    task uptime() { give os_call(OSFFI.getTickCount64, "int") / 1000.0 }
     
-    # Common File Aliases (mapped to globals and fs module)
-    task readFile(p) { give __native_readFile(p) }
-    task writeFile(p, data) { __native_writeFile(p, str(data)) }
-    task mkdir(p) { give fs.mkdir(p) }
-    task exists(p) { give fs.exists(p) }
-    task copyFile(s, d) { give fs.copy(s, d) }
-    task deleteFile(p) { give fs.remove(p) }
-    task listDir(p) { give fs.listDir(p) }
+    task totalMemory() { 
+        memInfo = os_alloc(64)
+        os_write_uint64(memInfo, 0, 64)
+        os_call(OSFFI.globalMemStatus, "int", memInfo)
+        total = os_read_uint64(memInfo, 8)
+        os_free(memInfo)
+        give total
+    }
+    
+    task freeMemory() { 
+        memInfo = os_alloc(64)
+        os_write_uint64(memInfo, 0, 64)
+        os_call(OSFFI.globalMemStatus, "int", memInfo)
+        avail = os_read_uint64(memInfo, 16)
+        os_free(memInfo)
+        give avail
+    }
+    
+    task cwd() { 
+        buf = os_alloc(1024)
+        os_call(OSFFI.getCwd, "int", 1024, buf)
+        res = os_read_string_ptr(buf)
+        os_free(buf)
+        give res
+    }
+    
+    task chdir(path) { give os_call(OSFFI.setCwd, "int", path) != 0 }
 }
 
-# Export exactly one global singleton object
 os = OS()
