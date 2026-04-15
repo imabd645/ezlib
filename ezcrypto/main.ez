@@ -81,10 +81,7 @@ model Base64 {
         
         # Process all guaranteed full 4-byte blocks sequentially
         while i < limit {
-            n = (indexOf(Base64.chars, substr(encoded, i, 1)) << 18) | 
-                (indexOf(Base64.chars, substr(encoded, i+1, 1)) << 12) | 
-                (indexOf(Base64.chars, substr(encoded, i+2, 1)) << 6) | 
-                indexOf(Base64.chars, substr(encoded, i+3, 1))
+            n = (indexOf(Base64.chars, substr(encoded, i, 1)) << 18) | (indexOf(Base64.chars, substr(encoded, i+1, 1)) << 12) | (indexOf(Base64.chars, substr(encoded, i+2, 1)) << 6) | indexOf(Base64.chars, substr(encoded, i+3, 1))
             
             b1 = (n >> 16) & 255
             b2 = (n >> 8) & 255
