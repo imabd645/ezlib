@@ -102,20 +102,19 @@ model App {
                     h = {}
                     
                     when t == "dictionary" {
-                        when has_key(result, "status") { 
-                            status = result["status"] 
-                            when has_key(result, "body") { 
-                                when type(result["body"]) == "dictionary" or type(result["body"]) == "array" {
-                                    b = to_json(result["body"])
-                                    h["Content-Type"] = "application/json"
-                                } other {
-                                    b = str(result["body"])
-                                }
+                        when has_key(result, "status") { status = result["status"] }
+                        
+                        when has_key(result, "body") { 
+                            when type(result["body"]) == "dictionary" or type(result["body"]) == "array" {
+                                b = to_json(result["body"])
+                                h["Content-Type"] = "application/json"
+                            } other {
+                                b = str(result["body"])
                             }
                             when has_key(result, "headers") { h = result["headers"] }
                         } other {
                             b = to_json(result)
-                            h = { "Content-Type": "application/json" }
+                            h["Content-Type"] = "application/json"
                         }
                     } other when t == "array" {
                         b = to_json(result)
