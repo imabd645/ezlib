@@ -21,6 +21,7 @@ model OSFFI {
     
     # MSVCRT
     static getEnv = os_get_func(__msv, "getenv")
+    static putEnv = os_get_func(__msv, "_putenv_s")
     static system = os_get_func(__msv, "system")
     static exitProc = os_get_func(__msv, "exit")
     static popen = os_get_func(__msv, "_popen")
@@ -41,7 +42,7 @@ model OSFFI {
 
 model OSEnv {
     task get(key) { give os_call(OSFFI.getEnv, "string", key) }
-    task set(key, val) { os_call(OSFFI.setEnv, "int", key, str(val)) }
+    task set(key, val) { os_call(OSFFI.putEnv, "int", key, str(val)) }
     
     task load(path) {
         when not path { path = ".env" }
