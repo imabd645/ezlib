@@ -3,40 +3,40 @@
 # Written 100% natively in pure EZ through FFI bindings using core structs
 # ============================================================================
 
+__k32 = os_load_lib("Kernel32.dll")
+__u32 = os_load_lib("User32.dll")
+__msv = os_load_lib("msvcrt.dll")
+__s32 = os_load_lib("shell32.dll")
+
 model OSFFI {
-    static kernel32 = os_load_lib("Kernel32.dll")
-    static user32 = os_load_lib("User32.dll")
-    static msvcrt = os_load_lib("msvcrt.dll")
-    static shell32 = os_load_lib("shell32.dll")
-    
     # Kernel32
-    static getTickCount64 = os_get_func(kernel32, "GetTickCount64")
-    static globalMemStatus = os_get_func(kernel32, "GlobalMemoryStatusEx")
-    static setEnv = os_get_func(kernel32, "SetEnvironmentVariableA")
-    static getCwd = os_get_func(kernel32, "GetCurrentDirectoryA")
-    static setCwd = os_get_func(kernel32, "SetCurrentDirectoryA")
-    static globalAlloc = os_get_func(kernel32, "GlobalAlloc")
-    static globalLock = os_get_func(kernel32, "GlobalLock")
-    static globalUnlock = os_get_func(kernel32, "GlobalUnlock")
+    static getTickCount64 = os_get_func(__k32, "GetTickCount64")
+    static globalMemStatus = os_get_func(__k32, "GlobalMemoryStatusEx")
+    static setEnv = os_get_func(__k32, "SetEnvironmentVariableA")
+    static getCwd = os_get_func(__k32, "GetCurrentDirectoryA")
+    static setCwd = os_get_func(__k32, "SetCurrentDirectoryA")
+    static globalAlloc = os_get_func(__k32, "GlobalAlloc")
+    static globalLock = os_get_func(__k32, "GlobalLock")
+    static globalUnlock = os_get_func(__k32, "GlobalUnlock")
     
     # MSVCRT
-    static getEnv = os_get_func(msvcrt, "getenv")
-    static system = os_get_func(msvcrt, "system")
-    static exitProc = os_get_func(msvcrt, "exit")
-    static popen = os_get_func(msvcrt, "_popen")
-    static pclose = os_get_func(msvcrt, "_pclose")
-    static fgets = os_get_func(msvcrt, "fgets")
-    static feof = os_get_func(msvcrt, "feof")
+    static getEnv = os_get_func(__msv, "getenv")
+    static system = os_get_func(__msv, "system")
+    static exitProc = os_get_func(__msv, "exit")
+    static popen = os_get_func(__msv, "_popen")
+    static pclose = os_get_func(__msv, "_pclose")
+    static fgets = os_get_func(__msv, "fgets")
+    static feof = os_get_func(__msv, "feof")
     
     # User32 (Clipboard CF_TEXT = 1)
-    static openClipboard = os_get_func(user32, "OpenClipboard")
-    static closeClipboard = os_get_func(user32, "CloseClipboard")
-    static emptyClipboard = os_get_func(user32, "EmptyClipboard")
-    static getClipboardData = os_get_func(user32, "GetClipboardData")
-    static setClipboardData = os_get_func(user32, "SetClipboardData")
+    static openClipboard = os_get_func(__u32, "OpenClipboard")
+    static closeClipboard = os_get_func(__u32, "CloseClipboard")
+    static emptyClipboard = os_get_func(__u32, "EmptyClipboard")
+    static getClipboardData = os_get_func(__u32, "GetClipboardData")
+    static setClipboardData = os_get_func(__u32, "SetClipboardData")
     
     # Shell32 (SW_SHOWNORMAL = 1)
-    static shellExec = os_get_func(shell32, "ShellExecuteA")
+    static shellExec = os_get_func(__s32, "ShellExecuteA")
 }
 
 model OSEnv {
