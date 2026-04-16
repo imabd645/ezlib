@@ -53,7 +53,7 @@ fs = {
             }
             
             res = os_call(FSFFI.findNextFile, "int", hFind, buf)
-            when res == 0 { break }
+            when res == 0 { escape }
         }
         
         os_call(FSFFI.findClose, "int", hFind)
