@@ -1,0 +1,472 @@
+{
+  "registry": "ezlib",
+  "maintainer": "imabd645",
+  "registry_version": "2.0.0",
+  "updated": "2026-04-18",
+  "repository": "https://github.com/imabd645/ezlib",
+  "base_archive_url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+  "packages": [
+    {
+      "name": "ai",
+      "folder": "ezai",
+      "description": "Unified AI SDK for EZ — supports OpenAI, Anthropic (Claude), DeepSeek, and Gemini with single-line calls, auto provider detection by API key prefix, and full multi-turn chat sessions",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["ai", "openai", "anthropic", "claude", "gemini", "deepseek", "llm", "chat"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.1",
+      "versions": [
+        {
+          "version": "1.0.1",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezai",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "ask", "ask_with_system",
+            "openai", "openai_model", "openai_full",
+            "anthropic", "anthropic_model", "anthropic_full",
+            "deepseek", "deepseek_model", "deepseek_full",
+            "gemini", "gemini_model", "gemini_full",
+            "new_chat", "new_chat_with_system", "chat_send", "chat_set_model"
+          ]
+        },
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezai",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "collections",
+      "folder": "ezcollections",
+      "description": "Classical data structures for EZ — Set, Map, Queue, Stack, List, and Counter with full OOP interface and method chaining",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["data-structures", "set", "map", "queue", "stack", "linkedlist", "counter"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "collections.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezcollections",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["Set", "Map", "Queue", "Stack", "List", "Counter"]
+        }
+      ]
+    },
+    {
+      "name": "crypto",
+      "folder": "ezcrypto",
+      "description": "Cryptography library for EZ — Base64 encoder/decoder, RC4 stream cipher, and Crypto facade. Built entirely on native EZ bitwise operations with no external dependencies",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["crypto", "encryption", "base64", "rc4", "cipher", "security", "bitwise"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezcrypto",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["Base64", "RC4", "Crypto"]
+        }
+      ]
+    },
+    {
+      "name": "datetime",
+      "folder": "ezdatetime",
+      "description": "Full Gregorian calendar implementation from Unix timestamps — date decomposition, timestamp construction, formatting, arithmetic and diff utilities. Zero external dependencies, pure EZ math",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["date", "time", "datetime", "calendar", "timestamp", "formatting"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "2.0.0",
+      "versions": [
+        {
+          "version": "2.0.0",
+          "main": "datetime.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezdatetime",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "now", "getComponents", "makeTimestamp",
+            "format", "dateStr", "timeStr",
+            "addTime", "diffMs", "diffDays",
+            "dateTime", "dateNow", "timeNow",
+            "isLeap", "daysInMonth", "padZero", "floorDiv"
+          ]
+        },
+        {
+          "version": "1.0.0",
+          "main": "datetime.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezdatetime",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "db",
+      "folder": "ezdb",
+      "description": "Modern SQLite wrapper for EZ — Database model with connect/disconnect lifecycle, parameterized queries, CRUD helpers (insert/update/delete/query/queryOne), transactions, and a global openDatabase factory",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["database", "sqlite", "crud", "query", "sql", "transaction", "parameterized"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "db.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezdb",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["Database", "openDatabase"]
+        }
+      ]
+    },
+    {
+      "name": "fs",
+      "folder": "ezfs",
+      "description": "Native filesystem library for EZ — fully decoupled from C++ std::filesystem, built directly on Kernel32 FFI. Provides mkdir, exists, isDir, listDir, copy, move, delete, readFile, writeFile, appendFile",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["filesystem", "files", "io", "directory", "ffi", "kernel32"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.2.0",
+      "versions": [
+        {
+          "version": "1.2.0",
+          "main": "fs.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezfs",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["fs", "FSFFI"]
+        },
+        {
+          "version": "1.0.0",
+          "main": "fs.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezfs",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "game",
+      "folder": "ezgame",
+      "description": "High-level GUI game engine for EZ — wraps native GDI drawing and Win32 timers for real-time game development with configurable FPS update/draw loop, keyboard input (KEYS constants), rect/circle/text drawing primitives",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["game", "gui", "gdi", "graphics", "engine", "loop", "keyboard", "input"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezgame",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["GUIGame", "createGame", "KEYS"]
+        }
+      ]
+    },
+    {
+      "name": "gui",
+      "folder": "ezgui",
+      "description": "Native Win32 GUI framework for EZ — full OOP widget hierarchy (Window, Panel, Button, Input, Label, Dropdown, Checkbox, Radio, Slider, ProgressBar, ListView, TreeView, DatePicker, Spinner, Image, Tabs, ScrollPanel) with VBox and Grid layout managers, theming (neon/retro/ocean), dialogs, and fluent method chaining",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["gui", "win32", "desktop", "widgets", "window", "layout", "ui", "theme"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "4.0.0",
+      "versions": [
+        {
+          "version": "4.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezgui",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "gui", "Widget", "Window", "Panel", "ScrollPanel",
+            "Label", "Button", "Input", "Dropdown", "Checkbox",
+            "Radio", "Slider", "ProgressBar", "ListView", "TreeView",
+            "DatePicker", "Spinner", "Image", "Tabs", "VBox", "Grid"
+          ]
+        },
+        {
+          "version": "3.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezgui",
+          "sha256": "",
+          "dependencies": {}
+        },
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezgui",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "http",
+      "folder": "ezhttp",
+      "description": "Production-ready HTTP client for EZ — Request/Response models, all HTTP methods (GET, POST, PUT, DELETE, PATCH), query params, retries, timeouts, interceptors, file upload/download, async variants with callbacks, and URL utilities (buildUrl, parseQuery)",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["http", "client", "request", "rest", "api", "fetch", "async", "interceptor"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "2.0.0",
+      "versions": [
+        {
+          "version": "2.0.0",
+          "main": "http.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezhttp",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "http", "HTTPClient", "HTTPRequest", "HTTPResponse",
+            "httpGet", "httpPost", "httpPut", "httpDelete", "httpPatch",
+            "asyncGet", "asyncPost", "buildUrl", "parseQuery"
+          ]
+        },
+        {
+          "version": "1.0.0",
+          "main": "http.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezhttp",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "log",
+      "folder": "ezlog",
+      "description": "Advanced logging library for EZ — colored terminal output via native Win32 console colors, file sinking via fs, configurable log levels (DEBUG/INFO/WARN/ERROR/FATAL), timestamps, and a ready-to-use global singleton logger",
+      "author": "EZ Development Team",
+      "license": "MIT",
+      "keywords": ["logging", "log", "debug", "console", "file", "colors", "levels", "sink"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezlog",
+          "sha256": "",
+          "dependencies": {
+            "fs": "*"
+          },
+          "exports": ["Logger", "log", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"]
+        }
+      ]
+    },
+    {
+      "name": "math",
+      "folder": "ezmath",
+      "description": "Mathematical utilities and vector library for EZ — PI/E constants, trig functions (sin/cos/tan via Taylor series), degree/radian conversion, Vector2, Vector3, Statistics model, and helpers including clamp and lerp",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["math", "trigonometry", "vector", "statistics", "geometry", "numeric", "taylor"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "math.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezmath",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "PI", "E",
+            "sin", "cos", "tan",
+            "sind", "cosd", "tand",
+            "degToRad", "radToDeg", "factorial",
+            "clamp", "lerp",
+            "Vector2", "Vector3", "Statistics"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "orm",
+      "folder": "ezorm",
+      "description": "Active-Record style ORM for EZ — Database and Table models with auto schema creation (CREATE TABLE IF NOT EXISTS), full CRUD (insert/find/findOne/findById/update/delete/deleteWhere/all/count), and transaction support over SQLite",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["orm", "sqlite", "database", "active-record", "crud", "schema", "migration"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.2.0",
+      "versions": [
+        {
+          "version": "1.2.0",
+          "main": "orm.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezorm",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["Database", "Table"]
+        },
+        {
+          "version": "1.0.0",
+          "main": "orm.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezorm",
+          "sha256": "",
+          "dependencies": {}
+        }
+      ]
+    },
+    {
+      "name": "os",
+      "folder": "ezos",
+      "description": "Comprehensive OS utilities for EZ — pure FFI bindings to Kernel32, User32, Shell32 and MSVCRT with no C++ builtins. Covers env vars, .env file parsing, process execution via popen, clipboard read/write via GlobalAlloc, shell open, memory stats, and CWD management. Exports singleton os object",
+      "author": "EZ Development Team",
+      "license": "MIT",
+      "keywords": ["os", "system", "environment", "process", "clipboard", "ffi", "kernel32", "shell"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezos",
+          "sha256": "",
+          "dependencies": {
+            "fs": "*"
+          },
+          "exports": ["os", "OS", "OSEnv", "OSPath", "OSProcess", "OSClipboard", "OSShell", "OSFFI"]
+        }
+      ]
+    },
+    {
+      "name": "pdf",
+      "folder": "ezpdf",
+      "description": "PDF generation library for EZ — fluent OOP API wrapping native pdf_ builtins. Create multi-page A4 PDFs with text, lines, document headers, and table helpers (tableHeader, tableRow)",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["pdf", "document", "report", "table", "generation", "a4"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezpdf",
+          "sha256": "",
+          "dependencies": {},
+          "exports": ["PDF"]
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "folder": "ezregex",
+      "description": "Comprehensive regex library for EZ — OOP Regex model, global functions (reTest, reExec, reSplit, reEscape), and a full validation suite: isEmail, isPhone, isPhoneIntl, isUrl, isIpv4, isDigit, isAlpha, isAlphanumeric, isWhitespace, isDateIso, isUuid, isHexColor, isCreditCard",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["regex", "pattern", "match", "validation", "search", "replace", "email", "url", "uuid"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "regex.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezregex",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "Regex",
+            "reTest", "reExec", "reSplit", "reEscape",
+            "isEmail", "isPhone", "isPhoneIntl", "isUrl",
+            "isIpv4", "isDigit", "isAlpha", "isAlphanumeric",
+            "isWhitespace", "isDateIso", "isUuid", "isHexColor", "isCreditCard"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "serve",
+      "folder": "ezserve",
+      "description": "Flask/Express style web framework for EZ — production-hardened HTTP server via raw Winsock2 FFI with zero C++ networking dependencies. Features: Slowloris protection (5s SO_RCVTIMEO), backpressure limits (1024 connections), 10MB payload cap, RFC-compliant CRLF header parsing, case-insensitive headers, URL decode, form body parsing, static file serving with MIME detection, per-request spawn threading, and full HTTP status map including 418",
+      "author": "EZ Development Team",
+      "license": "MIT",
+      "keywords": ["web", "server", "http", "framework", "rest", "api", "winsock", "ffi", "routing", "ddos"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezserve",
+          "sha256": "",
+          "dependencies": {
+            "fs": "*"
+          },
+          "exports": ["App", "NetFFI", "NetUtils"]
+        }
+      ]
+    },
+    {
+      "name": "test",
+      "folder": "eztest",
+      "description": "Production-ready unit testing framework for EZ — 15 assertion functions (assert, assertEqual, assertDeepEqual, assertThrows, assertDoesNotThrow, assertType, assertApproxEqual, assertGreaterThan, assertLessThan, assertContains, assertInArray, etc.), test suites with before/after hooks, Spy/Mock system, and colored terminal reporting",
+      "author": "Abdullah Masood",
+      "license": "MIT",
+      "keywords": ["testing", "test", "assert", "unit-test", "mock", "spy", "tdd", "suite", "hooks"],
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "test.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "eztest",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "Spy",
+            "assert", "assertFalse",
+            "assertEqual", "assertDeepEqual", "assertNotEqual",
+            "assertNull", "assertNotNull",
+            "assertType", "assertContains", "assertInArray",
+            "assertThrows", "assertDoesNotThrow",
+            "assertApproxEqual", "assertGreaterThan", "assertLessThan"
+          ]
+        }
+      ]
+    }
+  ]
+}
