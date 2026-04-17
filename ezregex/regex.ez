@@ -1,0 +1,479 @@
+# ============================================================================
+# EZ Regex Library (v1.0.0)
+# Comprehensive regular expression library for EZ Language
+# Wraps native reMatch, reSearch, reReplace with higher-level utilities
+# ============================================================================
+
+# --- Regex Model ---
+# Provides an object-oriented interface for compiled patterns
+model Regex {
+    # Initialize with a pattern string
+    init(pattern) {
+        self.pattern = pattern
+        self.flags = ""
+    }
+
+    # Test if text fully matches the pattern
+    # Returns: boolean
+    task match(text) {
+        give reMatch(text, self.pattern)
+    }
+
+    # Search for first match in text
+    # Returns: { matched: bool, groups: [], index: number }
+    task search(text) {
+        matches = reSearch(text, self.pattern)
+        when len(matches) > 0 {
+            give {
+                "matched": true,
+                "groups": matches,
+                "index": 0,
+                "text": matches[0]
+            }
+        }
+        give { "matched": false, "groups": [], "index": -1, "text": nil }
+    }
+
+    # Replace first occurrence
+    # Returns: new string with replacement
+    task replace(text, replacement) {
+        give reReplace(text, self.pattern, replacement)
+    }
+
+    # Replace all occurrences (simulated via loop)
+    # Returns: new string with all replacements
+    task replaceAll(text, replacement) {
+        result = text
+        prev = ""
+        attempts = 0
+        maxAttempts = 1000
+
+        while attempts < maxAttempts {
+            attempts = attempts + 1
+            newResult = reReplace(result, self.pattern, replacement)
+            when newResult == result {
+                break
+            }
+            result = newResult
+        }
+        give result
+    }
+
+    # Find all matches (non-overlapping)
+    # Returns: array of match objects
+    task findAll(text) {
+        results = []
+        remaining = text
+        offset = 0
+        maxMatches = 1000
+        matchCount = 0
+
+        while matchCount < maxMatches {
+            matchCount = matchCount + 1
+            m = reSearch(remaining, self.pattern)
+            when len(m) == 0 {
+                break
+            }
+            matchText = m[0]
+            matchLen = len(matchText)
+            matchIndex = indexOf(remaining, matchText)
+            when matchIndex == -1 {
+                break
+            }
+
+            push(results, {
+                "text": matchText,
+                "groups": m,
+                "index": offset + matchIndex
+            })
+
+            # Move past this match
+            remaining = substr(remaining, matchIndex + matchLen, len(remaining) - matchIndex - matchLen)
+            offset = offset + matchIndex + matchLen
+        }
+        give results
+    }
+
+    # Split text by pattern
+    # Returns: array of strings
+    task split(text) {
+        parts = []
+        remaining = text
+        maxSplits = 1000
+        splitCount = 0
+
+        while splitCount < maxSplits {
+            splitCount = splitCount + 1
+            m = reSearch(remaining, self.pattern)
+            when len(m) == 0 {
+                push(parts, remaining)
+                break
+            }
+            matchText = m[0]
+            matchIndex = indexOf(remaining, matchText)
+            when matchIndex == -1 {
+                push(parts, remaining)
+                break
+            }
+            # Add part before match
+            before = substr(remaining, 0, matchIndex)
+            push(parts, before)
+            # Move past match
+            remaining = substr(remaining, matchIndex + len(matchText), len(remaining) - matchIndex - len(matchText))
+        }
+        give parts
+    }
+
+    # Get pattern string
+    task getPattern() {
+        give self.pattern
+    }
+}
+
+# --- Global Convenience Functions ---
+
+# Quick test if pattern matches text
+# Returns: boolean
+task reTest(pattern, text) {
+    give reMatch(text, pattern)
+}
+
+# Execute search and return match info
+# Returns: { matched: bool, groups: [], text: string }
+task reExec(pattern, text) {
+    matches = reSearch(text, pattern)
+    when len(matches) > 0 {
+        give {
+            "matched": true,
+            "groups": matches,
+            "text": matches[0]
+        }
+    }
+    give { "matched": false, "groups": [], "text": nil }
+}
+
+# Split text by pattern (global function)
+task reSplit(pattern, text) {
+    r = Regex(pattern)
+    give r.split(text)
+}
+
+# Escape special regex characters in text
+task reEscape(text) {
+    special = ["\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"]
+    result = text
+    get char in special {
+        # Replace each special char with escaped version
+        esc = "\\" + char
+        result = reReplace(result, "\\" + char, esc)
+    }
+    give result
+}
+
+# --- Common Validation Patterns ---
+
+patterns = {
+    # Basic patterns
+    "DIGIT": "[0-9]",
+    "NUMBER": "-?[0-9]+(\\.[0-9]+)?",
+    "WORD": "[a-zA-Z_][a-zA-Z0-9_]*",
+    "WHITESPACE": "[ \\t\\n\\r]+",
+
+    # String patterns
+    "QUOTED_STRING": '"([^"\\\\]|\\\\.)*"',
+    "SINGLE_QUOTED": "'([^'\\\\]|\\\\.)*'",
+
+    # Contact/Identity
+    "EMAIL": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",
+    "PHONE_US": "\\(?[0-9]{3}\\)?[-.\\s]?[0-9]{3}[-.\\s]?[0-9]{4}",
+    "PHONE_INTL": "\\+[0-9]{1,3}[ -.\\s]?[0-9]{1,14}",
+
+    # Network
+    "URL": "https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/[^\\s]*)?",
+    "IPV4": "([0-9]{1,3}\\.){3}[0-9]{1,3}",
+    "DOMAIN": "[a-zA-Z0-9][a-zA-Z0-9-]*(\\.[a-zA-Z0-9][a-zA-Z0-9-]*)+",
+
+    # Date/Time
+    "DATE_ISO": "[0-9]{4}-[0-9]{2}-[0-9]{2}",
+    "TIME_24H": "[0-9]{2}:[0-9]{2}(:[0-9]{2})?",
+    "TIME_12H": "[0-9]{1,2}:[0-9]{2}\\s?(AM|PM|am|pm)",
+    "DATETIME_ISO": "[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}",
+
+    # Codes/IDs
+    "HEX_COLOR": "#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?",
+    "UUID": "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+    "CREDIT_CARD": "[0-9]{4}[-\\s]?[0-9]{4}[-\\s]?[0-9]{4}[-\\s]?[0-9]{4}",
+    "SSN": "[0-9]{3}-[0-9]{2}-[0-9]{4}",
+
+    # Content
+    "HTML_TAG": "<[^>]+>",
+    "HTML_COMMENT": "<!--[\\s\\S]*?-->",
+    "MARKDOWN_LINK": "\\[([^\\]]+)\\]\\(([^)]+)\\)",
+    "MENTION": "@[a-zA-Z0-9_]+",
+    "HASHTAG": "#[a-zA-Z0-9_]+",
+
+    # File paths
+    "FILENAME": "[^\\\\/:*?\"<>|\\r\\n]+\\.[a-zA-Z0-9]{1,10}",
+    "FILEPATH_WIN": "[a-zA-Z]:\\\\([^\\\\:*?\"<>|\\r\\n]+\\\\)*[^\\\\:*?\"<>|\\r\\n]*",
+    "FILEPATH_UNIX": "/([^/]+/)*[^/]*"
+}
+
+# --- Validation Functions ---
+
+# Check if text is a valid email
+task isEmail(text) {
+    give reMatch(text, "^" + patterns["EMAIL"] + "$")
+}
+
+# Check if text is a valid US phone number
+task isPhone(text) {
+    give reMatch(text, "^" + patterns["PHONE_US"] + "$")
+}
+
+# Check if text is a valid international phone
+task isPhoneIntl(text) {
+    give reMatch(text, "^" + patterns["PHONE_INTL"] + "$")
+}
+
+# Check if text is a valid URL
+task isUrl(text) {
+    give reMatch(text, "^" + patterns["URL"] + "$")
+}
+
+# Check if text is a valid IPv4 address
+task isIpv4(text) {
+    give reMatch(text, "^" + patterns["IPV4"] + "$")
+}
+
+# Check if text is only digits
+task isDigit(text) {
+    give reMatch(text, "^[0-9]+$")
+}
+
+# Check if text is alphabetic only
+task isAlpha(text) {
+    give reMatch(text, "^[a-zA-Z]+$")
+}
+
+# Check if text is alphanumeric
+task isAlphanumeric(text) {
+    give reMatch(text, "^[a-zA-Z0-9]+$")
+}
+
+# Check if text is whitespace only
+task isWhitespace(text) {
+    give reMatch(text, "^[ \\t\\n\\r]+$")
+}
+
+# Check if text is a valid date (ISO format)
+task isDateIso(text) {
+    give reMatch(text, "^" + patterns["DATE_ISO"] + "$")
+}
+
+# Check if text is a valid UUID
+task isUuid(text) {
+    give reMatch(text, "^" + patterns["UUID"] + "$")
+}
+
+# Check if text is a valid hex color
+task isHexColor(text) {
+    give reMatch(text, "^" + patterns["HEX_COLOR"] + "$")
+}
+
+# Check if text is a valid credit card number
+task isCreditCard(text) {
+    give reMatch(text, "^" + patterns["CREDIT_CARD"] + "$")
+}
+
+# --- Extraction Functions ---
+
+# Extract all emails from text
+# Returns: array of email strings
+task extractEmails(text) {
+    r = Regex(patterns["EMAIL"])
+    matches = r.findAll(text)
+    results = []
+    get m in matches {
+        push(results, m["text"])
+    }
+    give results
+}
+
+# Extract all URLs from text
+task extractUrls(text) {
+    r = Regex(patterns["URL"])
+    matches = r.findAll(text)
+    results = []
+    get m in matches {
+        push(results, m["text"])
+    }
+    give results
+}
+
+# Extract all phone numbers from text
+task extractPhones(text) {
+    results = []
+
+    # Try US format
+    r = Regex(patterns["PHONE_US"])
+    matches = r.findAll(text)
+    get m in matches {
+        push(results, m["text"])
+    }
+
+    # Try international format
+    r = Regex(patterns["PHONE_INTL"])
+    matches = r.findAll(text)
+    get m in matches {
+        push(results, m["text"])
+    }
+
+    give results
+}
+
+# Extract all hashtags from text
+task extractHashtags(text) {
+    r = Regex(patterns["HASHTAG"])
+    matches = r.findAll(text)
+    results = []
+    get m in matches {
+        push(results, m["text"])
+    }
+    give results
+}
+
+# Extract all mentions from text
+task extractMentions(text) {
+    r = Regex(patterns["MENTION"])
+    matches = r.findAll(text)
+    results = []
+    get m in matches {
+        # Remove the @ symbol
+        mention = substr(m["text"], 1, len(m["text"]) - 1)
+        push(results, mention)
+    }
+    give results
+}
+
+# Remove all HTML tags from text
+task stripHtml(text) {
+    r = Regex(patterns["HTML_TAG"])
+    give r.replaceAll(text, "")
+}
+
+# --- Advanced Utilities ---
+
+# Create a regex that matches any of the given strings (OR pattern)
+task reAny(strings) {
+    escaped = []
+    get s in strings {
+        push(escaped, reEscape(s))
+    }
+    give "(" + join(escaped, "|") + ")"
+}
+
+# Create a regex that matches a word boundary around a string
+task reWord(text) {
+    give "\\b" + reEscape(text) + "\\b"
+}
+
+# Create a case-insensitive pattern (by character class expansion)
+task reIgnoreCase(pattern) {
+    # Simple approach: wrap with character class variations
+    # This is a basic implementation - full case folding is complex
+    result = ""
+    i = 0
+    l = len(pattern)
+    while i < l {
+        c = substr(pattern, i, 1)
+        lowerC = lower(c)
+        upperC = upper(c)
+        when lowerC != upperC {
+            # Letter - create case-insensitive class
+            result = result + "[" + lowerC + upperC + "]"
+        } other {
+            result = result + c
+        }
+        i = i + 1
+    }
+    give result
+}
+
+# Check if text starts with pattern
+task reStartsWith(pattern, text) {
+    give reMatch(text, "^" + pattern + ".*")
+}
+
+# Check if text ends with pattern
+task reEndsWith(pattern, text) {
+    give reMatch(text, ".*" + pattern + "$")
+}
+
+# Count occurrences of pattern in text
+task reCount(pattern, text) {
+    r = Regex(pattern)
+    matches = r.findAll(text)
+    give len(matches)
+}
+
+# --- Main regex Object ---
+# Primary entry point for the library
+regex = {
+    # Pattern compilation
+    "compile": |p| { give Regex(p) },
+    "create": |p| { give Regex(p) },
+
+    # Quick operations
+    "test": |p, t| { give reTest(p, t) },
+    "exec": |p, t| { give reExec(p, t) },
+    "match": |p, t| { give reMatch(t, p) },
+    "search": |p, t| { give reSearch(t, p) },
+    "replace": |p, t, r| { give reReplace(t, p, r) },
+    "split": |p, t| { give reSplit(p, t) },
+    "escape": |t| { give reEscape(t) },
+
+    # Advanced utilities
+    "findAll": |p, t| {
+        r = Regex(p)
+        give r.findAll(t)
+    },
+    "replaceAll": |p, t, r| {
+        re = Regex(p)
+        give re.replaceAll(t, r)
+    },
+    "any": |s| { give reAny(s) },
+    "word": |t| { give reWord(t) },
+    "ignoreCase": |p| { give reIgnoreCase(p) },
+    "startsWith": |p, t| { give reStartsWith(p, t) },
+    "endsWith": |p, t| { give reEndsWith(p, t) },
+    "count": |p, t| { give reCount(p, t) },
+
+    # Patterns library
+    "patterns": patterns,
+
+    # Validators
+    "isEmail": |t| { give isEmail(t) },
+    "isPhone": |t| { give isPhone(t) },
+    "isPhoneIntl": |t| { give isPhoneIntl(t) },
+    "isUrl": |t| { give isUrl(t) },
+    "isIpv4": |t| { give isIpv4(t) },
+    "isDigit": |t| { give isDigit(t) },
+    "isAlpha": |t| { give isAlpha(t) },
+    "isAlphanumeric": |t| { give isAlphanumeric(t) },
+    "isWhitespace": |t| { give isWhitespace(t) },
+    "isDateIso": |t| { give isDateIso(t) },
+    "isUuid": |t| { give isUuid(t) },
+    "isHexColor": |t| { give isHexColor(t) },
+    "isCreditCard": |t| { give isCreditCard(t) },
+
+    # Extractors
+    "extractEmails": |t| { give extractEmails(t) },
+    "extractUrls": |t| { give extractUrls(t) },
+    "extractPhones": |t| { give extractPhones(t) },
+    "extractHashtags": |t| { give extractHashtags(t) },
+    "extractMentions": |t| { give extractMentions(t) },
+    "stripHtml": |t| { give stripHtml(t) }
+}
+
+# Also expose key functions globally for convenience
+re = regex
