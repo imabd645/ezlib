@@ -52,7 +52,7 @@ model Regex {
             attempts = attempts + 1
             newResult = reReplace(result, self.pattern, replacement)
             when newResult == result {
-                break
+                escape
             }
             result = newResult
         }
@@ -72,7 +72,7 @@ model Regex {
             matchCount = matchCount + 1
             m = reSearch(remaining, self.pattern)
             when len(m) == 0 {
-                break
+                escape
             }
             matchText = m[0]
             matchLen = len(matchText)
@@ -107,13 +107,13 @@ model Regex {
             m = reSearch(remaining, self.pattern)
             when len(m) == 0 {
                 push(parts, remaining)
-                break
+                escape
             }
             matchText = m[0]
             matchIndex = indexOf(remaining, matchText)
             when matchIndex == -1 {
                 push(parts, remaining)
-                break
+                escape
             }
             # Add part before match
             before = substr(remaining, 0, matchIndex)
