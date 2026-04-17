@@ -1,0 +1,11 @@
+{
+  "name": "test",
+  "version": "1.0.0",
+  "description": "Production-ready unit testing framework for EZ Language. Assertions, test suites, hooks, mocks, and colored reporting.",
+  "author": "Abdullah Masood",
+  "main": "test.ez",
+  "repository": "https://github.com/imabd645/EZ",
+  "keywords": ["testing", "test", "assert", "unit-test", "mock", "spy"],
+  "license": "MIT",
+  "dependencies": {}
+}
