@@ -1,0 +1,741 @@
+# ============================================================================
+# EZPM - Enhanced EZ Package Manager (v2.0)
+# Features: Remote index, version resolution, ez.lock, SHA verification,
+#           versioned directories, recursive deps
+# ============================================================================
+
+use "http"
+use "fs"
+
+# --- Configuration ---
+REGISTRY_URL = "https://raw.githubusercontent.com/imabd645/ezlib/main"
+EZLIB_DIR = "C:/ezlib"
+CACHE_DIR = EZLIB_DIR + "/.cache"
+
+# --- Models ---
+
+# Package Index Entry from remote registry
+model PackageIndex {
+    init(data) {
+        self.name = data["name"]
+        self.versions = data["versions"]  # Array of version objects
+        self.latest = data["latest"]      # Latest version string
+        self.repository = data["repository"]
+        self.description = has_key(data, "description") ? data["description"] : ""
+    }
+    
+    # Get specific version data
+    task getVersion(version) {
+        when version == "latest" {
+            version = self.latest
+        }
+        get v in self.versions {
+            when v["version"] == version {
+                give v
+            }
+        }
+        give nil
+    }
+    
+    # Check if version exists
+    task hasVersion(version) {
+        when version == "latest" {
+            give true
+        }
+        get v in self.versions {
+            when v["version"] == version {
+                give true
+            }
+        }
+        give false
+    }
+    
+    # Resolve version constraint (basic semver: ^1.0.0, ~1.0.0, >=1.0.0)
+    task resolveVersion(constraint) {
+        when constraint == nil or constraint == "" or constraint == "latest" {
+            give self.latest
+        }
+        
+        # Handle exact version
+        when self.hasVersion(constraint) {
+            give constraint
+        }
+        
+        # Handle caret (^) - compatible with major version
+        when indexOf(constraint, "^") == 0 {
+            baseVersion = substr(constraint, 1)
+            parts = split(baseVersion, ".")
+            major = int(parts[0])
+            
+            # Find highest version with same major
+            best = nil
+            get v in self.versions {
+                ver = v["version"]
+                verParts = split(ver, ".")
+                verMajor = int(verParts[0])
+                when verMajor == major {
+                    when best == nil or self.compareVersions(ver, best) > 0 {
+                        best = ver
+                    }
+                }
+            }
+            give best
+        }
+        
+        # Handle tilde (~) - compatible with minor version
+        when indexOf(constraint, "~") == 0 {
+            baseVersion = substr(constraint, 1)
+            parts = split(baseVersion, ".")
+            major = int(parts[0])
+            minor = int(parts[1])
+            
+            # Find highest version with same major.minor
+            best = nil
+            get v in self.versions {
+                ver = v["version"]
+                verParts = split(ver, ".")
+                verMajor = int(verParts[0])
+                verMinor = int(verParts[1])
+                when verMajor == major and verMinor == minor {
+                    when best == nil or self.compareVersions(ver, best) > 0 {
+                        best = ver
+                    }
+                }
+            }
+            give best
+        }
+        
+        # Handle >=, <=, >, < constraints
+        give self.resolveRangeConstraint(constraint)
+    }
+    
+    # Compare two version strings (1.2.3 vs 1.2.4)
+    task compareVersions(v1, v2) {
+        parts1 = split(v1, ".")
+        parts2 = split(v2, ".")
+        
+        i = 0
+        while true {
+            when i >= len(parts1) or i >= len(parts2) {
+                escape
+            }
+            
+            n1 = int(parts1[i])
+            n2 = int(parts2[i])
+            
+            when n1 > n2 { give 1 }
+            when n1 < n2 { give -1 }
+            
+            i = i + 1
+        }
+        
+        # If all parts equal, longer version wins
+        when len(parts1) > len(parts2) { give 1 }
+        when len(parts1) < len(parts2) { give -1 }
+        give 0
+    }
+    
+    # Handle range constraints like >=1.0.0, <2.0.0
+    task resolveRangeConstraint(constraint) {
+        # Simple implementation: just return latest for now
+        # Full implementation would parse complex ranges
+        give self.latest
+    }
+}
+
+# Resolved package from ez.lock
+model LockedPackage {
+    init(name, version, url, sha256) {
+        self.name = name
+        self.version = version
+        self.url = url
+        self.sha256 = sha256
+        self.installedPath = ""
+    }
+}
+
+# Installation record
+model InstallRecord {
+    init(name, version, source, path) {
+        self.name = name
+        self.version = version
+        self.source = source
+        self.path = path
+        self.dependencies = []
+        self.timestamp = now()
+    }
+}
+
+# --- Registry Operations ---
+
+# Fetch the package index from remote registry
+task fetchPackageIndex() {
+    indexUrl = REGISTRY_URL + "/index.json"
+    
+    try {
+        out "Fetching package index from " + indexUrl + "..."
+        response = http.get(indexUrl)
+        
+        when not response.ok {
+            throw "Failed to fetch index: HTTP " + str(response.statusCode)
+        }
+        
+        data = response.json()
+        give data
+        
+    } catch e {
+        throw "Failed to fetch package index: " + str(e)
+    }
+}
+
+# Get package info from index
+task getPackageFromIndex(index, packageName) {
+    get pkg in index["packages"] {
+        when pkg["name"] == packageName {
+            give PackageIndex(pkg)
+        }
+    }
+    give nil
+}
+
+# --- ez.lock Management ---
+
+task readLockFile() {
+    lockPath = "ez.lock"
+    
+    when not fs.exists(lockPath) {
+        give {}
+    }
+    
+    try {
+        content = fs.readFile(lockPath)
+        data = parse_json(content)
+        give data
+    } catch e {
+        give {}
+    }
+}
+
+task writeLockFile(resolvedPackages) {
+    lockPath = "ez.lock"
+    
+    lock = {}
+    lock["version"] = "1.0.0"
+    lock["packages"] = {}
+    lock["timestamp"] = str(now())
+    
+    get name in resolvedPackages {
+        pkg = resolvedPackages[name]
+        lock["packages"][name] = {
+            "version": pkg.version,
+            "url": pkg.url,
+            "sha256": pkg.sha256
+        }
+    }
+    
+    fs.writeFile(lockPath, to_json(lock))
+    out "Updated ez.lock"
+}
+
+# --- Package Resolution ---
+
+# Resolve package version (use lock file if available)
+task resolvePackage(name, constraint, index, lockData) {
+    # Check if locked
+    when has_key(lockData, name) {
+        locked = lockData[name]
+        out "Using locked version: " + name + "@" + locked["version"]
+        give LockedPackage(name, locked["version"], locked["url"], locked["sha256"])
+    }
+    
+    # Fetch from index
+    pkgIndex = getPackageFromIndex(index, name)
+    when pkgIndex == nil {
+        throw "Package '" + name + "' not found in registry"
+    }
+    
+    # Resolve version
+    version = pkgIndex.resolveVersion(constraint)
+    when version == nil {
+        throw "Cannot satisfy constraint '" + constraint + "' for package '" + name + "'"
+    }
+    
+    versionData = pkgIndex.getVersion(version)
+    
+    give LockedPackage(
+        name,
+        version,
+        versionData["url"],
+        has_key(versionData, "sha256") ? versionData["sha256"] : ""
+    )
+}
+
+# --- Installation ---
+
+# Check if package is already installed at exact version
+task isInstalled(name, version) {
+    versionPath = EZLIB_DIR + "/" + name + "/" + version
+    packageEzPath = versionPath + "/package.ez"
+    give fs.exists(packageEzPath)
+}
+
+# Get currently installed version of a package
+task getInstalledVersion(name) {
+    pkgDir = EZLIB_DIR + "/" + name
+    when not fs.exists(pkgDir) {
+        give nil
+    }
+    
+    # Read package.ez to get version
+    pkgEzPath = pkgDir + "/package.ez"
+    when fs.exists(pkgEzPath) {
+        try {
+            content = fs.readFile(pkgEzPath)
+            data = parse_json(content)
+            give has_key(data, "version") ? data["version"] : nil
+        } catch e {
+            give nil
+        }
+    }
+    give nil
+}
+
+# Download and verify package
+task downloadPackage(resolvedPkg) {
+    cacheFile = CACHE_DIR + "/" + resolvedPkg.name + "-" + resolvedPkg.version + ".zip"
+    
+    # Create cache directory
+    fs.createDir(CACHE_DIR)
+    
+    # Download if not cached
+    when not fs.exists(cacheFile) {
+        out "Downloading " + resolvedPkg.name + "@" + resolvedPkg.version + "..."
+        
+        try {
+            # Download using system curl
+            cmd = "curl -L -o \"" + cacheFile + "\" \"" + resolvedPkg.url + "\""
+            result = os.system(cmd)
+            
+            when result != 0 {
+                throw "Download failed with exit code " + str(result)
+            }
+            
+        } catch e {
+            throw "Download failed: " + str(e)
+        }
+    } other {
+        out "Using cached download"
+    }
+    
+    # Verify SHA256 if provided
+    when resolvedPkg.sha256 != "" {
+        out "Verifying checksum..."
+        
+        # Read file as buffer and calculate SHA256
+        fileBuffer = file_read_binary(cacheFile)
+        actualHash = crypto_hash(fileBuffer, "sha256")
+        
+        when lower(actualHash) != lower(resolvedPkg.sha256) {
+            fs.remove(cacheFile)  # Remove corrupted cache
+            throw "SHA256 checksum verification failed! Expected: " + resolvedPkg.sha256 + ", Got: " + actualHash
+        }
+        
+        out "Checksum verified ✓"
+    }
+    
+    give cacheFile
+}
+
+# Extract package to versioned directory
+task extractPackage(cacheFile, name, version) {
+    versionDir = EZLIB_DIR + "/" + name + "/" + version
+    
+    # Clean up if exists
+    when fs.exists(versionDir) {
+        fs.removeDir(versionDir, true)
+    }
+    
+    fs.createDir(versionDir)
+    
+    # Extract using tar (cross-platform)
+    tempExtract = CACHE_DIR + "/extract-" + name + "-" + version
+    
+    try {
+        # Extract to temp
+        fs.createDir(tempExtract)
+        cmd = "tar -xf \"" + cacheFile + "\" -C \"" + tempExtract + "\" --strip-components=1"
+        result = os.system(cmd)
+        
+        when result != 0 {
+            throw "Extraction failed"
+        }
+        
+        # Copy to version directory
+        fs.copyDir(tempExtract, versionDir)
+        
+        # Clean up temp
+        fs.removeDir(tempExtract, true)
+        
+    } catch e {
+        throw "Extraction failed: " + str(e)
+    }
+    
+    give versionDir
+}
+
+# Create symlink/alias for latest version
+task linkPackage(name, version) {
+    pkgDir = EZLIB_DIR + "/" + name
+    latestLink = pkgDir + "/latest"
+    versionPath = pkgDir + "/" + version
+    
+    # Remove old link
+    when fs.exists(latestLink) {
+        fs.remove(latestLink)
+    }
+    
+    # Create junction/symlink (Windows)
+    try {
+        cmd = "mklink /J \"" + latestLink + "\" \"" + versionPath + "\""
+        os.system(cmd)
+    } catch e {
+        # Fallback: copy files
+        out "Warning: Could not create symlink, using copy"
+        fs.copyDir(versionPath, latestLink)
+    }
+}
+
+# Install a single package
+task installSinglePackage(name, constraint, index, lockData, resolved) {
+    # Check if already resolved in this run
+    when has_key(resolved, name) {
+        give resolved[name]
+    }
+    
+    # Resolve package
+    resolvedPkg = resolvePackage(name, constraint, index, lockData)
+    
+    # Check if already installed
+    when isInstalled(name, resolvedPkg.version) {
+        out name + "@" + resolvedPkg.version + " already installed"
+        resolvedPkg.installedPath = EZLIB_DIR + "/" + name + "/" + resolvedPkg.version
+        resolved[name] = resolvedPkg
+        give resolvedPkg
+    }
+    
+    # Download
+    cacheFile = downloadPackage(resolvedPkg)
+    
+    # Extract
+    installPath = extractPackage(cacheFile, name, resolvedPkg.version)
+    resolvedPkg.installedPath = installPath
+    
+    out "Installed " + name + "@" + resolvedPkg.version + " to " + installPath
+    
+    # Link as latest
+    linkPackage(name, resolvedPkg.version)
+    
+    # Store in resolved
+    resolved[name] = resolvedPkg
+    
+    # Read dependencies and install recursively
+    pkgEzPath = installPath + "/package.ez"
+    when fs.exists(pkgEzPath) {
+        try {
+            content = fs.readFile(pkgEzPath)
+            pkgData = parse_json(content)
+            deps = has_key(pkgData, "dependencies") ? pkgData["dependencies"] : {}
+            
+            when len(deps) > 0 {
+                out "Installing dependencies for " + name + "..."
+                get depName in deps {
+                    depConstraint = deps[depName]
+                    installSinglePackage(depName, depConstraint, index, lockData, resolved)
+                }
+            }
+        } catch e {
+            out "Warning: Could not read dependencies for " + name
+        }
+    }
+    
+    give resolvedPkg
+}
+
+# --- Main Commands ---
+
+# Install command: ez install <package>[@version]
+task cmdInstall(packageSpec) {
+    # Parse package spec
+    name = packageSpec
+    constraint = "latest"
+    
+    atPos = indexOf(packageSpec, "@")
+    when atPos > -1 {
+        name = substr(packageSpec, 0, atPos)
+        constraint = substr(packageSpec, atPos + 1)
+    }
+    
+    out "Installing " + name + " (constraint: " + constraint + ")..."
+    
+    # Fetch index
+    index = fetchPackageIndex()
+    
+    # Read existing lock
+    lockData = readLockFile()
+    lockPackages = has_key(lockData, "packages") ? lockData["packages"] : {}
+    
+    # Resolve and install
+    resolved = {}
+    pkg = installSinglePackage(name, constraint, index, lockPackages, resolved)
+    
+    # Update lock file
+    writeLockFile(resolved)
+    
+    out ""
+    out "Installation complete!"
+    out "  Package: " + pkg.name + "@" + pkg.version
+    out "  Location: " + pkg.installedPath
+}
+
+# Install from ez.lock: ez install
+task cmdInstallLocked() {
+    lockData = readLockFile()
+    packages = has_key(lockData, "packages") ? lockData["packages"] : {}
+    
+    when len(packages) == 0 {
+        out "No packages in ez.lock"
+        give
+    }
+    
+    out "Installing " + str(len(packages)) + " packages from ez.lock..."
+    
+    index = fetchPackageIndex()
+    resolved = {}
+    
+    get name in packages {
+        pkg = packages[name]
+        locked = LockedPackage(name, pkg["version"], pkg["url"], pkg["sha256"])
+        
+        when isInstalled(name, locked.version) {
+            out name + "@" + locked.version + " already installed"
+            resolved[name] = locked
+        } other {
+            cacheFile = downloadPackage(locked)
+            installPath = extractPackage(cacheFile, name, locked.version)
+            locked.installedPath = installPath
+            linkPackage(name, locked.version)
+            resolved[name] = locked
+            out "Installed " + name + "@" + locked.version
+        }
+    }
+    
+    out ""
+    out "All packages installed from lock file"
+}
+
+# Update command: ez update <package>
+task cmdUpdate(packageName) {
+    out "Updating " + packageName + "..."
+    
+    index = fetchPackageIndex()
+    pkgIndex = getPackageFromIndex(index, packageName)
+    
+    when pkgIndex == nil {
+        throw "Package not found: " + packageName
+    }
+    
+    latest = pkgIndex.latest
+    current = getInstalledVersion(packageName)
+    
+    when current == latest {
+        out packageName + " is already at latest version " + latest
+        give
+    }
+    
+    out "Updating " + packageName + " from " + current + " to " + latest + "..."
+    
+    # Install latest
+    lockData = readLockFile()
+    resolved = {}
+    pkg = installSinglePackage(packageName, latest, index, has_key(lockData, "packages") ? lockData["packages"] : {}, resolved)
+    
+    # Update lock
+    writeLockFile(resolved)
+    
+    out "Update complete!"
+}
+
+# List installed packages
+task cmdList() {
+    out "Installed packages:"
+    out ""
+    
+    entries = fs.listDir(EZLIB_DIR)
+    count = 0
+    
+    get entry in entries {
+        pkgPath = EZLIB_DIR + "/" + entry
+        when fs.isDir(pkgPath) and indexOf(entry, ".") != 0 {
+            version = getInstalledVersion(entry)
+            when version {
+                out "  " + entry + " @ " + version
+                count = count + 1
+            }
+        }
+    }
+    
+    out ""
+    out "Total: " + str(count) + " packages"
+}
+
+# Remove/uninstall package
+task cmdRemove(packageName) {
+    pkgDir = EZLIB_DIR + "/" + packageName
+    
+    when not fs.exists(pkgDir) {
+        throw "Package not installed: " + packageName
+    }
+    
+    out "Removing " + packageName + "..."
+    fs.removeDir(pkgDir, true)
+    
+    # Update lock file
+    lockData = readLockFile()
+    when has_key(has_key(lockData, "packages") ? lockData["packages"] : {}, packageName) {
+        dictRemove(lockData["packages"], packageName)
+        writeLockFile(lockData["packages"])
+    }
+    
+    out "Removed " + packageName
+}
+
+# Show package info
+task cmdInfo(packageName) {
+    index = fetchPackageIndex()
+    pkgIndex = getPackageFromIndex(index, packageName)
+    
+    when pkgIndex == nil {
+        # Check if locally installed
+        version = getInstalledVersion(packageName)
+        when version {
+            out packageName + " @ " + version + " (local)"
+        } other {
+            throw "Package not found: " + packageName
+        }
+        give
+    }
+    
+    out "Package: " + pkgIndex.name
+    out "Description: " + pkgIndex.description
+    out "Latest: " + pkgIndex.latest
+    out "Repository: " + pkgIndex.repository
+    out ""
+    out "Available versions:"
+    get v in pkgIndex.versions {
+        out "  - " + v["version"]
+    }
+    
+    # Check local install
+    localVersion = getInstalledVersion(packageName)
+    when localVersion {
+        out ""
+        out "Installed locally: " + localVersion
+    }
+}
+
+# --- Main Entry Point ---
+
+# CLI Router
+task main(args) {
+    when len(args) < 1 {
+        showHelp()
+        give
+    }
+    
+    cmd = args[0]
+    
+    when cmd == "install" {
+        when len(args) >= 2 {
+            cmdInstall(args[1])
+        } other {
+            # Install from lock file
+            cmdInstallLocked()
+        }
+    }
+    
+    when cmd == "update" {
+        when len(args) >= 2 {
+            cmdUpdate(args[1])
+        } other {
+            out "Usage: ezpm update <package>"
+        }
+    }
+    
+    when cmd == "remove" or cmd == "uninstall" {
+        when len(args) >= 2 {
+            cmdRemove(args[1])
+        } other {
+            out "Usage: ezpm remove <package>"
+        }
+    }
+    
+    when cmd == "list" {
+        cmdList()
+    }
+    
+    when cmd == "info" {
+        when len(args) >= 2 {
+            cmdInfo(args[1])
+        } other {
+            out "Usage: ezpm info <package>"
+        }
+    }
+    
+    when cmd == "help" or cmd == "--help" or cmd == "-h" {
+        showHelp()
+    }
+    
+    other {
+        out "Unknown command: " + cmd
+        showHelp()
+    }
+}
+
+task showHelp() {
+    out "EZ Package Manager (ezpm) v2.0"
+    out ""
+    out "Usage:"
+    out "  ezpm install <package>[@version]  Install a package"
+    out "  ezpm install                       Install from ez.lock"
+    out "  ezpm update <package>              Update to latest version"
+    out "  ezpm remove <package>              Uninstall a package"
+    out "  ezpm list                          List installed packages"
+    out "  ezpm info <package>                Show package information"
+    out "  ezpm help                          Show this help"
+    out ""
+    out "Version constraints:"
+    out "  @1.2.3        Exact version"
+    out "  @latest       Latest version (default)"
+    out "  @^1.0.0       Compatible with major version"
+    out "  @~1.2.0       Compatible with minor version"
+    out ""
+    out "Examples:"
+    out "  ezpm install math"
+    out "  ezpm install http@2.0.0"
+    out "  ezpm install crypto@^1.0.0"
+}
+
+# --- Global Exports ---
+ezpm = {}
+ezpm["install"] = cmdInstall
+ezpm["update"] = cmdUpdate
+ezpm["remove"] = cmdRemove
+ezpm["list"] = cmdList
+ezpm["info"] = cmdInfo
+ezpm["main"] = main
+
+# Convenience functions
+pmInstall = cmdInstall
+pmUpdate = cmdUpdate
+pmRemove = cmdRemove
+pmList = cmdList

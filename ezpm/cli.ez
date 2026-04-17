@@ -1,0 +1,20 @@
+# ============================================================================
+# EZPM CLI - Command-line interface for EZ Package Manager
+# Usage: ez cli.ez <command> [args...]
+# ============================================================================
+
+use "ezpm" as *
+
+# Get command-line arguments
+args = []
+i = 1
+loop {
+    when i >= args.len {
+        escape
+    }
+    push(args, args[i])
+    i = i + 1
+}
+
+# Run main command
+main(args)
