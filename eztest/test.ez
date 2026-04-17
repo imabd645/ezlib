@@ -432,7 +432,7 @@ task testCase(name, fn) {
 }
 
 # Define a skipped test
-task skip(name, fn) {
+task skipe(name, fn) {
     test = {
         "name": name,
         "fn": fn,
@@ -677,7 +677,7 @@ test["describe"] = describe
 test["suite"] = suite
 test["it"] = it
 test["test"] = testCase
-test["skip"] = skip
+test["skip"] = skipe
 test["beforeEach"] = beforeEach
 test["afterEach"] = afterEach
 test["beforeAll"] = beforeAll
