@@ -87,13 +87,6 @@ task __print(msg) {
     }
 }
 
-# --- Assertion Error ---
-model AssertionError {
-    init(message) {
-        self.message = message
-    }
-}
-
 # --- Core Assertion Functions ---
 
 # Assert that value is truthy
@@ -101,7 +94,7 @@ task assert(value, message) {
     when not value {
         msg = message
         when not msg { msg = "Expected truthy value, got: " + __formatValue(value) }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -111,7 +104,7 @@ task assertFalse(value, message) {
     when value {
         msg = message
         when not msg { msg = "Expected falsy value, got: " + __formatValue(value) }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -123,7 +116,7 @@ task assertEqual(actual, expected, message) {
         when not msg { 
             msg = "Expected " + __formatValue(expected) + ", got: " + __formatValue(actual) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -135,7 +128,7 @@ task assertDeepEqual(actual, expected, message) {
         when not msg { 
             msg = "Expected deep equal to " + __formatValue(expected) + ", got: " + __formatValue(actual) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -147,7 +140,7 @@ task assertNotEqual(actual, notExpected, message) {
         when not msg { 
             msg = "Expected value to not equal " + __formatValue(notExpected) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -157,7 +150,7 @@ task assertNull(value, message) {
     when value != nil {
         msg = message
         when not msg { msg = "Expected null, got: " + __formatValue(value) }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -167,7 +160,7 @@ task assertNotNull(value, message) {
     when value == nil {
         msg = message
         when not msg { msg = "Expected non-null value" }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -180,7 +173,7 @@ task assertType(value, expectedType, message) {
         when not msg { 
             msg = "Expected type '" + expectedType + "', got: '" + actualType + "'" 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -195,7 +188,7 @@ task assertContains(haystack, needle, message) {
         when not msg { 
             msg = "Expected '" + haystack + "' to contain '" + needle + "'" 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -203,7 +196,7 @@ task assertContains(haystack, needle, message) {
 # Assert that array contains value
 task assertInArray(array, value, message) {
     when typeOf(array) != "array" {
-        throw AssertionError("assertInArray expects array, got: " + typeOf(array))
+        throw "assertInArray expects array, got: " + typeOf(array)
     }
     found = false
     get item in array {
@@ -217,7 +210,7 @@ task assertInArray(array, value, message) {
         when not msg { 
             msg = "Expected array to contain " + __formatValue(value) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -237,7 +230,7 @@ task assertThrows(fn, expectedMessage, message) {
     when not threw {
         msg = message
         when not msg { msg = "Expected function to throw an error" }
-        throw AssertionError(msg)
+        throw msg
     }
     
     when expectedMessage {
@@ -246,7 +239,7 @@ task assertThrows(fn, expectedMessage, message) {
             when not msg { 
                 msg = "Expected error containing '" + expectedMessage + "', got: '" + errorMsg + "'" 
             }
-            throw AssertionError(msg)
+            throw msg
         }
     }
     
@@ -260,7 +253,7 @@ task assertDoesNotThrow(fn, message) {
     } catch e {
         msg = message
         when not msg { msg = "Expected no error, but threw: " + str(e) }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -274,7 +267,7 @@ task assertApproxEqual(actual, expected, tolerance, message) {
         when not msg { 
             msg = "Expected ~" + str(expected) + " (tolerance: " + str(tolerance) + "), got: " + str(actual) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -286,7 +279,7 @@ task assertGreaterThan(value, threshold, message) {
         when not msg { 
             msg = "Expected value > " + str(threshold) + ", got: " + str(value) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -298,7 +291,7 @@ task assertLessThan(value, threshold, message) {
         when not msg { 
             msg = "Expected value < " + str(threshold) + ", got: " + str(value) 
         }
-        throw AssertionError(msg)
+        throw msg
     }
     give true
 }
@@ -433,8 +426,8 @@ task it(testName, testFn) {
     }
 }
 
-# Alias for it
-task test(name, fn) {
+# Alias for it - use testCase to avoid naming conflict with test object
+task testCase(name, fn) {
     it(name, fn)
 }
 
@@ -676,51 +669,39 @@ task clear() {
 
 # --- Main Test Object ---
 # Exports everything in a namespace
-test = {
-    # Core runner
-    "run": run,
-    "runTests": runTests,
-    "clear": clear,
-    
-    # Suite definition
-    "describe": describe,
-    "suite": suite,
-    "it": it,
-    "test": test,
-    "skip": skip,
-    
-    # Hooks
-    "beforeEach": beforeEach,
-    "afterEach": afterEach,
-    "beforeAll": beforeAll,
-    "afterAll": afterAll,
-    
-    # Assertions
-    "assert": assert,
-    "assertFalse": assertFalse,
-    "assertEqual": assertEqual,
-    "assertDeepEqual": assertDeepEqual,
-    "assertNotEqual": assertNotEqual,
-    "assertNull": assertNull,
-    "assertNotNull": assertNotNull,
-    "assertType": assertType,
-    "assertContains": assertContains,
-    "assertInArray": assertInArray,
-    "assertThrows": assertThrows,
-    "assertDoesNotThrow": assertDoesNotThrow,
-    "assertApproxEqual": assertApproxEqual,
-    "assertGreaterThan": assertGreaterThan,
-    "assertLessThan": assertLessThan,
-    
-    # Mocks/Spies
-    "spy": spy,
-    "stub": stub,
-    "mock": mock,
-    "Spy": Spy,
-    
-    # Config
-    "silent": |b| { __testState["silent"] = b }
-}
+test = {}
+test["run"] = run
+test["runTests"] = runTests
+test["clear"] = clear
+test["describe"] = describe
+test["suite"] = suite
+test["it"] = it
+test["test"] = testCase
+test["skip"] = skip
+test["beforeEach"] = beforeEach
+test["afterEach"] = afterEach
+test["beforeAll"] = beforeAll
+test["afterAll"] = afterAll
+test["assert"] = assert
+test["assertFalse"] = assertFalse
+test["assertEqual"] = assertEqual
+test["assertDeepEqual"] = assertDeepEqual
+test["assertNotEqual"] = assertNotEqual
+test["assertNull"] = assertNull
+test["assertNotNull"] = assertNotNull
+test["assertType"] = assertType
+test["assertContains"] = assertContains
+test["assertInArray"] = assertInArray
+test["assertThrows"] = assertThrows
+test["assertDoesNotThrow"] = assertDoesNotThrow
+test["assertApproxEqual"] = assertApproxEqual
+test["assertGreaterThan"] = assertGreaterThan
+test["assertLessThan"] = assertLessThan
+test["spy"] = spy
+test["stub"] = stub
+test["mock"] = mock
+test["Spy"] = Spy
+test["silent"] = |b| { __testState["silent"] = b }
 
 # --- Global Exports ---
 # Allow using without test. prefix
@@ -746,7 +727,7 @@ tAssertLessThan = test["assertLessThan"]
 tDescribe = test["describe"]
 tSuite = test["suite"]
 tIt = test["it"]
-tTest = test["test"]
+tTestCase = test["test"]
 tSkip = test["skip"]
 
 # Hooks
@@ -765,5 +746,4 @@ tSpy = test["spy"]
 tStub = test["stub"]
 tMock = test["mock"]
 
-# AssertionError for catching
-tAssertionError = AssertionError
+# tAssertionError removed - EZ uses string throws, not error objects
