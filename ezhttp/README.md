@@ -1,7 +1,10 @@
-# ezhttp — HTTP & JSON Library for EZ Language
+# ezhttp — HTTP Client
 
-A clean, simple HTTP client and JSON utility library for the EZ programming language.
-Supports synchronous requests, async fetch, automatic JSON serialization, and URL encoding — all through two intuitive objects: `http` and `json`.
+> Production-ready HTTP client for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
+
+**ezhttp** is a full-featured HTTP client library for EZ. It provides a fluent request builder, typed response model, automatic JSON serialization, retries, timeouts, interceptors, async support, and a reusable `HTTPClient` for API integrations — all in pure EZ.
+
+---
 
 ## Installation
 
@@ -9,317 +12,295 @@ Supports synchronous requests, async fetch, automatic JSON serialization, and UR
 ez install http
 ```
 
+---
+
+## Quick Start
+
 ```ez
 use "http"
+
+# Simple GET
+res = hGet("https://api.example.com/users", nil)
+out res.statusCode   # 200
+out res.body
+
+# Simple POST with JSON
+res = hPost("https://api.example.com/users", { "name": "Alice" }, nil)
+out res.isOk()       # true
+out res.json()       # parsed response body
 ```
 
 ---
 
-## The `http` Object
+## Quick Functions
 
-### `http.get(url)`
+One-liner helpers for the most common cases:
 
-Performs a synchronous HTTP GET request.
+```ez
+# GET with query params
+res = hGet("https://api.example.com/search", { "q": "ez lang", "page": "1" })
+
+# POST JSON body
+res = hPost("https://api.example.com/items", { "name": "Widget", "price": 9.99 }, nil)
+
+# PUT
+res = hPut("https://api.example.com/items/1", { "name": "Updated" }, nil)
+
+# PATCH
+res = hPatch("https://api.example.com/items/1", { "price": 4.99 }, nil)
+
+# DELETE
+res = hDelete("https://api.example.com/items/1", nil)
+```
+
+All quick functions return an `HTTPResponse` object.
+
+---
+
+## Request Builder
+
+For full control, use `HTTPRequest` directly with a fluent chainable API:
 
 ```ez
 use "http"
 
-response = http.get("https://api.example.com/users")
-out response
+res = HTTPRequest("GET", "https://api.example.com/users")
+    .param("role", "admin")
+    .param("active", "true")
+    .header("Authorization", "Bearer my-token")
+    .timeout(10000)
+    .retries(2)
+    .send()
 ```
 
-### `http.getExt(url, headers)`
+### Builder Methods
 
-GET request with custom headers.
+| Method | Description |
+|---|---|
+| `.header(key, value)` | Add a single request header |
+| `.headers(dict)` | Add multiple headers from a dictionary |
+| `.data(body)` | Set request body — auto-serializes dicts/arrays to JSON |
+| `.raw(body)` | Set raw string body without serialization |
+| `.param(key, value)` | Add a single URL query parameter |
+| `.query(dict)` | Add multiple query parameters |
+| `.timeout(ms)` | Set request timeout in milliseconds (default: `30000`) |
+| `.retries(count)` | Set number of retry attempts on failure (default: `3`) |
+| `.noRedirect()` | Disable automatic redirect following |
+| `.send()` | Execute the request and return an `HTTPResponse` |
 
-```ez
-response = http.getExt("https://api.example.com/protected", {
-    "Authorization": "Bearer my-token",
-    "Accept": "application/json"
-})
-out response
-```
+---
 
-### `http.post(url, body)`
+## The Response Object
 
-Performs a synchronous HTTP POST request. If `body` is a dictionary or array, it is automatically serialized to JSON and the `Content-Type` header is set to `application/json`. If `body` is a plain string, it is sent as-is.
+All requests return an `HTTPResponse` with these fields and methods:
 
-```ez
-// Posting a dictionary — auto-serialized to JSON
-response = http.post("https://api.example.com/users", {
-    name: "Alice",
-    email: "alice@example.com",
-    age: 30
-})
-out response
-
-// Posting a plain string
-response = http.post("https://api.example.com/data", "hello world")
-out response
-```
-
-### `http.postExt(url, body, headers)`
-
-POST request with full control over headers. If `body` is a dictionary or array and `Content-Type` is not already in `headers`, it is set to `application/json` automatically.
-
-```ez
-response = http.postExt(
-    "https://api.example.com/messages",
-    { text: "Hello!", priority: "high" },
-    {
-        "Authorization": "Bearer my-token",
-        "X-Custom-Header": "value"
-    }
-)
-out response
-```
-
-### `http.fetch(url)`
-
-Performs an **asynchronous** GET request. Returns a `Future` — use `await()` to retrieve the result. Useful for running multiple requests in parallel.
-
-```ez
-// Single async request
-future = http.fetch("https://api.example.com/data")
-result = await(future)
-out result
-
-// Parallel requests — all fire at the same time
-f1 = http.fetch("https://api.example.com/users")
-f2 = http.fetch("https://api.example.com/posts")
-f3 = http.fetch("https://api.example.com/comments")
-
-out await(f1)
-out await(f2)
-out await(f3)
-```
-
-### `http.fetchExt(url, options)`
-
-Async request with full options — method, body, and headers.
-
-```ez
-future = http.fetchExt("https://api.example.com/login", {
-    method: "POST",
-    body: json.stringify({ username: "alice", password: "secret" }),
-    headers: {
-        "Content-Type": "application/json"
-    }
-})
-
-response = await(future)
-out response
-```
-
-Supported option fields:
+### Fields
 
 | Field | Type | Description |
-|-------|------|-------------|
-| `method` | string | HTTP method — `"GET"`, `"POST"`, `"PUT"`, `"DELETE"`, etc. Defaults to `"GET"` |
-| `body` | string | Request body (for POST/PUT) |
-| `headers` | dictionary | Custom request headers |
+|---|---|---|
+| `res.statusCode` | int | HTTP status code (e.g. `200`, `404`) |
+| `res.body` | string | Raw response body |
+| `res.headers` | dictionary | Response headers |
+| `res.url` | string | Final request URL |
+| `res.duration` | float | Request duration in milliseconds |
+| `res.ok` | bool | `true` if status is 2xx |
 
-### `http.urlEncode(str)`
+### Methods
 
-URL-encodes a string, escaping special characters for safe use in query parameters.
+| Method | Returns | Description |
+|---|---|---|
+| `.isOk()` | bool | `true` if status code is 2xx |
+| `.is(code)` | bool | `true` if status matches the given code |
+| `.json()` | dict/array | Parses body as JSON |
+| `.header(name)` | string | Gets a response header (case-insensitive) |
+| `.contentType()` | string | Returns the `Content-Type` without parameters |
+| `.raiseForStatus()` | self | Throws an error if status is not 2xx |
 
-```ez
-query = http.urlEncode("hello world & more")
-out query   // hello+world+%26+more
-
-url = "https://api.example.com/search?q=" + http.urlEncode("EZ language")
-response = http.get(url)
-```
-
-### `http.urlDecode(str)`
-
-Decodes a URL-encoded string back to its original form.
-
-```ez
-decoded = http.urlDecode("hello+world+%26+more")
-out decoded   // hello world & more
-```
-
----
-
-## The `json` Object
-
-### `json.parse(string)`
-
-Parses a JSON string and returns an EZ dictionary or array.
+### Examples
 
 ```ez
-use "http"
+res = hGet("https://api.example.com/users/1", nil)
 
-text = '{"name": "Alice", "age": 30, "active": true}'
-data = json.parse(text)
-
-out data["name"]     // Alice
-out str(data["age"]) // 30
-```
-
-### `json.stringify(obj)`
-
-Converts an EZ dictionary or array into a JSON string.
-
-```ez
-user = {
-    name: "Bob",
-    scores: [95, 87, 92],
-    active: true
+# Check success
+when res.isOk() {
+    user = res.json()
+    out user["name"]
 }
 
-text = json.stringify(user)
-out text
-// {"name":"Bob","scores":[95,87,92],"active":true}
-```
-
----
-
-## Complete Examples
-
-### Fetching and Parsing a REST API
-
-```ez
-use "http"
-
-raw = http.get("https://jsonplaceholder.typicode.com/posts/1")
-post = json.parse(raw)
-
-out "Title: " + post["title"]
-out "Body:  " + post["body"]
-```
-
-### Submitting a Form
-
-```ez
-use "http"
-
-payload = {
-    username: "alice",
-    password: "secret123"
+# Check specific code
+when res.is(HTTP_NOT_FOUND) {
+    out "User not found"
 }
 
-response = http.post("https://api.example.com/login", payload)
-result = json.parse(response)
+# Get a header
+out res.header("Content-Type")   # "application/json"
+out res.contentType()            # "application/json"
 
-when result["success"] == true {
-    out "Logged in! Token: " + result["token"]
-} other {
-    out "Login failed: " + result["error"]
+# Throw on error
+res.raiseForStatus()
+```
+
+---
+
+## HTTPClient — Reusable API Client
+
+`HTTPClient` is ideal for talking to a single API. Set a base URL, default headers, and timeout once — then make requests without repeating yourself.
+
+```ez
+use "http"
+
+client = HTTPClient("https://api.example.com")
+client.header("Authorization", "Bearer my-token")
+client.header("Accept", "application/json")
+client.timeout(15000)
+
+# Requests are relative to the base URL
+res = client.get("/users").send()
+out res.json()
+
+res = client.post("/users").data({ "name": "Bob" }).send()
+out res.statusCode   # 201
+```
+
+### Client Methods
+
+| Method | Description |
+|---|---|
+| `.header(key, value)` | Set a default header for all requests |
+| `.timeout(ms)` | Set default timeout for all requests |
+| `.onRequest(fn)` | Add a request interceptor |
+| `.onResponse(fn)` | Add a response interceptor |
+| `.get(path)` | Returns an `HTTPRequest` for GET |
+| `.post(path)` | Returns an `HTTPRequest` for POST |
+| `.put(path)` | Returns an `HTTPRequest` for PUT |
+| `.patch(path)` | Returns an `HTTPRequest` for PATCH |
+| `.delete(path)` | Returns an `HTTPRequest` for DELETE |
+| `.head(path)` | Returns an `HTTPRequest` for HEAD |
+| `.options(path)` | Returns an `HTTPRequest` for OPTIONS |
+
+### Interceptors
+
+Interceptors let you mutate every request or response automatically — useful for logging, auth token injection, or centralized error handling.
+
+```ez
+client = HTTPClient("https://api.example.com")
+
+# Request interceptor — runs before every request
+client.onRequest(task(req) {
+    req.header("X-Request-Id", uuid())
+})
+
+# Response interceptor — runs after every response
+client.onResponse(task(res) {
+    when not res.isOk() {
+        out "Request failed: " + str(res.statusCode)
+    }
+})
+```
+
+---
+
+## Async Requests
+
+Fire HTTP requests in the background using EZ's `spawn`:
+
+```ez
+use "http"
+
+asyncGet("https://api.example.com/users", task(err, res) {
+    when err {
+        out "Error: " + err
+        give
+    }
+    out res.json()
+})
+
+asyncPost("https://api.example.com/users", { "name": "Carol" }, task(err, res) {
+    when err { out "Error: " + err }
+    other { out "Created: " + str(res.statusCode) }
+})
+```
+
+---
+
+## URL Utilities
+
+```ez
+use "http"
+
+# Build a URL with query parameters
+url = buildUrl("https://api.example.com/search", {
+    "q": "hello world",
+    "page": "2"
+})
+out url
+# https://api.example.com/search?q=hello%20world&page=2
+
+# Parse a URL's query string into a dictionary
+params = parseQuery("https://api.example.com/search?q=hello&page=2")
+out params["q"]     # "hello"
+out params["page"]  # "2"
+```
+
+---
+
+## Status Code Constants
+
+ezhttp exports named constants for all standard HTTP status codes:
+
+```ez
+use "http"
+
+when res.is(HTTP_OK)                    { out "Success" }
+when res.is(HTTP_CREATED)               { out "Created" }
+when res.is(HTTP_NO_CONTENT)            { out "Empty response" }
+when res.is(HTTP_BAD_REQUEST)           { out "Bad request" }
+when res.is(HTTP_UNAUTHORIZED)          { out "Auth required" }
+when res.is(HTTP_FORBIDDEN)             { out "Access denied" }
+when res.is(HTTP_NOT_FOUND)             { out "Not found" }
+when res.is(HTTP_TOO_MANY_REQUESTS)     { out "Rate limited" }
+when res.is(HTTP_INTERNAL_SERVER_ERROR) { out "Server error" }
+```
+
+Full list: `HTTP_CONTINUE`, `HTTP_SWITCHING_PROTOCOLS`, `HTTP_OK`, `HTTP_CREATED`, `HTTP_ACCEPTED`, `HTTP_NO_CONTENT`, `HTTP_RESET_CONTENT`, `HTTP_PARTIAL_CONTENT`, `HTTP_MULTIPLE_CHOICES`, `HTTP_MOVED_PERMANENTLY`, `HTTP_FOUND`, `HTTP_SEE_OTHER`, `HTTP_NOT_MODIFIED`, `HTTP_TEMPORARY_REDIRECT`, `HTTP_PERMANENT_REDIRECT`, `HTTP_BAD_REQUEST`, `HTTP_UNAUTHORIZED`, `HTTP_PAYMENT_REQUIRED`, `HTTP_FORBIDDEN`, `HTTP_NOT_FOUND`, `HTTP_METHOD_NOT_ALLOWED`, `HTTP_NOT_ACCEPTABLE`, `HTTP_REQUEST_TIMEOUT`, `HTTP_CONFLICT`, `HTTP_GONE`, `HTTP_PAYLOAD_TOO_LARGE`, `HTTP_URI_TOO_LONG`, `HTTP_UNSUPPORTED_MEDIA_TYPE`, `HTTP_IM_A_TEAPOT`, `HTTP_UNPROCESSABLE_ENTITY`, `HTTP_TOO_MANY_REQUESTS`, `HTTP_INTERNAL_SERVER_ERROR`, `HTTP_NOT_IMPLEMENTED`, `HTTP_BAD_GATEWAY`, `HTTP_SERVICE_UNAVAILABLE`, `HTTP_GATEWAY_TIMEOUT`
+
+---
+
+## Complete Example — REST API Integration
+
+```ez
+use "http"
+
+api = HTTPClient("https://jsonplaceholder.typicode.com")
+api.header("Accept", "application/json")
+
+# Fetch all posts
+res = api.get("/posts").send()
+posts = res.json()
+out "Total posts: " + str(len(posts))
+
+# Fetch a single post
+res = api.get("/posts/1").send()
+when res.isOk() {
+    post = res.json()
+    out post["title"]
 }
+
+# Create a new post
+res = api.post("/posts")
+    .data({ "title": "Hello EZ", "body": "My first post", "userId": 1 })
+    .send()
+
+res.raiseForStatus()
+out "Created with ID: " + str(res.json()["id"])
+
+# Filter with query params
+res = api.get("/comments").param("postId", "1").send()
+out "Comments: " + str(len(res.json()))
 ```
-
-### Authenticated API Request
-
-```ez
-use "http"
-
-token = "eyJhbGciOiJIUzI1NiJ9..."
-
-response = http.getExt("https://api.example.com/profile", {
-    "Authorization": "Bearer " + token,
-    "Accept": "application/json"
-})
-
-profile = json.parse(response)
-out "Welcome, " + profile["name"]
-```
-
-### Parallel Async Requests
-
-```ez
-use "http"
-
-// Fire all three at the same time
-f1 = http.fetch("https://jsonplaceholder.typicode.com/users/1")
-f2 = http.fetch("https://jsonplaceholder.typicode.com/users/2")
-f3 = http.fetch("https://jsonplaceholder.typicode.com/users/3")
-
-// Collect results when needed
-u1 = json.parse(await(f1))
-u2 = json.parse(await(f2))
-u3 = json.parse(await(f3))
-
-out u1["name"]
-out u2["name"]
-out u3["name"]
-```
-
-### Building a Query String
-
-```ez
-use "http"
-
-base = "https://api.example.com/search"
-query = base + "?q=" + http.urlEncode("hello world") + "&page=1"
-
-response = http.get(query)
-out response
-```
-
-### Sending a PUT Request
-
-```ez
-use "http"
-
-future = http.fetchExt("https://api.example.com/users/42", {
-    method: "PUT",
-    body: json.stringify({ name: "Alice Updated", age: 31 }),
-    headers: { "Content-Type": "application/json" }
-})
-
-out await(future)
-```
-
-### Sending a DELETE Request
-
-```ez
-use "http"
-
-future = http.fetchExt("https://api.example.com/users/42", {
-    method: "DELETE",
-    headers: { "Authorization": "Bearer my-token" }
-})
-
-out await(future)
-```
-
----
-
-## API Reference
-
-### `http`
-
-| Method | Signature | Returns | Description |
-|--------|-----------|---------|-------------|
-| `get` | `get(url)` | string | Synchronous GET request |
-| `getExt` | `getExt(url, headers)` | string | GET request with custom headers |
-| `post` | `post(url, body)` | string | Synchronous POST — auto JSON if dict/array |
-| `postExt` | `postExt(url, body, headers)` | string | POST request with custom headers |
-| `fetch` | `fetch(url)` | Future | Async GET — use `await()` to resolve |
-| `fetchExt` | `fetchExt(url, options)` | Future | Async request with method, body, headers |
-| `urlEncode` | `urlEncode(str)` | string | URL-encode a string |
-| `urlDecode` | `urlDecode(str)` | string | URL-decode a string |
-
-### `json`
-
-| Method | Signature | Returns | Description |
-|--------|-----------|---------|-------------|
-| `parse` | `parse(string)` | dict / array | Parse a JSON string into an EZ value |
-| `stringify` | `stringify(obj)` | string | Convert an EZ dict/array to a JSON string |
-
----
-
-## Notes
-
-- `http.post()` and `http.postExt()` automatically detect dictionaries and arrays and serialize them to JSON — you rarely need to call `json.stringify()` manually before posting.
-- `http.fetch()` and `http.fetchExt()` are non-blocking. They return a `Future` immediately. Fire multiple fetches before awaiting any of them for true parallel execution.
-- All synchronous methods (`get`, `post`) block until the server responds.
-- Responses are always returned as raw strings. Use `json.parse()` to work with JSON API responses as EZ dictionaries.
 
 ---
 
 ## License
 
-MIT License — see the [LICENSE](LICENSE) file for details.
+MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
