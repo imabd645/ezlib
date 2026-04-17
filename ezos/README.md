@@ -1,337 +1,203 @@
-# `os` — System Utilities Library for EZ
+# ezos
 
-> One gateway to the operating system. Environment, processes, clipboard, paths, memory — all in one place.
+> Comprehensive OS & System Utilities for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
+
+**ezos** is a pure-EZ standard library that exposes low-level operating system capabilities through FFI bindings to `Kernel32.dll`, `User32.dll`, `msvcrt.dll`, and `Shell32.dll` — no external dependencies required.
 
 ---
 
-## Overview
+## Installation
 
-The `os` library is EZ's comprehensive interface to the underlying operating system. It provides a unified, object-oriented API for environment variables, process management, clipboard access, shell integration, system metrics, and file system shortcuts — all accessible from a single global `os` object.
-
-```ez
-say os.platform()        # => windows
-say os.freeMemory()      # => 4294967296
-
-os.env.load(".env")
-secret = os.env.get("API_KEY")
-
-os.clipboard.write("copied!")
+```
+ez install os
 ```
 
 ---
 
-## Structure
+## Modules
 
-The `os` object is composed of five focused sub-modules, each handling a distinct area of system interaction:
-
-| Property | Type | Responsibility |
-|----------|------|----------------|
-| `os.env` | `OSEnv` | Environment variables and `.env` file loading |
-| `os.path` | `OSPath` | Path construction and inspection |
-| `os.process` | `OSProcess` | Command execution and process control |
-| `os.clipboard` | `OSClipboard` | System clipboard read/write |
-| `os.shell` | `OSShell` | Shell-level file and URL opening |
+| Module | Description |
+|---|---|
+| `os.env` | Read, write, and load environment variables |
+| `os.path` | Path joining and inspection |
+| `os.process` | Run shell commands and subprocesses |
+| `os.clipboard` | Read and write the system clipboard |
+| `os.shell` | Open files and URLs with the default application |
 
 ---
 
-## `os` — Top-Level Methods
+## Usage
 
-### System Info
-
-#### `os.platform()` → `string`
-Returns the current operating system name.
+### Environment Variables
 
 ```ez
-say os.platform()   # => windows
-```
+use "os"
 
-#### `os.uptime()` → `number`
-Returns the system uptime in seconds.
-
-```ez
-say os.uptime()   # => 43821
-```
-
-#### `os.totalMemory()` → `number`
-Returns total installed RAM in bytes.
-
-```ez
-say os.totalMemory()   # => 17179869184  (16 GB)
-```
-
-#### `os.freeMemory()` → `number`
-Returns currently available RAM in bytes.
-
-```ez
-say os.freeMemory()   # => 4294967296  (4 GB)
-```
-
----
-
-### Working Directory
-
-#### `os.cwd()` → `string`
-Returns the current working directory.
-
-```ez
-say os.cwd()   # => C:\Users\dev\myproject
-```
-
-#### `os.chdir(path)` → `bool`
-Changes the current working directory.
-
-```ez
-os.chdir("C:\\projects\\ez-app")
-```
-
----
-
-### File System Shortcuts
-
-These are convenience aliases over the `fs` module, accessible directly from `os`:
-
-| Method | Equivalent |
-|--------|-----------|
-| `os.readFile(path)` | Read file contents as string |
-| `os.writeFile(path, data)` | Write string to file |
-| `os.mkdir(path)` | `fs.mkdir(path)` |
-| `os.exists(path)` | `fs.exists(path)` |
-| `os.copyFile(src, dest)` | `fs.copy(src, dest)` |
-| `os.deleteFile(path)` | `fs.remove(path)` |
-| `os.listDir(path)` | `fs.listDir(path)` |
-
-```ez
-when not os.exists("output") {
-    os.mkdir("output")
-}
-
-data = os.readFile("input.txt")
-os.writeFile("output/result.txt", data)
-```
-
----
-
-## `os.env` — Environment Variables
-
-### `os.env.get(key)` → `string`
-Returns the value of an environment variable.
-
-```ez
+# Get a variable
 home = os.env.get("USERPROFILE")
-say home   # => C:\Users\dev
+out home  # C:\Users\you
+
+# Set a variable
+os.env.set("MY_VAR", "hello")
+
+# Load from a .env file (defaults to ".env" in cwd)
+os.env.load(".env")
+os.env.load("config/.env.production")
 ```
 
-### `os.env.set(key, val)`
-Sets an environment variable for the current process.
-
-```ez
-os.env.set("APP_MODE", "production")
+`.env` file format:
 ```
-
-### `os.env.load(path?)` → `bool`
-Parses a `.env` file and loads its key-value pairs into the environment. Defaults to `.env` in the current directory if no path is given.
-
-Returns `true` on success, `false` if the file does not exist.
-
-```ez
-os.env.load()              # loads .env
-os.env.load("config/.env") # loads from a specific path
-
-key = os.env.get("DATABASE_URL")
-```
-
-**`.env` file format:**
-```env
+DB_HOST=localhost
+DB_PORT=5432
+API_KEY=my-secret-key
 # This is a comment
-DATABASE_URL=postgres://localhost:5432/mydb
-API_KEY=abc123
-PORT=8080
-```
-
-**Parser behavior:**
-- Lines beginning with `#` are treated as comments and skipped
-- Keys and values are split on the first `=`
-- Values containing `=` (e.g. Base64 strings, URLs) are handled correctly
-- Windows line endings (`\r\n`) are stripped automatically
-- Blank lines are ignored
-
----
-
-## `os.path` — Path Utilities
-
-### `os.path.join(p1, p2)` → `string`
-Joins two path segments with the OS path separator.
-
-```ez
-full = os.path.join("C:\\projects", "myapp")
-say full   # => C:\projects\myapp
-```
-
-### `os.path.isAbsolute(path)` → `bool`
-Returns `true` if the path is absolute (e.g. starts with a drive letter like `C:`).
-
-```ez
-say os.path.isAbsolute("C:\\Users\\dev")   # => true
-say os.path.isAbsolute("relative/path")    # => false
 ```
 
 ---
 
-## `os.process` — Process & Command Execution
-
-### `os.process.exec(cmd)` → `string`
-Executes a shell command and **returns its output** as a string.
+### Path Utilities
 
 ```ez
-output = os.process.exec("dir")
-say output
-```
+use "os"
 
-### `os.process.system(cmd)` → `number`
-Runs a shell command and returns the **exit code**. Output goes directly to the terminal.
+full = os.path.join("C:\\Users\\you", "Documents")
+out full  # C:\Users\you\Documents
 
-```ez
-code = os.process.system("npm install")
-when code != 0 {
-    say "Command failed with code: " + code
-}
-```
-
-### `os.process.exit(code)`
-Terminates the EZ program with the given exit code.
-
-```ez
-os.process.exit(0)   # clean exit
-os.process.exit(1)   # exit with error
+out os.path.isAbsolute("C:\\Windows")  # true
+out os.path.isAbsolute("relative\\path")  # false
 ```
 
 ---
 
-## `os.clipboard` — System Clipboard
-
-### `os.clipboard.read()` → `string`
-Returns the current contents of the system clipboard.
+### Process & Shell Commands
 
 ```ez
-text = os.clipboard.read()
-say "Clipboard: " + text
+use "os"
+
+# Capture command output
+result = os.process.exec("git log --oneline -5")
+out result
+
+# Run a command without capturing output (returns exit code)
+code = os.process.system("mkdir build")
+
+# Exit the program
+os.process.exit(0)
 ```
 
-### `os.clipboard.write(text)`
-Writes text to the system clipboard.
+---
+
+### Clipboard
 
 ```ez
+use "os"
+
+# Write to clipboard
 os.clipboard.write("Hello from EZ!")
-```
 
-### `os.clipboard.clear()`
-Clears the system clipboard.
+# Read from clipboard
+text = os.clipboard.read()
+out text  # Hello from EZ!
 
-```ez
+# Clear the clipboard
 os.clipboard.clear()
 ```
 
 ---
 
-## `os.shell` — Shell Integration
-
-### `os.shell.open(path)` → `bool`
-Opens a file, folder, or URL using the system's default handler — the equivalent of double-clicking in Explorer.
+### Shell — Open Files & URLs
 
 ```ez
-os.shell.open("https://example.com")   # opens in default browser
-os.shell.open("report.pdf")            # opens in default PDF viewer
-os.shell.open("C:\\projects\\myapp")   # opens folder in Explorer
+use "os"
+
+# Open a file with its default application
+os.shell.open("report.pdf")
+
+# Open a URL in the default browser
+os.shell.open("https://github.com/imabd645/EZ-language")
+
+# Open a folder in Explorer
+os.shell.open("C:\\Users\\you\\Documents")
 ```
 
 ---
 
-## Examples
-
-### Load Config from `.env` and Use It
+### System Information
 
 ```ez
-os.env.load()
+use "os"
 
-mode = os.env.get("APP_MODE")
-port = os.env.get("PORT")
+out os.platform()       # windows
+out os.uptime()         # seconds since boot (e.g. 3600.5)
+out os.totalMemory()    # total RAM in bytes
+out os.freeMemory()     # available RAM in bytes
+out os.cwd()            # current working directory
 
-say "Running in " + mode + " mode on port " + port
-```
-
-### Log System Info to a File
-
-```ez
-info = "Platform: " + os.platform() + "\n"
-     + "Uptime:   " + os.uptime() + "s\n"
-     + "Memory:   " + os.freeMemory() + " / " + os.totalMemory() + " bytes\n"
-     + "CWD:      " + os.cwd()
-
-os.writeFile("system_info.txt", info)
-say "System info written."
-```
-
-### Run a Build Script and Handle Failure
-
-```ez
-say "Building..."
-code = os.process.system("make build")
-
-when code != 0 {
-    say "Build failed. Exiting."
-    os.process.exit(1)
-}
-
-say "Build succeeded."
-os.shell.open("dist/")
-```
-
-### Copy Clipboard Contents to a File
-
-```ez
-contents = os.clipboard.read()
-
-when contents != "" {
-    os.writeFile("clipboard_dump.txt", contents)
-    say "Saved clipboard to file."
-} other {
-    say "Clipboard is empty."
-}
-```
-
-### Scaffold a Project Directory
-
-```ez
-base = "my-project"
-
-dirs = [base, base + "\\src", base + "\\tests", base + "\\dist"]
-
-loop dir in dirs {
-    when not os.exists(dir) {
-        os.mkdir(dir)
-        say "Created: " + dir
-    }
-}
-
-os.writeFile(base + "\\.env", "APP_MODE=development\nPORT=3000\n")
-say "Project scaffolded at " + os.path.join(os.cwd(), base)
+# Change working directory
+os.chdir("C:\\Projects\\myapp")
 ```
 
 ---
 
-## Notes
+## API Reference
 
-- `os.env.load()` sets variables at the **process level** — they are accessible via `os.env.get()` for the duration of the EZ program.
-- `os.process.exec()` captures stdout and returns it as a string. Use `os.process.system()` when you want live terminal output instead.
-- `os.path.join()` currently uses `\` as the separator. For cross-platform path building, always use `os.path.join()` rather than string concatenation.
-- `os.shell.open()` behavior depends on the system's file association settings.
+### `os.env`
+
+| Method | Description |
+|---|---|
+| `os.env.get(key)` | Returns the value of an environment variable |
+| `os.env.set(key, value)` | Sets an environment variable for the current process |
+| `os.env.load(path?)` | Loads variables from a `.env` file (default: `".env"`) |
+
+### `os.path`
+
+| Method | Description |
+|---|---|
+| `os.path.join(p1, p2)` | Joins two path segments with `\` |
+| `os.path.isAbsolute(path)` | Returns `true` if path is absolute (e.g. `C:\...`) |
+
+### `os.process`
+
+| Method | Description |
+|---|---|
+| `os.process.exec(cmd)` | Runs a command and returns its stdout as a string |
+| `os.process.system(cmd)` | Runs a command and returns the exit code |
+| `os.process.exit(code)` | Terminates the current EZ process |
+
+### `os.clipboard`
+
+| Method | Description |
+|---|---|
+| `os.clipboard.read()` | Returns the current clipboard text |
+| `os.clipboard.write(text)` | Writes text to the clipboard |
+| `os.clipboard.clear()` | Clears the clipboard |
+
+### `os.shell`
+
+| Method | Description |
+|---|---|
+| `os.shell.open(path)` | Opens a file, folder, or URL with the default application |
+
+### `OS` (top-level)
+
+| Method | Returns | Description |
+|---|---|---|
+| `os.platform()` | `"windows"` | Current OS platform |
+| `os.uptime()` | `float` | System uptime in seconds |
+| `os.totalMemory()` | `int` | Total installed RAM in bytes |
+| `os.freeMemory()` | `int` | Available RAM in bytes |
+| `os.cwd()` | `string` | Current working directory |
+| `os.chdir(path)` | `bool` | Changes the working directory |
+
+---
+
+## Requirements
+
+- **Platform**: Windows only (uses `Kernel32.dll`, `User32.dll`, `msvcrt.dll`, `Shell32.dll`)
+- **EZ**: Any version supporting `os_load_lib`, `os_get_func`, and `os_call`
 
 ---
 
 ## License
 
-Part of the EZ standard library — MIT License. See [LICENSE](./LICENSE).
-
----
-
-*One object. The whole OS.*
+MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.

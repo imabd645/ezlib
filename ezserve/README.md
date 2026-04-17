@@ -1,329 +1,256 @@
-# `serve` — Web Framework for EZ
+# serve
 
-> Build web servers and APIs in EZ with a familiar Express-style API.
-> Native multithreaded. Zero dependencies. Pure EZ.
+> Production-hardened native HTTP web framework for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
+
+**serve** is a pure-EZ web framework built directly on raw WinSock2 FFI bindings — no C++ networking dependencies, no external libraries. It provides an Express.js-style API with built-in DDoS protection, Slowloris mitigation, backpressure limits, and RFC-compliant HTTP responses.
 
 ---
 
-## Overview
+## Installation
 
-`serve` is EZ's built-in web framework, modelled after Express.js and Flask. Define routes, serve static files, and return HTML or JSON — all backed by EZ's native multithreaded `server()` engine for real concurrency without configuration.
+```
+ez install serve
+```
+
+---
+
+## Quick Start
 
 ```ez
 use "serve"
 
 app = App()
 
-app.get("/", |req| {
-    give "<h1>Hello from EZ!</h1>"
+app.get("/", task(req) {
+    give { "body": "<h1>Hello from EZ!</h1>" }
 })
 
-app.get("/ping", |req| {
-    give { "status": "ok", "uptime": os.uptime() }
+app.get("/ping", task(req) {
+    give { "status": 200, "body": { "message": "pong" } }
 })
 
 app.listen(3000)
 ```
 
----
-
-## Getting Started
-
-### Installation
-
-`serve` is part of the EZ standard library:
-
-```ez
-use "serve"
 ```
-
-### Minimal Server
-
-```ez
-use "serve"
-
-app = App()
-
-app.get("/", |req| {
-    give "Welcome to my EZ server!"
-})
-
-app.listen(8080)
-```
-
-Run it:
-
-```bash
-./ez server.ez
-# 🚀 EZ Web Framework listening on http://localhost:8080
+🚀 Hardened Native EZ Server listening on http://localhost:3000
 ```
 
 ---
 
 ## Routing
 
-Register routes by HTTP method. Each handler receives a `req` object and returns a response.
-
-### `app.get(path, handler)`
-### `app.post(path, handler)`
-### `app.put(path, handler)`
-### `app.delete(path, handler)`
+Register routes using HTTP method helpers. Handlers receive a `req` object and return a response.
 
 ```ez
-app.get("/hello", |req| {
-    give "Hello, world!"
+app.get("/users", task(req) {
+    give { "body": [{ "id": 1, "name": "Alice" }] }
 })
 
-app.post("/submit", |req| {
-    give { "received": true }
+app.post("/users", task(req) {
+    data = from_json(req["body"])
+    give { "status": 201, "body": { "created": data["name"] } }
 })
 
-app.put("/update", |req| {
-    give { "updated": true }
+app.put("/users", task(req) {
+    give { "status": 200, "body": "Updated" }
 })
 
-app.delete("/item", |req| {
-    give { "deleted": true }
+app.delete("/users", task(req) {
+    give { "status": 204, "body": "" }
 })
 ```
+
+### Supported Methods
+
+| Method | Registration |
+|---|---|
+| GET | `app.get(path, handler)` |
+| POST | `app.post(path, handler)` |
+| PUT | `app.put(path, handler)` |
+| DELETE | `app.delete(path, handler)` |
 
 ---
 
 ## The Request Object
 
-Every route handler receives a `req` object with the following properties:
+Every handler receives a `req` dictionary with the following fields:
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `req.method` | `string` | HTTP method (`GET`, `POST`, etc.) |
-| `req.path` | `string` | Request path (e.g. `/api/users`) |
+| Field | Type | Description |
+|---|---|---|
+| `req["method"]` | string | HTTP method (`"GET"`, `"POST"`, etc.) |
+| `req["path"]` | string | URL path without query string (e.g. `"/users"`) |
+| `req["fullPath"]` | string | Full raw URL including query string |
+| `req["headers"]` | dictionary | Parsed request headers (lowercase keys) |
+| `req["query"]` | dictionary | Parsed and URL-decoded query parameters |
+| `req["form"]` | dictionary | Parsed `application/x-www-form-urlencoded` body |
+| `req["body"]` | string | Raw request body |
+
+### Query Parameters
+
+```ez
+# GET /search?q=hello+world&page=2
+app.get("/search", task(req) {
+    q    = req["query"]["q"]     # "hello world"
+    page = req["query"]["page"]  # "2"
+    give { "body": { "query": q, "page": page } }
+})
+```
+
+### Form Data
+
+```ez
+# POST /login  (Content-Type: application/x-www-form-urlencoded)
+app.post("/login", task(req) {
+    username = req["form"]["username"]
+    password = req["form"]["password"]
+    give { "body": { "user": username } }
+})
+```
+
+### JSON Body
+
+```ez
+# POST /api/data  (Content-Type: application/json)
+app.post("/api/data", task(req) {
+    payload = from_json(req["body"])
+    give { "status": 201, "body": payload }
+})
+```
+
+### Reading Headers
+
+```ez
+app.get("/whoami", task(req) {
+    agent = req["headers"]["user-agent"]
+    give { "body": agent }
+})
+```
 
 ---
 
 ## Responses
 
-Route handlers return a value. The framework automatically detects the type and sets appropriate headers.
+A handler can return a **string**, **array**, **dictionary**, or a **full response object**.
 
-### Return HTML (string)
+### Plain String (HTML)
 
 ```ez
-app.get("/", |req| {
-    give "<h1>Welcome</h1><p>Built with EZ.</p>"
+app.get("/", task(req) {
+    give "<h1>Welcome</h1>"
 })
 ```
-→ `Content-Type: text/html`, status `200`
 
----
-
-### Return JSON (dictionary or array)
+### JSON (automatic serialization)
 
 ```ez
-app.get("/user", |req| {
-    give { "id": 1, "name": "Alice", "active": true }
-})
-
-app.get("/users", |req| {
-    give [
-        { "id": 1, "name": "Alice" },
-        { "id": 2, "name": "Bob" }
-    ]
+app.get("/users", task(req) {
+    give [{ "id": 1 }, { "id": 2 }]
 })
 ```
-→ `Content-Type: application/json`, status `200`, body auto-serialized
 
----
+Returning an array or dictionary automatically sets `Content-Type: application/json`.
 
-### Return a Custom Response
-
-Return a dictionary with `status`, `headers`, and `body` for full control:
+### Full Response Object
 
 ```ez
-app.get("/teapot", |req| {
+app.post("/items", task(req) {
     give {
-        "status": 418,
-        "headers": { "Content-Type": "text/plain" },
-        "body": "I'm a teapot."
+        "status": 201,
+        "headers": { "X-Custom-Header": "value" },
+        "body": { "created": true }
     }
 })
 ```
 
-If the returned dictionary contains a `status` key, the framework passes it through as-is — no wrapping.
+### Supported Status Codes
 
----
-
-### Response Type Summary
-
-| Return value | Status | Content-Type |
-|--------------|--------|-------------|
-| `string` | 200 | `text/html` |
-| `dictionary` (no `status` key) | 200 | `application/json` |
-| `array` | 200 | `application/json` |
-| `dictionary` with `status` key | as specified | as specified |
+| Code | Phrase |
+|---|---|
+| `200` | OK |
+| `201` | Created |
+| `202` | Accepted |
+| `204` | No Content |
+| `301` | Moved Permanently |
+| `302` | Found |
+| `304` | Not Modified |
+| `400` | Bad Request |
+| `401` | Unauthorized |
+| `403` | Forbidden |
+| `404` | Not Found |
+| `405` | Method Not Allowed |
+| `418` | I'm a teapot |
+| `429` | Too Many Requests |
+| `500` | Internal Server Error |
+| `502` | Bad Gateway |
+| `503` | Service Unavailable |
 
 ---
 
 ## Static Files
 
-Serve an entire directory of static files under a URL prefix using `serveStatic`:
+Serve a directory of static files under a URL prefix:
 
 ```ez
-app.serveStatic("/static", "public")
-```
-
-Any request to `/static/...` will resolve to a file inside the `public/` directory:
-
-```
-GET /static/style.css     → public/style.css
-GET /static/js/app.js     → public/js/app.js
-GET /static/img/logo.png  → public/img/logo.png
-```
-
-Files are served using `serveFile()` which sets appropriate MIME types. If the file does not exist, routing falls through to a 404.
-
----
-
-## 404 Handling
-
-Unmatched routes automatically return a formatted HTML 404 page — no configuration needed:
-
-```html
-<h1>404 Not Found</h1>
-<p>The route <strong>/missing</strong> does not exist on this EZ server.</p>
-```
-
----
-
-## `app.listen(port)`
-
-Starts the server on the given port. This call is **blocking** — it runs until the process is terminated.
-
-```ez
-app.listen(3000)
-```
-
-The server is **multithreaded** by default via EZ's native `server()` engine, handling concurrent requests without any additional setup.
-
----
-
-## Examples
-
-### JSON API Server
-
-```ez
-use "serve"
-
-app = App()
-
-users = [
-    { "id": 1, "name": "Alice" },
-    { "id": 2, "name": "Bob" }
-]
-
-app.get("/api/users", |req| {
-    give users
-})
-
-app.get("/api/health", |req| {
-    give { "status": "ok" }
-})
-
-app.listen(4000)
-```
-
-### Serving an HTML Front-End + API
-
-```ez
-use "serve"
-
-app = App()
-
-# Serve static front-end files
-app.serveStatic("/", "public")
-
-# API routes
-app.get("/api/status", |req| {
-    give { "alive": true, "version": "1.0" }
-})
-
-app.post("/api/echo", |req| {
-    give { "echo": "received" }
-})
-
+app.serveStatic("/static", "C:\\myapp\\public")
 app.listen(8080)
 ```
 
-### Custom Error Responses
+A request to `/static/style.css` will serve `C:\myapp\public\style.css`.
 
-```ez
-app.get("/secret", |req| {
-    give {
-        "status": 403,
-        "headers": { "Content-Type": "application/json" },
-        "body": to_json({ "error": "Forbidden", "message": "You shall not pass." })
-    }
-})
+**Auto-detected MIME types:** `.html`, `.htm`, `.css`, `.js`, `.json`, `.png`, `.jpg`, `.jpeg`, `.svg` — falls back to `text/plain`.
+
+---
+
+## Security Features
+
+ezserve includes production hardening out of the box — no configuration required.
+
+### Backpressure / Connection Limiting
+Concurrent connections are capped at **1,024**. Requests beyond this receive an immediate `503 Service Unavailable`, preventing memory exhaustion under heavy load.
+
+### Slowloris Mitigation
+A **5-second receive timeout** (`SO_RCVTIMEO`) is set on every accepted socket. Clients that hold connections open without sending data are dropped automatically.
+
+### Payload Size Cap
+Request bodies are hard-capped at **10 MB**. Any `Content-Length` declaring a larger payload is ignored, preventing memory exhaustion attacks.
+
+### RFC-Compliant Status Lines
+All responses include a proper status phrase (e.g. `HTTP/1.1 404 Not Found`).
+
+### Default Security Headers
+Every response automatically includes:
 ```
-
-### Serving Dynamic HTML
-
-```ez
-app.get("/dashboard", |req| {
-    html = "<html><body>"
-         + "<h1>Dashboard</h1>"
-         + "<p>Server has been running for " + str(os.uptime()) + " seconds.</p>"
-         + "</body></html>"
-    give html
-})
-```
-
-### File Download Endpoint
-
-```ez
-app.get("/download", |req| {
-    when fs.exists("report.pdf") {
-        give {
-            "status": 200,
-            "headers": {
-                "Content-Type": "application/pdf",
-                "Content-Disposition": "attachment; filename=\"report.pdf\""
-            },
-            "body": os.readFile("report.pdf")
-        }
-    }
-    give { "status": 404, "headers": { "Content-Type": "text/plain" }, "body": "File not found" }
-})
+Server: EZ-Native Framework
+Connection: close
 ```
 
 ---
 
-## Architecture
+## How It Works
 
-```
-app.listen(port)
-  └── server(port, handler)        ← Native multithreaded EZ server
-        └── For each request:
-              1. Match exact route  (method + path)
-              2. Check static paths (prefix match → file lookup)
-              3. Return 404
-```
+ezserve calls Windows networking APIs directly through FFI — no middleware, no runtime dependencies:
 
-Route matching is performed in order: explicit routes always take priority over static file paths.
+| Win32 API | Purpose |
+|---|---|
+| `WSAStartup` / `WSACleanup` | Initialize and shut down WinSock |
+| `socket` | Create a TCP socket (`AF_INET`, `SOCK_STREAM`) |
+| `bind` / `listen` / `accept` | Bind to port and accept incoming connections |
+| `setsockopt` | Configure per-socket receive timeouts |
+| `recv` / `send` | Read and write raw byte buffers |
+| `closesocket` | Close the connection |
+
+Each accepted connection is dispatched via EZ's `spawn()` for concurrent processing.
 
 ---
 
-## Notes
+## Requirements
 
-- `app.listen()` is **blocking**. Place it as the last call in your program.
-- Routes are matched **exactly** — there is no wildcard or parameter matching (e.g. `/user/:id`) in the current version.
-- Static file serving strips the route prefix and maps the remainder to the target directory. A request for `/static/a/b.css` with `serveStatic("/static", "public")` resolves to `public/a/b.css`.
-- Returning a plain dictionary without a `status` key always yields a `200 application/json` response.
+- **Platform**: Windows only (uses `ws2_32.dll`, `msvcrt.dll`)
+- **EZ**: Any version supporting `os_load_lib`, `os_call`, and `spawn`
 
 ---
 
 ## License
 
-Part of the EZ standard library — MIT License. See [LICENSE](./LICENSE).
-
----
-
-*Routes registered. Server running. Ship it.*
+MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
