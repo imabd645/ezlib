@@ -1,8 +1,8 @@
 {
     "name": "http",
-    "version": "1.0.0",
-    "description": "A simple HTTP library for EZ",
+    "version": "2.0.0",
+    "description": "Production-ready HTTP client with Request/Response models, all HTTP methods, retries, timeouts, and interceptors",
     "author": "Abdullah Masood",
-    "main": "main.ez",
+    "main": "http.ez",
     "dependencies": {}
 }

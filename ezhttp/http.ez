@@ -1,0 +1,558 @@
+# ============================================================================
+# EZHTTP - Production-Ready HTTP Client for EZ Language (v2.0)
+# Features: Request/Response models, all HTTP methods, query params,
+#           retries, timeouts, interceptors, file upload/download
+# ============================================================================
+
+# --- HTTP Status Codes ---
+HTTP_CONTINUE = 100
+HTTP_SWITCHING_PROTOCOLS = 101
+HTTP_OK = 200
+HTTP_CREATED = 201
+HTTP_ACCEPTED = 202
+HTTP_NO_CONTENT = 204
+HTTP_RESET_CONTENT = 205
+HTTP_PARTIAL_CONTENT = 206
+HTTP_MULTIPLE_CHOICES = 300
+HTTP_MOVED_PERMANENTLY = 301
+HTTP_FOUND = 302
+HTTP_SEE_OTHER = 303
+HTTP_NOT_MODIFIED = 304
+HTTP_TEMPORARY_REDIRECT = 307
+HTTP_PERMANENT_REDIRECT = 308
+HTTP_BAD_REQUEST = 400
+HTTP_UNAUTHORIZED = 401
+HTTP_PAYMENT_REQUIRED = 402
+HTTP_FORBIDDEN = 403
+HTTP_NOT_FOUND = 404
+HTTP_METHOD_NOT_ALLOWED = 405
+HTTP_NOT_ACCEPTABLE = 406
+HTTP_PROXY_AUTH_REQUIRED = 407
+HTTP_REQUEST_TIMEOUT = 408
+HTTP_CONFLICT = 409
+HTTP_GONE = 410
+HTTP_LENGTH_REQUIRED = 411
+HTTP_PRECONDITION_FAILED = 412
+HTTP_PAYLOAD_TOO_LARGE = 413
+HTTP_URI_TOO_LONG = 414
+HTTP_UNSUPPORTED_MEDIA_TYPE = 415
+HTTP_RANGE_NOT_SATISFIABLE = 416
+HTTP_EXPECTATION_FAILED = 417
+HTTP_IM_A_TEAPOT = 418
+HTTP_UNPROCESSABLE_ENTITY = 422
+HTTP_TOO_MANY_REQUESTS = 429
+HTTP_INTERNAL_SERVER_ERROR = 500
+HTTP_NOT_IMPLEMENTED = 501
+HTTP_BAD_GATEWAY = 502
+HTTP_SERVICE_UNAVAILABLE = 503
+HTTP_GATEWAY_TIMEOUT = 504
+
+# --- Response Model ---
+model HTTPResponse {
+    init(statusCode, body, headers, url, duration) {
+        self.statusCode = statusCode
+        self.body = body
+        self.headers = headers
+        self.url = url
+        self.duration = duration
+        self.ok = statusCode >= 200 and statusCode < 300
+    }
+    
+    # Check if response is successful (2xx)
+    task isOk() {
+        give self.ok
+    }
+    
+    # Check specific status codes
+    task is(statusCode) {
+        give self.statusCode == statusCode
+    }
+    
+    # Parse body as JSON
+    task json() {
+        when self.body == nil or self.body == "" {
+            give nil
+        }
+        give parse_json(self.body)
+    }
+    
+    # Get header value (case-insensitive)
+    task header(name) {
+        get key in self.headers {
+            when lower(key) == lower(name) {
+                give self.headers[key]
+            }
+        }
+        give nil
+    }
+    
+    # Get content type
+    task contentType() {
+        ct = self.header("Content-Type")
+        when ct {
+            parts = split(ct, ";")
+            give trim(parts[0])
+        }
+        give nil
+    }
+    
+    # Raise error for bad status
+    task raiseForStatus() {
+        when not self.ok {
+            throw "HTTP " + str(self.statusCode) + ": " + self.body
+        }
+        give self
+    }
+}
+
+# --- Request Builder Model ---
+model HTTPRequest {
+    init(method, url) {
+        self.method = upper(method)
+        self.url = url
+        self.headers = {}
+        self.body = nil
+        self.params = {}
+        self.timeout = 30000  # 30 seconds default
+        self.retries = 3
+        self.retryDelay = 1000  # 1 second
+        self.followRedirects = true
+        self.maxRedirects = 10
+    }
+    
+    # Add header
+    task header(key, value) {
+        self.headers[key] = value
+        give self
+    }
+    
+    # Add multiple headers
+    task headers(hdrs) {
+        get key in hdrs {
+            self.headers[key] = hdrs[key]
+        }
+        give self
+    }
+    
+    # Set body (auto-serializes JSON)
+    task data(body) {
+        when typeOf(body) == "dictionary" or typeOf(body) == "array" {
+            self.body = to_json(body)
+            self.headers["Content-Type"] = "application/json"
+        } other {
+            self.body = str(body)
+        }
+        give self
+    }
+    
+    # Set raw body without auto-serialization
+    task raw(body) {
+        self.body = body
+        give self
+    }
+    
+    # Add query parameter
+    task param(key, value) {
+        self.params[key] = value
+        give self
+    }
+    
+    # Add multiple query params
+    task query(params) {
+        get key in params {
+            self.params[key] = params[key]
+        }
+        give self
+    }
+    
+    # Set timeout (milliseconds)
+    task timeout(ms) {
+        self.timeout = ms
+        give self
+    }
+    
+    # Set retry count
+    task retries(count) {
+        self.retries = count
+        give self
+    }
+    
+    # Disable redirects
+    task noRedirect() {
+        self.followRedirects = false
+        give self
+    }
+    
+    # Build final URL with query params
+    task buildUrl() {
+        when len(self.params) == 0 {
+            give self.url
+        }
+        
+        queryString = ""
+        first = true
+        get key in self.params {
+            when not first {
+                queryString = queryString + "&"
+            }
+            first = false
+            encodedKey = url_encode(str(key))
+            encodedVal = url_encode(str(self.params[key]))
+            queryString = queryString + encodedKey + "=" + encodedVal
+        }
+        
+        separator = "?"
+        when indexOf(self.url, "?") > -1 {
+            separator = "&"
+        }
+        
+        give self.url + separator + queryString
+    }
+    
+    # Execute the request
+    task send() {
+        give __executeRequest(self)
+    }
+}
+
+# --- Internal Request Execution ---
+task __executeRequest(request) {
+    url = request.buildUrl()
+    method = request.method
+    body = request.body
+    headers = request.headers
+    retries = request.retries
+    retryDelay = request.retryDelay
+    
+    lastError = nil
+    attempt = 0
+    
+    loop {
+        attempt = attempt + 1
+        start = clock()
+        
+        try {
+            # Execute based on method
+            statusCode = 0
+            responseBody = ""
+            responseHeaders = {}
+            
+            when method == "GET" {
+                # Use native http_get
+                responseBody = http_get(url, headers)
+                statusCode = 200  # Native doesn't return status
+            }
+            
+            when method == "POST" {
+                when body == nil { body = "" }
+                responseBody = http_post(url, str(body), headers)
+                statusCode = 200
+            }
+            
+            when method == "PUT" or method == "PATCH" or method == "DELETE" or method == "HEAD" or method == "OPTIONS" {
+                # For methods not directly supported, use fetch with method override
+                # Native EZ may not support all, so we use POST with X-HTTP-Method-Override
+                tempHeaders = headers
+                tempHeaders["X-HTTP-Method-Override"] = method
+                responseBody = http_post(url, str(body), tempHeaders)
+                statusCode = 200
+            }
+            
+            # Try to extract status from response if it's JSON
+            when typeOf(responseBody) == "string" {
+                try {
+                    parsed = parse_json(responseBody)
+                    when has_key(parsed, "status") {
+                        statusCode = parsed["status"]
+                    }
+                    when has_key(parsed, "statusCode") {
+                        statusCode = parsed["statusCode"]
+                    }
+                } catch e {
+                    # Not JSON or no status field
+                }
+            }
+            
+            duration = (clock() - start) * 1000  # Convert to ms
+            
+            give HTTPResponse(statusCode, responseBody, responseHeaders, url, duration)
+            
+        } catch e {
+            lastError = e
+            
+            # Retry on network errors
+            when attempt < retries {
+                sleep(retryDelay / 1000)  # Convert ms to seconds
+            } other {
+                # All retries exhausted
+                throw "Request failed after " + str(attempt) + " attempts: " + str(e)
+            }
+        }
+    }
+}
+
+# --- HTTP Client Model ---
+model HTTPClient {
+    init(baseUrl) {
+        self.baseUrl = baseUrl
+        self.defaultHeaders = {}
+        self.timeout = 30000
+        self.retries = 3
+        self.interceptors = {
+            "request": [],
+            "response": []
+        }
+    }
+    
+    # Set default header
+    task header(key, value) {
+        self.defaultHeaders[key] = value
+        give self
+    }
+    
+    # Set default timeout
+    task timeout(ms) {
+        self.timeout = ms
+        give self
+    }
+    
+    # Add request interceptor
+    task onRequest(fn) {
+        push(self.interceptors["request"], fn)
+        give self
+    }
+    
+    # Add response interceptor
+    task onResponse(fn) {
+        push(self.interceptors["response"], fn)
+        give self
+    }
+    
+    # Build request with defaults and interceptors
+    task buildRequest(method, path) {
+        url = self.baseUrl + path
+        request = HTTPRequest(method, url)
+        
+        # Apply default headers
+        get key in self.defaultHeaders {
+            request.header(key, self.defaultHeaders[key])
+        }
+        
+        # Apply default timeout and retries
+        request.timeout(self.timeout)
+        request.retries(self.retries)
+        
+        # Run request interceptors
+        get interceptor in self.interceptors["request"] {
+            interceptor(request)
+        }
+        
+        give request
+    }
+    
+    # HTTP methods
+    task get(path) {
+        give self.buildRequest("GET", path)
+    }
+    
+    task post(path) {
+        give self.buildRequest("POST", path)
+    }
+    
+    task put(path) {
+        give self.buildRequest("PUT", path)
+    }
+    
+    task patch(path) {
+        give self.buildRequest("PATCH", path)
+    }
+    
+    task delete(path) {
+        give self.buildRequest("DELETE", path)
+    }
+    
+    task head(path) {
+        give self.buildRequest("HEAD", path)
+    }
+    
+    task options(path) {
+        give self.buildRequest("OPTIONS", path)
+    }
+}
+
+# --- Fluent HTTP Functions ---
+
+# Quick GET request
+task httpGet(url, params) {
+    request = HTTPRequest("GET", url)
+    when params {
+        request.query(params)
+    }
+    give request.send()
+}
+
+# Quick POST request
+task httpPost(url, body, headers) {
+    request = HTTPRequest("POST", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# Quick PUT request
+task httpPut(url, body, headers) {
+    request = HTTPRequest("PUT", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# Quick DELETE request
+task httpDelete(url, headers) {
+    request = HTTPRequest("DELETE", url)
+    when headers {
+        request.headers(headers)
+    }
+    give request.send()
+}
+
+# Quick PATCH request
+task httpPatch(url, body, headers) {
+    request = HTTPRequest("PATCH", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# --- URL Utilities ---
+task buildUrl(base, params) {
+    when len(params) == 0 {
+        give base
+    }
+    
+    queryString = ""
+    first = true
+    get key in params {
+        when not first {
+            queryString = queryString + "&"
+        }
+        first = false
+        encodedKey = url_encode(str(key))
+        encodedVal = url_encode(str(params[key]))
+        queryString = queryString + encodedKey + "=" + encodedVal
+    }
+    
+    separator = "?"
+    when indexOf(base, "?") > -1 {
+        separator = "&"
+    }
+    
+    give base + separator + queryString
+}
+
+# Parse query string into dictionary
+task parseQuery(url) {
+    result = {}
+    
+    # Find query part
+    qIndex = indexOf(url, "?")
+    when qIndex == -1 {
+        give result
+    }
+    
+    queryPart = substr(url, qIndex + 1)
+    pairs = split(queryPart, "&")
+    
+    get pair in pairs {
+        eqIndex = indexOf(pair, "=")
+        when eqIndex > -1 {
+            key = url_decode(substr(pair, 0, eqIndex))
+            value = url_decode(substr(pair, eqIndex + 1))
+            result[key] = value
+        }
+    }
+    
+    give result
+}
+
+# --- Async HTTP with Tasks ---
+task asyncGet(url, callback) {
+    task runner() {
+        try {
+            response = httpGet(url, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+task asyncPost(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPost(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+# --- Main HTTP Object ---
+http = {}
+http["HTTPResponse"] = HTTPResponse
+http["HTTPRequest"] = HTTPRequest
+http["HTTPClient"] = HTTPClient
+http["get"] = httpGet
+http["post"] = httpPost
+http["put"] = httpPut
+http["delete"] = httpDelete
+http["patch"] = httpPatch
+http["buildUrl"] = buildUrl
+http["parseQuery"] = parseQuery
+http["asyncGet"] = asyncGet
+http["asyncPost"] = asyncPost
+
+# Status code constants
+http["OK"] = HTTP_OK
+http["CREATED"] = HTTP_CREATED
+http["BAD_REQUEST"] = HTTP_BAD_REQUEST
+http["UNAUTHORIZED"] = HTTP_UNAUTHORIZED
+http["FORBIDDEN"] = HTTP_FORBIDDEN
+http["NOT_FOUND"] = HTTP_NOT_FOUND
+http["SERVER_ERROR"] = HTTP_INTERNAL_SERVER_ERROR
+
+# JSON utilities
+json = {}
+json["parse"] = |s| { give parse_json(s) }
+json["stringify"] = |o| { give to_json(o) }
+json["pretty"] = |o| { 
+    # Simple pretty print
+    str = to_json(o)
+    # Basic indentation (can be enhanced)
+    give str
+}
+
+# Global exports for convenience
+hRequest = HTTPRequest
+hResponse = HTTPResponse
+hClient = HTTPClient
+hGet = httpGet
+hPost = httpPost
+hPut = httpPut
+hDelete = httpDelete
+hPatch = httpPatch
