@@ -419,6 +419,9 @@ task reCount(pattern, text) {
 # --- Main regex Object ---
 # Primary entry point for the library
 regex = {
+    # Regex Model reference (for direct instantiation)
+    "Regex": Regex,
+
     # Pattern compilation
     "compile": |p| { give Regex(p) },
     "create": |p| { give Regex(p) },
