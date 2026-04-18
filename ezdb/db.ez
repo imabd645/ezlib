@@ -22,10 +22,8 @@ model DbStatement {
             } other when t == "integer" {
                 os_call(self.db.bindInt, "int", self.handle, idx, val)
             } other when t == "float" {
-                // os_call strictly passes integers in registers; float arguments read garbage.
-                // Bind as text instead, using SQLite's built-in type conversion.
-                // Use -1 (SQLITE_TRANSIENT) to copy memory.
-                os_call(self.db.bindText, "int", self.handle, idx, str(val), -1, -1)
+                // Use the new signature-aware FFI passing the float safely
+                os_call_sig(self.db.bindDouble, "int", "iif", self.handle, idx, val)
             } other when t == "buffer" {
                 os_call(self.db.bindBlob, "int", self.handle, idx, val, len(val), -1)
             } other when t == "nil" {
@@ -60,15 +58,8 @@ model DbStatement {
                 size = os_call(self.db.columnBytes, "int", self.handle, i)
                 ptr = os_call(self.db.columnBlob, "ptr", self.handle, i)
                 
-                // Read blob manually since os_buffer_from_ptr isn't a core FFI func
-                // We'll read it into an array of bytes
-                buf = []
-                when ptr and size > 0 {
-                    repeat b = 0 to size - 1 {
-                        push(buf, os_read_byte(ptr, b))
-                    }
-                }
-                row[name] = buf
+                // Fast native byte-block copy using the new runtime enhancement
+                row[name] = os_buffer_from_ptr(ptr, size)
             } other when typeCode == 5 { // SQLITE_NULL
                 row[name] = nil
             } other { // SQLITE_TEXT (3)
