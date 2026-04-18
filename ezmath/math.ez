@@ -1,21 +1,21 @@
-// ============================================================================
-// MATH - Comprehensive Mathematical Library for EZ (v3.0)
-// Features: Trig, logs, random, statistics, number theory, vectors, matrices
-// ============================================================================
+# ============================================================================
+# MATH - Comprehensive Mathematical Library for EZ (v3.0)
+# Features: Trig, logs, random, statistics, number theory, vectors, matrices
+# ============================================================================
 
-// --- Constants ---
+# --- Constants ---
 PI = 3.141592653589793
 E = 2.718281828459045
-PHI = 1.618033988749895  // Golden ratio
+PHI = 1.618033988749895  # Golden ratio
 SQRT2 = 1.4142135623730951
 LN2 = 0.6931471805599453
 LN10 = 2.302585092994046
 
-// --- Conversion ---
+# --- Conversion ---
 task degToRad(d) { give d * (PI / 180.0) }
 task radToDeg(r) { give r * (180.0 / PI) }
 
-// --- Rounding & Precision ---
+# --- Rounding & Precision ---
 task round(x) {
     when x >= 0 { give floor(x + 0.5) }
     give ceil(x - 0.5)
@@ -25,16 +25,16 @@ task trunc(x) { give x > 0 ? floor(x) : ceil(x) }
 task sign(x) { give x > 0 ? 1 : (x < 0 ? -1 : 0) }
 task frac(x) { give x - trunc(x) }
 
-// --- Utilities (Leveraging Built-ins) ---
-// Note: sqrt, pow, abs, floor, ceil are built-ins in EZ
+# --- Utilities (Leveraging Built-ins) ---
+# Note: sqrt, pow, abs, floor, ceil are built-ins in EZ
 
-// --- Trigonometry ---
+# --- Trigonometry ---
 task factorial(n) {
     when n <= 1 { give 1 }
     give n * factorial(n - 1)
 }
 
-// Taylor series for cos
+# Taylor series for cos
 task cos(x) {
     p2 = 2 * PI
     while x > PI { x = x - p2 }
@@ -59,12 +59,12 @@ task tan(x) {
     give sin(x) / c
 }
 
-// Inverse trigonometry (using approximations)
+# Inverse trigonometry (using approximations)
 task asin(x) {
-    // Arcsin using Taylor series: x + x^3/6 + 3x^5/40 + ...
+    # Arcsin using Taylor series: x + x^3/6 + 3x^5/40 + ...
     when x < -1 or x > 1 { throw "Domain error in asin()" }
     when abs(x) > 0.9 {
-        // Use identity for better accuracy near edges
+        # Use identity for better accuracy near edges
         sign = x < 0 ? -1 : 1
         give sign * (PI / 2 - asin(sqrt(1 - x * x)))
     }
@@ -81,7 +81,7 @@ task asin(x) {
 
 task acos(x) { give PI / 2 - asin(x) }
 task atan(x) {
-    // Arctan using Taylor series
+    # Arctan using Taylor series
     when x == 0 { give 0 }
     when x > 1 { give PI / 2 - atan(1 / x) }
     when x < -1 { give -PI / 2 - atan(1 / x) }
@@ -107,12 +107,12 @@ task atan2(y, x) {
     throw "atan2(0, 0) undefined"
 }
 
-// Hyperbolic functions
+# Hyperbolic functions
 task sinh(x) { give (pow(E, x) - pow(E, -x)) / 2 }
 task cosh(x) { give (pow(E, x) + pow(E, -x)) / 2 }
 task tanh(x) { give sinh(x) / cosh(x) }
 
-// Degrees versions
+# Degrees versions
 task cosd(d) { give cos(degToRad(d)) }
 task sind(d) { give sin(degToRad(d)) }
 task tand(d) { give tan(degToRad(d)) }
@@ -121,19 +121,23 @@ task acosd(x) { give radToDeg(acos(x)) }
 task atand(x) { give radToDeg(atan(x)) }
 task atan2d(y, x) { give radToDeg(atan2(y, x)) }
 
-// --- Logarithms & Exponentials ---
-// Natural log using Taylor series: ln(1+x) = x - x^2/2 + x^3/3 - ...
+# --- Logarithms & Exponentials ---
+# Natural log using Taylor series: ln(1+x) = x - x^2/2 + x^3/3 - ...
 task ln(x) {
     when x <= 0 { throw "Domain error in ln(): x must be > 0" }
     when x == 1 { give 0 }
     
-    // Use log properties: ln(x) = ln(a * 2^n) = ln(a) + n*ln(2)
-    // where 1 <= a < 2
+    # Use log properties: ln(x) = ln(a * 2^n) = ln(a) + n*ln(2)
+    # where 1 <= a < 2
     n = 0
-    while x >= 2 { x = x / 2; n = n + 1 }
-    while x < 1 { x = x * 2; n = n - 1 }
+    while x >= 2 {
+     x = x / 2
+     n = n + 1 }
+    while x < 1 {
+         x = x * 2
+     n = n - 1 }
     
-    // Now x is in [1, 2), use y = x - 1
+    # Now x is in [1, 2), use y = x - 1
     y = x - 1
     res = 0
     term = y
@@ -151,20 +155,20 @@ task log10(x) { give ln(x) / LN10 }
 task log2(x) { give ln(x) / LN2 }
 task log(b, x) { give ln(x) / ln(b) }
 
-// Exponential: e^x using Taylor series
+# Exponential: e^x using Taylor series
 task exp(x) {
-    // Handle large/small values by scaling
+    # Handle large/small values by scaling
     when x == 0 { give 1 }
     when x < 0 { give 1 / exp(-x) }
     
-    // Split into integer and fractional parts
+    # Split into integer and fractional parts
     n = floor(x)
     frac = x - n
     
-    // e^n is E^n
+    # e^n is E^n
     intPart = pow(E, n)
     
-    // e^frac using Taylor series
+    # e^frac using Taylor series
     res = 1
     term = 1
     repeat i = 1 to 15 {
@@ -175,14 +179,14 @@ task exp(x) {
     give intPart * res
 }
 
-// --- Random Number Generation ---
-// Linear Congruential Generator (LCG)
-__randSeed = int(clock() * 1000000)
+# --- Random Number Generation ---
+# Linear Congruential Generator (LCG)
+__randSeed = num(clock() * 1000000)
 
 task seedRand(s) { __randSeed = s }
 
 task randInt(min, max) {
-    // LCG: seed = (a * seed + c) mod m
+    # LCG: seed = (a * seed + c) mod m
     a = 1103515245
     c = 12345
     m = 2147483647
@@ -203,14 +207,14 @@ task randFloat(min, max) {
 task randBool() { give randInt(0, 1) == 1 }
 task randChoice(arr) { give arr[randInt(0, len(arr) - 1)] }
 task randNormal(mean, stddev) {
-    // Box-Muller transform for normal distribution
+    # Box-Muller transform for normal distribution
     u1 = randFloat(0, 1)
     u2 = randFloat(0, 1)
     z0 = sqrt(-2 * ln(u1)) * cos(2 * PI * u2)
     give mean + z0 * stddev
 }
 
-// --- Number Theory ---
+# --- Number Theory ---
 task gcd(a, b) {
     a = abs(a)
     b = abs(b)
@@ -283,7 +287,7 @@ task isEven(n) { give n % 2 == 0 }
 task isOdd(n) { give n % 2 != 0 }
 task isPowerOf2(n) { give n > 0 and (n & (n - 1)) == 0 }
 
-// --- Array Math Utilities ---
+# --- Array Math Utilities ---
 task sum(arr) {
     total = 0
     get v in arr { total = total + v }
@@ -322,10 +326,11 @@ task minMax(arr) {
 }
 
 task average(arr) { give sum(arr) / len(arr) }
-task range(arr) { mm = minMax(arr); give mm["max"] - mm["min"] }
+task range(arr) { mm = minMax(arr)
+ give mm["max"] - mm["min"] }
 
-// --- Interpolation & Easing ---
-// Linear interpolation (already had clamp and lerp)
+# --- Interpolation & Easing ---
+# Linear interpolation (already had clamp and lerp)
 task smoothstep(edge0, edge1, x) {
     t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
     give t * t * (3 - 2 * t)
@@ -338,7 +343,7 @@ task smootherstep(edge0, edge1, x) {
 
 task step(edge, x) { give x < edge ? 0 : 1 }
 
-// Easing functions
+# Easing functions
 task easeInQuad(t) { give t * t }
 task easeOutQuad(t) { give 1 - (1 - t) * (1 - t) }
 task easeInOutQuad(t) {
@@ -357,19 +362,19 @@ task easeInSine(t) { give 1 - cos((t * PI) / 2) }
 task easeOutSine(t) { give sin((t * PI) / 2) }
 task easeInOutSine(t) { give -(cos(PI * t) - 1) / 2 }
 
-// Map value from one range to another
+# Map value from one range to another
 task map(value, inMin, inMax, outMin, outMax) {
     give outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin)
 }
 
-// Wrap angle to [-PI, PI]
+# Wrap angle to [-PI, PI]
 task wrapAngle(angle) {
     while angle > PI { angle = angle - 2 * PI }
     while angle < -PI { angle = angle + 2 * PI }
     give angle
 }
 
-// --- Distance Functions ---
+# --- Distance Functions ---
 task dist2D(x1, y1, x2, y2) {
     dx = x2 - x1
     dy = y2 - y1
@@ -387,7 +392,7 @@ task manhattan2D(x1, y1, x2, y2) {
     give abs(x2 - x1) + abs(y2 - y1)
 }
 
-// --- Models ---
+# --- Models ---
 
 model Vector2 {
     init(x, y) {
@@ -417,10 +422,7 @@ model Vector2 {
     task angleTo(v) { give atan2(v.y - self.y, v.x - self.x) }
     
     task lerp(v, t) {
-        give Vector2(
-            self.x + (v.x - self.x) * t,
-            self.y + (v.y - self.y) * t
-        )
+        give Vector2(self.x + (v.x - self.x) * t,self.y + (v.y - self.y) * t)
     }
     
     task add(v) { give Vector2(self.x + v.x, self.y + v.y) }
@@ -455,11 +457,7 @@ model Vector3 {
     task dot(v) { give self.x * v.x + self.y * v.y + self.z * v.z }
     
     task cross(v) {
-        give Vector3(
-            self.y * v.z - self.z * v.y,
-            self.z * v.x - self.x * v.z,
-            self.x * v.y - self.y * v.x
-        )
+        give Vector3(self.y * v.z - self.z * v.y,self.z * v.x - self.x * v.z,self.x * v.y - self.y * v.x)
     }
     
     task distanceTo(v) {
@@ -470,11 +468,7 @@ model Vector3 {
     }
     
     task lerp(v, t) {
-        give Vector3(
-            self.x + (v.x - self.x) * t,
-            self.y + (v.y - self.y) * t,
-            self.z + (v.z - self.z) * t
-        )
+        give Vector3( self.x + (v.x - self.x) * t, self.y + (v.y - self.y) * t,self.z + (v.z - self.z) * t)
     }
     
     task add(v) { give Vector3(self.x + v.x, self.y + v.y, self.z + v.z) }
@@ -489,8 +483,10 @@ model Vector3 {
 
 model Matrix2x2 {
     init(m00, m01, m10, m11) {
-        self.m00 = m00; self.m01 = m01
-        self.m10 = m10; self.m11 = m11
+        self.m00 = m00
+         self.m01 = m01
+        self.m10 = m10
+         self.m11 = m11
     }
     
     task determinant() { give self.m00 * self.m11 - self.m01 * self.m10 }
@@ -498,17 +494,11 @@ model Matrix2x2 {
     task inverse() {
         det = self.determinant()
         when abs(det) < 0.000001 { throw "Matrix is singular" }
-        give Matrix2x2(
-            self.m11 / det, -self.m01 / det,
-            -self.m10 / det, self.m00 / det
-        )
+        give Matrix2x2(self.m11 / det, -self.m01 / det,self.m10 / det, self.m00 / det)
     }
     
     task mulVector(v) {
-        give Vector2(
-            self.m00 * v.x + self.m01 * v.y,
-            self.m10 * v.x + self.m11 * v.y
-        )
+        give Vector2(self.m00 * v.x + self.m01 * v.y,self.m10 * v.x + self.m11 * v.y)
     }
 }
 
@@ -518,7 +508,9 @@ model Statistics {
     }
 
     task count() { give len(self.data) }
-    task sum() { s = 0; get v in self.data { s = s + v }; give s }
+    task sum() { s = 0
+     get v in self.data { s = s + v }
+     give s }
     
     task mean() {
         when len(self.data) == 0 { give 0 }
@@ -529,14 +521,14 @@ model Statistics {
         n = len(self.data)
         when n == 0 { give 0 }
         when n == 1 { give self.data[0] }
-        // Simple sort and pick middle
+        # Simple sort and pick middle
         sorted = self._simpleSort(self.data)
         when n % 2 == 1 { give sorted[n / 2] }
         give (sorted[n / 2 - 1] + sorted[n / 2]) / 2
     }
     
     task _simpleSort(arr) {
-        // Bubble sort for simplicity
+        # Bubble sort for simplicity
         n = len(arr)
         result = []
         get v in arr { push(result, v) }
@@ -591,37 +583,37 @@ model Statistics {
     task stddev() { give sqrt(self.variance()) }
     
     task sem() {
-        // Standard error of mean
+        # Standard error of mean
         when len(self.data) == 0 { give 0 }
         give self.stddev() / sqrt(len(self.data))
     }
     
-    task covariance(other) {
-        // Covariance with another dataset
-        when len(self.data) != len(other.data) { throw "Datasets must have same length" }
+    task covariance(othere) {
+        # Covariance with another dataset
+        when len(self.data) != len(othere.data) { throw "Datasets must have same length" }
         n = len(self.data)
         when n == 0 { give 0 }
         mean1 = self.mean()
-        mean2 = other.mean()
+        mean2 = othere.mean()
         sum = 0
         i = 0
         while i < n {
-            sum = sum + (self.data[i] - mean1) * (other.data[i] - mean2)
+            sum = sum + (self.data[i] - mean1) * (othere.data[i] - mean2)
             i = i + 1
         }
         give sum / n
     }
     
-    task correlation(other) {
-        // Pearson correlation coefficient
+    task correlation(othere) {
+        # Pearson correlation coefficient
         std1 = self.stddev()
-        std2 = other.stddev()
+        std2 = othere.stddev()
         when std1 == 0 or std2 == 0 { give 0 }
-        give self.covariance(other) / (std1 * std2)
+        give self.covariance(othere) / (std1 * std2)
     }
     
     task percentile(p) {
-        // Calculate p-th percentile (0-100)
+        # Calculate p-th percentile (0-100)
         when p < 0 or p > 100 { throw "Percentile must be 0-100" }
         when len(self.data) == 0 { give 0 }
         sorted = self._simpleSort(self.data)
@@ -658,7 +650,7 @@ model Statistics {
     }
 }
 
-// --- Helpers ---
+# --- Helpers ---
 task clamp(v, minV, maxV) {
     when v < minV { give minV }
     when v > maxV { give maxV }
@@ -669,13 +661,13 @@ task lerp(a, b, t) {
     give a + (b - a) * clamp(t, 0, 1)
 }
 
-// Angle conversions
+# Angle conversions
 task degToGrad(d) { give d * 10 / 9 }
 task gradToDeg(g) { give g * 9 / 10 }
 task radToGrad(r) { give radToDeg(r) * 10 / 9 }
 task gradToRad(g) { give degToRad(g * 9 / 10) }
 
-// Utility
+# Utility
 task nearlyEqual(a, b, epsilon) {
     when not epsilon { epsilon = 0.000001 }
     give abs(a - b) < epsilon
@@ -684,12 +676,12 @@ task nearlyEqual(a, b, epsilon) {
 task isFinite(x) { give x == x and abs(x) != 1 / 0 }
 task isNaN(x) { give x != x }
 
-// Angle between two points
+# Angle between two points
 task angleBetween(x1, y1, x2, y2) {
     give atan2(y2 - y1, x2 - x1)
 }
 
-// Point on circle
+# Point on circle
 task pointOnCircle(cx, cy, radius, angleRad) {
     give {
         "x": cx + radius * cos(angleRad),
@@ -697,7 +689,7 @@ task pointOnCircle(cx, cy, radius, angleRad) {
     }
 }
 
-// --- Main math object ---
+# --- Main math object ---
 math = {}
 math["PI"] = PI
 math["E"] = E
@@ -706,7 +698,7 @@ math["SQRT2"] = SQRT2
 math["LN2"] = LN2
 math["LN10"] = LN10
 
-// Trig
+# Trig
 math["sin"] = sin
 math["cos"] = cos
 math["tan"] = tan
@@ -725,14 +717,14 @@ math["acosd"] = acosd
 math["atand"] = atand
 math["atan2d"] = atan2d
 
-// Logs
+# Logs
 math["ln"] = ln
 math["log"] = log
 math["log10"] = log10
 math["log2"] = log2
 math["exp"] = exp
 
-// Random
+# Random
 math["randInt"] = randInt
 math["randFloat"] = randFloat
 math["randBool"] = randBool
@@ -740,7 +732,7 @@ math["randChoice"] = randChoice
 math["randNormal"] = randNormal
 math["seedRand"] = seedRand
 
-// Number theory
+# Number theory
 math["gcd"] = gcd
 math["lcm"] = lcm
 math["isPrime"] = isPrime
@@ -751,7 +743,7 @@ math["isEven"] = isEven
 math["isOdd"] = isOdd
 math["isPowerOf2"] = isPowerOf2
 
-// Array utilities
+# Array utilities
 math["sum"] = sum
 math["product"] = product
 math["min"] = min
@@ -760,7 +752,7 @@ math["minMax"] = minMax
 math["average"] = average
 math["range"] = range
 
-// Helpers
+# Helpers
 math["clamp"] = clamp
 math["lerp"] = lerp
 math["smoothstep"] = smoothstep
@@ -773,13 +765,13 @@ math["trunc"] = trunc
 math["sign"] = sign
 math["frac"] = frac
 
-// Models
+# Models
 math["Vector2"] = Vector2
 math["Vector3"] = Vector3
 math["Matrix2x2"] = Matrix2x2
 math["Statistics"] = Statistics
 
-// Global exports
+# Global exports
 vec2 = Vector2
 vec3 = Vector3
 mat2 = Matrix2x2
