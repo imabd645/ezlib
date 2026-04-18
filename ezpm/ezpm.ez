@@ -174,13 +174,15 @@ task fetchPackageIndex() {
     
     try {
         out "Fetching package index from " + indexUrl + "..."
-        response = http.get(indexUrl)
         
-        when not response.ok {
-            throw "Failed to fetch index: HTTP " + str(response.statusCode)
+        # Use native http_get directly
+        responseBody = http_get(indexUrl)
+        
+        when responseBody == nil or responseBody == "" {
+            throw "Empty response from registry"
         }
         
-        data = response.json()
+        data = parse_json(responseBody)
         give data
         
     } catch e {
@@ -203,12 +205,19 @@ task getPackageFromIndex(index, packageName) {
 task readLockFile() {
     lockPath = "ez.lock"
     
-    when not fs.exists(lockPath) {
+    # Check if file exists using native file_read
+    content = nil
+    try {
+        content = file_read(lockPath)
+    } catch e {
+        give {}
+    }
+    
+    when content == nil {
         give {}
     }
     
     try {
-        content = fs.readFile(lockPath)
         data = parse_json(content)
         give data
     } catch e {
@@ -233,7 +242,8 @@ task writeLockFile(resolvedPackages) {
         }
     }
     
-    fs.writeFile(lockPath, to_json(lock))
+    # Write using native file_write
+    file_write(lockPath, to_json(lock))
     out "Updated ez.lock"
 }
 
@@ -262,12 +272,8 @@ task resolvePackage(name, constraint, index, lockData) {
     
     versionData = pkgIndex.getVersion(version)
     
-    give LockedPackage(
-        name,
-        version,
-        versionData["url"],
-        has_key(versionData, "sha256") ? versionData["sha256"] : ""
-    )
+    sha = has_key(versionData, "sha256") ? versionData["sha256"] : ""
+    give LockedPackage(name, version, versionData["url"], sha)
 }
 
 # --- Installation ---
@@ -276,39 +282,48 @@ task resolvePackage(name, constraint, index, lockData) {
 task isInstalled(name, version) {
     versionPath = EZLIB_DIR + "/" + name + "/" + version
     packageEzPath = versionPath + "/package.ez"
-    give fs.exists(packageEzPath)
+    # Check if file readable
+    try {
+        file_read(packageEzPath)
+        give true
+    } catch e {
+        give false
+    }
 }
 
 # Get currently installed version of a package
 task getInstalledVersion(name) {
     pkgDir = EZLIB_DIR + "/" + name
-    when not fs.exists(pkgDir) {
-        give nil
-    }
     
     # Read package.ez to get version
     pkgEzPath = pkgDir + "/package.ez"
-    when fs.exists(pkgEzPath) {
-        try {
-            content = fs.readFile(pkgEzPath)
-            data = parse_json(content)
-            give has_key(data, "version") ? data["version"] : nil
-        } catch e {
-            give nil
-        }
+    try {
+        content = file_read(pkgEzPath)
+        data = parse_json(content)
+        give has_key(data, "version") ? data["version"] : nil
+    } catch e {
+        give nil
     }
-    give nil
 }
 
 # Download and verify package
 task downloadPackage(resolvedPkg) {
     cacheFile = CACHE_DIR + "/" + resolvedPkg.name + "-" + resolvedPkg.version + ".zip"
     
-    # Create cache directory
-    fs.createDir(CACHE_DIR)
+    # Create cache directory using system command
+    cmd = "mkdir \"" + CACHE_DIR + "\" 2>nul"
+    os.system(cmd)
     
     # Download if not cached
-    when not fs.exists(cacheFile) {
+    alreadyCached = false
+    try {
+        file_read_binary(cacheFile)
+        alreadyCached = true
+    } catch e {
+        alreadyCached = false
+    }
+    
+    when not alreadyCached {
         out "Downloading " + resolvedPkg.name + "@" + resolvedPkg.version + "..."
         
         try {
@@ -336,7 +351,9 @@ task downloadPackage(resolvedPkg) {
         actualHash = crypto_hash(fileBuffer, "sha256")
         
         when lower(actualHash) != lower(resolvedPkg.sha256) {
-            fs.remove(cacheFile)  # Remove corrupted cache
+            # Remove corrupted cache using system command
+            cmd = "del /F \"" + cacheFile + "\" 2>nul"
+            os.system(cmd)
             throw "SHA256 checksum verification failed! Expected: " + resolvedPkg.sha256 + ", Got: " + actualHash
         }
         

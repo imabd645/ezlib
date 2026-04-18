@@ -1,20 +1,70 @@
 # ============================================================================
 # EZPM CLI - Command-line interface for EZ Package Manager
-# Usage: ez cli.ez <command> [args...]
+# 
+# Usage examples:
+#   ez cli.ez  (then type: install math@1.0.0)
+# Or create wrapper scripts for each command
 # ============================================================================
 
 use "ezpm" as *
 
-# Get command-line arguments
-args = []
-i = 1
-loop {
-    when i >= args.len {
-        escape
-    }
-    push(args, args[i])
-    i = i + 1
+# Interactive mode - prompt for command
+out "EZ Package Manager (ezpm) v2.0"
+out ""
+out "Enter command (or 'help' for usage):"
+cmd = input()
+
+# Parse simple command
+parts = split(cmd, " ")
+when len(parts) == 0 {
+    showHelp()
+    give
 }
 
-# Run main command
-main(args)
+command = parts[0]
+
+# Route command
+when command == "install" {
+    when len(parts) >= 2 {
+        cmdInstall(parts[1])
+    } other {
+        cmdInstallLocked()
+    }
+}
+
+when command == "update" {
+    when len(parts) >= 2 {
+        cmdUpdate(parts[1])
+    } other {
+        out "Usage: update <package>"
+    }
+}
+
+when command == "remove" {
+    when len(parts) >= 2 {
+        cmdRemove(parts[1])
+    } other {
+        out "Usage: remove <package>"
+    }
+}
+
+when command == "list" {
+    cmdList()
+}
+
+when command == "info" {
+    when len(parts) >= 2 {
+        cmdInfo(parts[1])
+    } other {
+        out "Usage: info <package>"
+    }
+}
+
+when command == "help" or command == "--help" or command == "-h" {
+    showHelp()
+}
+
+other {
+    out "Unknown command: " + command
+    showHelp()
+}
