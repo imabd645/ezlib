@@ -1,98 +1,247 @@
-// ============================================================================
-// DATABASE - Modern SQLite wrapper for EZ Language (v2.0)
-// Simplified and modernized using Model system
-// ============================================================================
+// Database Library (Pure EZ FFI)
+// Wraps libsqlite3-0.dll for production-grade database manipulation
 
-model Database {
-    init(path) {
-        self.path = path
-        self.handle = nil
-        self.connected = false
+model DbStatement {
+    init(db, handle) {
+        self.db = db
+        self.handle = handle
     }
 
-    task connect() {
-        self.handle = dbOpen(self.path)
-        self.connected = true
-        give self
-    }
-
-    task disconnect() {
-        when self.connected {
-            dbClose(self.handle)
-            self.connected = false
+    task bind(params) {
+        when type(params) == "nil" { give self }
+        
+        count = len(params)
+        repeat i = 0 to count - 1 {
+            idx = i + 1
+            val = params[i]
+            t = typeOf(val)
+            
+            when t == "string" {
+                // Use -1 (SQLITE_TRANSIENT) to force SQLite to make its own copy of the string memory
+                os_call(self.db.bindText, "int", self.handle, idx, val, -1, -1)
+            } other when t == "integer" {
+                os_call(self.db.bindInt, "int", self.handle, idx, val)
+            } other when t == "float" {
+                // os_call strictly passes integers in registers; float arguments read garbage.
+                // Bind as text instead, using SQLite's built-in type conversion.
+                // Use -1 (SQLITE_TRANSIENT) to copy memory.
+                os_call(self.db.bindText, "int", self.handle, idx, str(val), -1, -1)
+            } other when t == "buffer" {
+                os_call(self.db.bindBlob, "int", self.handle, idx, val, len(val), -1)
+            } other when t == "nil" {
+                os_call(self.db.bindNull, "int", self.handle, idx)
+            }
         }
         give self
     }
 
-    task execute(sql, params) {
-        when !self.connected { self.connect() }
-        when params == nil { params = [] }
-        dbExec(self.handle, sql, params)
+    task step() {
+        res = os_call(self.db.stepApi, "int", self.handle)
+        when res == 100 { give true }  // SQLITE_ROW
+        when res == 101 { give false } // SQLITE_DONE
+        
+        msg = os_call(self.db.errmsg, "string", self.db.handle)
+        throw "SQL Step Error (" + str(res) + "): " + msg
+    }
+
+    task getRow() {
+        row = {}
+        colCount = os_call(self.db.columnCount, "int", self.handle)
+
+        repeat i = 0 to colCount - 1 {
+            name = os_call(self.db.columnName, "string", self.handle, i)
+            typeCode = os_call(self.db.columnType, "int", self.handle, i)
+            
+            when typeCode == 1 { // SQLITE_INTEGER
+                row[name] = os_call(self.db.columnInt, "int", self.handle, i)
+            } other when typeCode == 2 { // SQLITE_FLOAT
+                row[name] = os_call(self.db.columnDouble, "float", self.handle, i)
+            } other when typeCode == 4 { // SQLITE_BLOB
+                size = os_call(self.db.columnBytes, "int", self.handle, i)
+                ptr = os_call(self.db.columnBlob, "ptr", self.handle, i)
+                
+                // Read blob manually since os_buffer_from_ptr isn't a core FFI func
+                // We'll read it into an array of bytes
+                buf = []
+                when ptr and size > 0 {
+                    repeat b = 0 to size - 1 {
+                        push(buf, os_read_byte(ptr, b))
+                    }
+                }
+                row[name] = buf
+            } other when typeCode == 5 { // SQLITE_NULL
+                row[name] = nil
+            } other { // SQLITE_TEXT (3)
+                row[name] = os_call(self.db.columnText, "string", self.handle, i)
+            }
+        }
+        give row
+    }
+
+    task reset() {
+        os_call(self.db.resetApi, "int", self.handle)
         give self
+    }
+
+    task clearBindings() {
+        os_call(self.db.clearBindings, "int", self.handle)
+        give self
+    }
+
+    task finalize() {
+        when self.handle {
+            os_call(self.db.finalizeApi, "int", self.handle)
+            self.handle = 0
+        }
+    }
+}
+
+model Database {
+    init(path) {
+        self.lib = os_load_lib("sqlite3.dll")
+        when self.lib == 0 or type(self.lib) == "nil" {
+            self.lib = os_load_lib("libsqlite3-0.dll")
+        }
+        when self.lib == 0 or type(self.lib) == "nil" {
+            self.lib = os_load_lib("dlls\\libsqlite3-0.dll")
+        }
+        when self.lib == 0 or type(self.lib) == "nil" {
+            throw "Error: sqlite3.dll or libsqlite3-0.dll not found."
+        }
+
+        // --- Core API ---
+        self.openApi       = os_get_func(self.lib, "sqlite3_open")
+        self.prepare       = os_get_func(self.lib, "sqlite3_prepare_v2")
+        self.stepApi       = os_get_func(self.lib, "sqlite3_step")
+        self.finalizeApi   = os_get_func(self.lib, "sqlite3_finalize")
+        self.resetApi      = os_get_func(self.lib, "sqlite3_reset")
+        self.clearBindings = os_get_func(self.lib, "sqlite3_clear_bindings")
+        self.closeApi      = os_get_func(self.lib, "sqlite3_close")
+        self.errmsg        = os_get_func(self.lib, "sqlite3_errmsg")
+
+        // --- Binding API ---
+        self.bindText      = os_get_func(self.lib, "sqlite3_bind_text")
+        self.bindInt       = os_get_func(self.lib, "sqlite3_bind_int64")
+        self.bindDouble    = os_get_func(self.lib, "sqlite3_bind_double")
+        self.bindBlob      = os_get_func(self.lib, "sqlite3_bind_blob")
+        self.bindNull      = os_get_func(self.lib, "sqlite3_bind_null")
+
+        // --- Column API ---
+        self.columnCount   = os_get_func(self.lib, "sqlite3_column_count")
+        self.columnName    = os_get_func(self.lib, "sqlite3_column_name")
+        self.columnType    = os_get_func(self.lib, "sqlite3_column_type")
+        self.columnText    = os_get_func(self.lib, "sqlite3_column_text")
+        self.columnInt     = os_get_func(self.lib, "sqlite3_column_int64")
+        self.columnDouble  = os_get_func(self.lib, "sqlite3_column_double")
+        self.columnBlob    = os_get_func(self.lib, "sqlite3_column_blob")
+        self.columnBytes   = os_get_func(self.lib, "sqlite3_column_bytes")
+
+        // --- Metadata API ---
+        self.lastInsertId  = os_get_func(self.lib, "sqlite3_last_insert_rowid")
+        self.changesApi    = os_get_func(self.lib, "sqlite3_changes")
+
+        // Open Database
+        outPtr = os_alloc(8)
+        rc = os_call(self.openApi, "int", path, outPtr)
+        self.handle = os_read_uint64(outPtr, 0)
+        os_free(outPtr)
+        
+        when rc != 0 {
+            msgStr = ""
+            when self.errmsg != 0 {
+                msgStr = os_call(self.errmsg, "string", self.handle)
+            }
+            throw "DB Open Error (" + str(rc) + "): " + str(msgStr)
+        }
+    }
+
+    task prepareStatement(sql) {
+        stmtPtrBuf = os_alloc(8)
+        rc = os_call(self.prepare, "int", self.handle, sql, -1, stmtPtrBuf, 0)
+        
+        when rc != 0 {
+            msg = os_call(self.errmsg, "string", self.handle)
+            os_free(stmtPtrBuf)
+            throw "SQL Prepare Error (" + str(rc) + "): " + msg
+        }
+
+        stmtHandle = os_read_uint64(stmtPtrBuf, 0)
+        os_free(stmtPtrBuf)
+
+        give DbStatement(self, stmtHandle)
     }
 
     task query(sql, params) {
-        when !self.connected { self.connect() }
-        when params == nil { params = [] }
-        give dbQuery(self.handle, sql, params)
+        stmt = self.prepareStatement(sql)
+        stmt.bind(params)
+
+        results = []
+        while stmt.step() {
+            push(results, stmt.getRow())
+        }
+
+        stmt.finalize()
+        give results
     }
 
-    task queryOne(sql, params) {
-        result = self.query(sql, params)
-        when result.len > 0 { give result[0] }
+    task execute(sql, params) {
+        stmt = self.prepareStatement(sql)
+        stmt.bind(params)
+        
+        // Step once to execute
+        stmt.step()
+        stmt.finalize()
+        
+        give true
+    }
+
+    task lastRowId() {
+        give os_call(self.lastInsertId, "int", self.handle)
+    }
+
+    task changes() {
+        give os_call(self.changesApi, "int", self.handle)
+    }
+
+    task begin() {
+        self.execute("BEGIN TRANSACTION", nil)
+    }
+
+    task commit() {
+        self.execute("COMMIT", nil)
+    }
+
+    task rollback() {
+        self.execute("ROLLBACK", nil)
+    }
+
+    task transaction(actions) {
+        self.begin()
+        try {
+            actions()
+            self.commit()
+        } catch e {
+            self.rollback()
+            throw e
+        }
+    }
+
+    task fetchScalar(sql, params) {
+        res = self.query(sql, params)
+        when len(res) > 0 {
+            row = res[0]
+            // Return first key's value directly
+            get k in keys(row) {
+                give row[k]
+            }
+        }
         give nil
     }
 
-    task createTable(name, cols) {
-        sql = "CREATE TABLE IF NOT EXISTS " + name + " (" + join(cols, ", ") + ")"
-        self.execute(sql, [])
-        give self
+    task close() {
+        when self.handle {
+            os_call(self.closeApi, "int", self.handle)
+            self.handle = 0
+        }
     }
-
-    task insert(table, data) {
-        keys_list = keys(data)
-        values_list = values(data)
-        
-        cols = join(keys_list, ", ")
-        placeholders = []
-        repeat i = 1 to keys_list.len { push(placeholders, "?") }
-        p_str = join(placeholders, ", ")
-        
-        sql = "INSERT INTO " + table + " (" + cols + ") VALUES (" + p_str + ")"
-        self.execute(sql, values_list)
-        give self.lastId()
-    }
-
-    task update(table, id, data) {
-        keys_list = keys(data)
-        values_list = values(data)
-        
-        clauses = []
-        get k in keys_list { push(clauses, k + " = ?") }
-        set_str = join(clauses, ", ")
-        
-        sql = "UPDATE " + table + " SET " + set_str + " WHERE id = ?"
-        push(values_list, id)
-        self.execute(sql, values_list)
-        give self
-    }
-
-    task delete(table, id) {
-        self.execute("DELETE FROM " + table + " WHERE id = ?", [id])
-        give self
-    }
-
-    task lastId() {
-        give dbLastInsertId(self.handle)
-    }
-
-    task begin() { give dbBegin(self.handle) }
-    task commit() { give dbCommit(self.handle) }
-    task rollback() { give dbRollback(self.handle) }
-}
-
-// Global helper
-task openDatabase(path) {
-    db = Database(path)
-    give db.connect()
 }
