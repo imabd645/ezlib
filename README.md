@@ -297,6 +297,9 @@ ezlib/
 ├── ezorm/          ← Object-relational mapper
 ├── ezos/           ← OS and system utilities
 └── ezpdf/          ← PDF generation
+├── ezserve/        ← A Web server in EZ
+├── eztest/         ← A testing Framework for EZ
+└── ezregex/        ← Regex libarary for EZ
 ```
 
 ---
@@ -318,8 +321,4 @@ All packages in this registry are licensed under the MIT License.
 ## Links
 
 - [EZ Language Interpreter](https://github.com/imabd645/EZ-language) — The core interpreter
-- [EZ GUI Library](https://github.com/imabd645/ezgui) — Standalone GUI repo
-- [EZ Math Library](https://github.com/imabd645/EZmath) — Standalone math repo
-- [EZ Collections](https://github.com/imabd645/EZcollections) — Standalone collections repo
-- [EZ DateTime](https://github.com/imabd645/ezdatetime) — Standalone datetime repo
-- [EZ Database](https://github.com/imabd645/ezdb) — Standalone database repo
+
