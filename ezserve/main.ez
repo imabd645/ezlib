@@ -98,6 +98,7 @@ model App {
         self.routes = {}
         self.staticPaths = {}
         self.activeConnections = 0
+        self.mu = mutex()
     }
     
     task get(path, handler) { self.routes["GET_" + path] = handler }
@@ -109,13 +110,21 @@ model App {
     
     static task _handleClient(clientSocket, inst) {
         # 1. Backpressure limits
-        when inst.activeConnections > 1024 {
+        reject = false
+        lock(inst.mu, || {
+            when inst.activeConnections > 1024 {
+                reject = true
+            } other {
+                inst.activeConnections = inst.activeConnections + 1
+            }
+        })
+        
+        when reject {
             err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nServer at capacity limits."
             os_call(NetFFI.send, "int", clientSocket, err, len(err), 0)
             os_call(NetFFI.closesocket, "int", clientSocket)
             give false
         }
-        inst.activeConnections = inst.activeConnections + 1
         
         # 2. Prevent Slowloris using 5-second receive timeouts
         tBuf = os_alloc(8)
@@ -145,7 +154,9 @@ model App {
         when not headersComplete {
             os_call(NetFFI.closesocket, "int", clientSocket)
             os_free(buf)
-            inst.activeConnections = inst.activeConnections - 1
+            lock(inst.mu, || {
+                inst.activeConnections = inst.activeConnections - 1
+            })
             give false
         }
         
@@ -324,7 +335,9 @@ model App {
         os_call(NetFFI.closesocket, "int", clientSocket)
         os_free(buf)
         
-        inst.activeConnections = inst.activeConnections - 1
+        lock(inst.mu, || {
+            inst.activeConnections = inst.activeConnections - 1
+        })
     }
 
     # Initiates Windows Network Hooks securely
@@ -363,7 +376,7 @@ model App {
         }
         
         os_call(NetFFI.listen, "int", listenSocket, 128)
-        out "🚀 Hardened Native EZ Server listening on http://localhost:" + str(port)
+        out " EZ Server listening on http://localhost:" + str(port)
         
         while true {
             clientSocket = os_call(NetFFI.accept, "ptr", listenSocket, 0, 0)
