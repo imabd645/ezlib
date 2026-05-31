@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Comprehensive regex library for EZ Language. Pattern matching, validation, search/replace, and common patterns.",
   "author": "Abdullah Masood",
-  "main": "regex.ez",
+  "main": "main.ez",
   "repository": "https://github.com/imabd645/EZ",
   "keywords": ["regex", "pattern", "match", "validation", "search"],
   "license": "MIT",

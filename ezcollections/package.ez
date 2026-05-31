@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Data Structures library for EZ Language. Provides Set, Map/Dictionary, Queue, Stack, LinkedList, Deque, and Counter implementations.",
   "author": "Abdullah Masood",
-  "main": "collections.ez",
+  "main": "main.ez",
   "repository": "https://github.com/imabd645/EZ",
   "keywords": ["data-structures", "set", "map", "queue", "stack", "linkedlist", "deque", "counter"],
   "license": "MIT",
