@@ -1,13 +1,16 @@
 # ============================================================================
-# Net - Advanced Native Web App Framework for EZ
-# Production-Hardened, No C++ networking dependencies, Pure FFI Sockets
-# Provides DDoS protections, backpressure, and RFC-compliant HTTP mapping.
+# Serve - Advanced Flask-like Web Framework & Templating Engine for EZ
+# Pure FFI Sockets, Native Templating, Dynamic Routing
 # ============================================================================
 
 __ws32 = os_load_lib("ws2_32.dll")
 __msv = os_load_lib("msvcrt.dll")
 
-model NetFFI {
+model Kernel32FFI = {
+    "getFileAttributes": os_load_symbol("kernel32.dll", "GetFileAttributesA")
+}
+
+model WebFFI {
     static wsaStartup = os_get_func(__ws32, "WSAStartup")
     static wsaCleanup = os_get_func(__ws32, "WSACleanup")
     static socket = os_get_func(__ws32, "socket")
@@ -21,13 +24,11 @@ model NetFFI {
     static atoiFunc = os_get_func(__msv, "atoi")
 }
 
-model NetUtils {
+model WebUtils {
     static HTTP_STATUS = {
-        200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
-        301: "Moved Permanently", 302: "Found", 304: "Not Modified",
-        400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 
-        405: "Method Not Allowed", 418: "I'm a teapot", 429: "Too Many Requests",
-        500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable"
+        200: "OK", 301: "Moved Permanently", 302: "Found",
+        400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
+        500: "Internal Server Error"
     }
 
     static task hexVal(c) {
@@ -43,7 +44,6 @@ model NetUtils {
         give 0
     }
 
-    # Extremely efficient pure-native URL Decoder
     static task urlDecode(strVal) {
         res = ""
         i = 0
@@ -57,7 +57,7 @@ model NetUtils {
                 i = i + 1
             } other when c == "%" {
                 when i + 2 < l {
-                    val = (NetUtils.hexVal(substr(t, i + 1, 1)) * 16) + NetUtils.hexVal(substr(t, i + 2, 1))
+                    val = (WebUtils.hexVal(substr(t, i + 1, 1)) * 16) + WebUtils.hexVal(substr(t, i + 2, 1))
                     res = res + chr(val)
                     i = i + 3
                 } other {
@@ -71,77 +71,320 @@ model NetUtils {
         }
         give res
     }
+}
 
-    static task serveFile(path) {
-        when not fs_exists(path) { give { "status": 404, "body": "File not found" } }
+model TemplateEngine {
+    # Resolve dot notation like user.name
+    static task resolve(ctx, path) {
+        parts = split(str(path), ".")
+        cur = ctx
+        get p in parts {
+            p = trim(p)
+            when type(cur) == "dictionary" {
+                when has_key(cur, p) { cur = cur[p] }
+                other { give "" }
+            } other { give "" }
+        }
+        give cur
+    }
+
+    static task render(tmpl, ctx) {
+        res = ""
+        i = 0
+        l = len(tmpl)
         
-        body = readFile(path)
-        parts = split(path, ".")
-        ext = ""
-        when len(parts) > 1 { ext = lower(parts[len(parts) - 1]) }
+        while i < l {
+            vStart = indexOf(tmpl, "{{", i)
+            sStart = indexOf(tmpl, "{%", i)
+            
+            when vStart == -1 and sStart == -1 {
+                res = res + substr(tmpl, i, l - i)
+                escape
+            }
+            
+            # Find the closest tag
+            closest = -1
+            isStmt = false
+            when vStart != -1 and sStart != -1 {
+                when vStart < sStart {
+                    closest = vStart
+                    isStmt = false
+                } other {
+                    closest = sStart
+                    isStmt = true
+                }
+            } other when vStart != -1 {
+                closest = vStart
+                isStmt = false
+            } other {
+                closest = sStart
+                isStmt = true
+            }
+            
+            res = res + substr(tmpl, i, closest - i)
+            
+            when not isStmt {
+                vEnd = indexOf(tmpl, "}}", closest)
+                when vEnd == -1 {
+                    res = res + substr(tmpl, closest, l - closest)
+                    escape
+                }
+                varPath = trim(substr(tmpl, closest + 2, vEnd - (closest + 2)))
+                val = TemplateEngine.resolve(ctx, varPath)
+                res = res + str(val)
+                i = vEnd + 2
+            } other {
+                sEnd = indexOf(tmpl, "%}", closest)
+                when sEnd == -1 {
+                    res = res + substr(tmpl, closest, l - closest)
+                    escape
+                }
+                stmtRaw = trim(substr(tmpl, closest + 2, sEnd - (closest + 2)))
+                stmtParts = split(stmtRaw, " ")
+                cmd = stmtParts[0]
+                
+                when cmd == "if" {
+                    condVar = stmtParts[1]
+                    condVal = TemplateEngine.resolve(ctx, condVar)
+                    truthy = false
+                    
+                    tType = type(condVal)
+                    when tType == "boolean" { truthy = condVal }
+                    other when tType == "number" { truthy = condVal != 0 }
+                    other when tType == "string" { truthy = len(condVal) > 0 }
+                    other when tType == "array" or tType == "dictionary" { truthy = len(keys(condVal)) > 0 }
+                    other when condVal != nil { truthy = true }
+                    
+                    # Find matching endif or else
+                    blockContent = ""
+                    elseContent = ""
+                    
+                    # Need to parse block
+                    endIfIdx = indexOf(tmpl, "{% endif %}", sEnd + 2)
+                    elseIdx = indexOf(tmpl, "{% else %}", sEnd + 2)
+                    
+                    when endIfIdx == -1 {
+                        res = res + "[TEMPLATE ERROR: MISSING ENDIF]"
+                        escape
+                    }
+                    
+                    when elseIdx != -1 and elseIdx < endIfIdx {
+                        blockContent = substr(tmpl, sEnd + 2, elseIdx - (sEnd + 2))
+                        elseContent = substr(tmpl, elseIdx + 10, endIfIdx - (elseIdx + 10))
+                    } other {
+                        blockContent = substr(tmpl, sEnd + 2, endIfIdx - (sEnd + 2))
+                    }
+                    
+                    when truthy {
+                        res = res + TemplateEngine.render(blockContent, ctx)
+                    } other when len(elseContent) > 0 {
+                        res = res + TemplateEngine.render(elseContent, ctx)
+                    }
+                    
+                    i = endIfIdx + 11
+                } other when cmd == "for" {
+                    # {% for item in items %}
+                    iterVar = stmtParts[1]
+                    listVar = stmtParts[3]
+                    listVal = TemplateEngine.resolve(ctx, listVar)
+                    
+                    endForIdx = indexOf(tmpl, "{% endfor %}", sEnd + 2)
+                    when endForIdx == -1 {
+                        res = res + "[TEMPLATE ERROR: MISSING ENDFOR]"
+                        escape
+                    }
+                    
+                    blockContent = substr(tmpl, sEnd + 2, endForIdx - (sEnd + 2))
+                    
+                    when type(listVal) == "array" {
+                        get item in listVal {
+                            ctx[iterVar] = item
+                            res = res + TemplateEngine.render(blockContent, ctx)
+                        }
+                    } other when type(listVal) == "dictionary" {
+                        kList = keys(listVal)
+                        get k in kList {
+                            ctx[iterVar] = listVal[k]
+                            res = res + TemplateEngine.render(blockContent, ctx)
+                        }
+                    }
+                    
+                    i = endForIdx + 12
+                } other when cmd == "extends" {
+                    parentPath = stmtParts[1]
+                    parentPath = substr(parentPath, 1, len(parentPath) - 2)
+                    when has_key(ctx, "__base_dir__") { parentPath = ctx["__base_dir__"] + parentPath }
+                    
+                    when not has_key(ctx, "__blocks__") { ctx["__blocks__"] = {} }
+                    
+                    bIdx = i
+                    while true {
+                        bStart = indexOf(tmpl, "{% block ", bIdx)
+                        when bStart == -1 { escape }
+                        bEnd = indexOf(tmpl, "%}", bStart)
+                        bCmd = trim(substr(tmpl, bStart + 2, bEnd - (bStart + 2)))
+                        bP = split(bCmd, " ")
+                        bName = bP[1]
+                        
+                        bClose = indexOf(tmpl, "{% endblock %}", bEnd + 2)
+                        when bClose != -1 {
+                            ctx["__blocks__"][bName] = substr(tmpl, bEnd + 2, bClose - (bEnd + 2))
+                            bIdx = bClose + 14
+                        } other { escape }
+                    }
+                    
+                    parentTmpl = readFile(parentPath)
+                    give TemplateEngine.render(parentTmpl, ctx)
+                } other when cmd == "block" {
+                    bName = stmtParts[1]
+                    endBlockIdx = indexOf(tmpl, "{% endblock %}", sEnd + 2)
+                    when endBlockIdx == -1 {
+                        res = res + "[TEMPLATE ERROR: MISSING ENDBLOCK]"
+                        escape
+                    }
+                    defaultContent = substr(tmpl, sEnd + 2, endBlockIdx - (sEnd + 2))
+                    
+                    when has_key(ctx, "__blocks__") and has_key(ctx["__blocks__"], bName) {
+                        res = res + TemplateEngine.render(ctx["__blocks__"][bName], ctx)
+                    } other {
+                        res = res + TemplateEngine.render(defaultContent, ctx)
+                    }
+                    i = endBlockIdx + 14
+                } other when cmd == "include" {
+                    incPath = stmtParts[1]
+                    incPath = substr(incPath, 1, len(incPath) - 2)
+                    when has_key(ctx, "__base_dir__") { incPath = ctx["__base_dir__"] + incPath }
+                    incTmpl = readFile(incPath)
+                    res = res + TemplateEngine.render(incTmpl, ctx)
+                    i = sEnd + 2
+                } other {
+                    # Unknown stmt
+                    i = sEnd + 2
+                }
+            }
+        }
         
-        mime = "text/plain"
-        when ext == "html" or ext == "htm" { mime = "text/html" }
-        other when ext == "css" { mime = "text/css" }
-        other when ext == "js" { mime = "text/javascript" }
-        other when ext == "png" { mime = "image/png" }
-        other when ext == "jpg" or ext == "jpeg" { mime = "image/jpeg" }
-        other when ext == "json" { mime = "application/json" }
-        other when ext == "svg" { mime = "image/svg+xml" }
-        
-        give { "status": 200, "headers": { "Content-Type": mime }, "body": body }
+        give res
     }
 }
 
-model App {
-    init() {
-        self.routes = {}
-        self.staticPaths = {}
-        self.activeConnections = 0
-        self.mu = mutex()
+task render_template(path, ctx) {
+    tmpl = readFile(path)
+    
+    lastSlash = -1
+    i = 0
+    while i < len(path) {
+        when substr(path, i, 1) == "/" or substr(path, i, 1) == "\\" { lastSlash = i }
+        i = i + 1
     }
     
-    task get(path, handler) { self.routes["GET_" + path] = handler }
-    task post(path, handler) { self.routes["POST_" + path] = handler }
-    task put(path, handler) { self.routes["PUT_" + path] = handler }
-    task delete(path, handler) { self.routes["DELETE_" + path] = handler }
+    baseDir = ""
+    when lastSlash != -1 { baseDir = substr(path, 0, lastSlash + 1) }
     
-    task serveStatic(routePrefix, targetDir) { self.staticPaths[routePrefix] = targetDir }
+    ctx["__base_dir__"] = baseDir
     
-    static task _handleClient(clientSocket, inst) {
-        # 1. Backpressure limits
-        reject = false
-        lock(inst.mu, || {
-            when inst.activeConnections > 1024 {
-                reject = true
-            } other {
-                inst.activeConnections = inst.activeConnections + 1
+    give TemplateEngine.render(tmpl, ctx)
+}
+
+task redirect(url) {
+    give {
+        "status": 302,
+        "headers": {
+            "Location": url
+        },
+        "body": ""
+    }
+}
+
+model WebApp {
+    init() {
+        self.routes = {}
+        self.middlewares = []
+        self.errorHandlers = {
+            "404": nil,
+            "500": nil
+        }
+        self.sessions = {}
+    }
+    
+    task fileExists(path) {
+        attr = os_call(Kernel32FFI.getFileAttributes, "ptr", path)
+        give attr != -1
+    }
+    
+    task use(handler) {
+        push(self.middlewares, handler)
+    }
+    
+    task on_404(handler) {
+        self.errorHandlers["404"] = handler
+    }
+    
+    task on_500(handler) {
+        self.errorHandlers["500"] = handler
+    }
+    
+    task static(url_prefix, folder_path) {
+        # Ensure no trailing slashes for clean matching
+        while endsWith(url_prefix, "/") { url_prefix = substr(url_prefix, 0, len(url_prefix) - 1) }
+        while endsWith(folder_path, "/") { folder_path = substr(folder_path, 0, len(folder_path) - 1) }
+        
+        self._addRoute("GET", url_prefix + "/<file>", |req, fp=folder_path| {
+            fileName = req["params"]["file"]
+            fullFile = fp + "/" + fileName
+            
+            # Simple security check to prevent directory traversal
+            when indexOf(fileName, "..") != -1 {
+                give {"status": 403, "body": "Forbidden"}
+            }
+            
+            when not self.fileExists(fullFile) {
+                give {"status": 404, "body": "File Not Found"}
+            }
+            
+            content = readFile(fullFile)
+            contentType = "text/plain"
+            
+            when endsWith(fileName, ".html") { contentType = "text/html" }
+            other when endsWith(fileName, ".css") { contentType = "text/css" }
+            other when endsWith(fileName, ".js") { contentType = "application/javascript" }
+            other when endsWith(fileName, ".json") { contentType = "application/json" }
+            other when endsWith(fileName, ".png") { contentType = "image/png" }
+            other when endsWith(fileName, ".jpg") or endsWith(fileName, ".jpeg") { contentType = "image/jpeg" }
+            other when endsWith(fileName, ".gif") { contentType = "image/gif" }
+            other when endsWith(fileName, ".svg") { contentType = "image/svg+xml" }
+            
+            give {
+                "status": 200,
+                "body": content,
+                "headers": {
+                    "Content-Type": contentType
+                }
             }
         })
-        
-        when reject {
-            err = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\nServer at capacity limits."
-            os_call(NetFFI.send, "int", clientSocket, err, len(err), 0)
-            os_call(NetFFI.closesocket, "int", clientSocket)
-            give false
-        }
-        
-        # 2. Prevent Slowloris using 5-second receive timeouts
-        tBuf = os_alloc(8)
-        os_write_uint64(tBuf, 0, 5000)
-        os_call(NetFFI.setsockopt, "int", clientSocket, 65535, 4102, tBuf, 4)
-        os_free(tBuf)
-        
+    }
+    
+    task _addRoute(method, pathPattern, handler) {
+        # compile pattern into parts
+        parts = split(pathPattern, "/")
+        self.routes[method + "_" + pathPattern] = { "pattern": parts, "handler": handler }
+    }
+    
+    task get(path, handler) { self._addRoute("GET", path, handler) }
+    task post(path, handler) { self._addRoute("POST", path, handler) }
+    task put(path, handler) { self._addRoute("PUT", path, handler) }
+    task delete(path, handler) { self._addRoute("DELETE", path, handler) }
+    
+    static task _handleClient(clientSocket, inst) {
         buf = os_alloc(8192)
         requestBuilt = ""
         headersComplete = false
         headerEnd = 0
         contentLen = 0
         
-        # 3. Pull headers reliably matching exact boundaries
         while not headersComplete {
-            bytesRead = os_call(NetFFI.recv, "int", clientSocket, buf, 8191, 0)
-            when bytesRead <= 0 { break }
+            bytesRead = os_call(WebFFI.recv, "int", clientSocket, buf, 8191, 0)
+            when bytesRead <= 0 { escape }
             os_write_byte(buf, bytesRead, 0)
             requestBuilt = requestBuilt + os_read_string_ptr(buf)
             
@@ -152,15 +395,11 @@ model App {
         }
         
         when not headersComplete {
-            os_call(NetFFI.closesocket, "int", clientSocket)
+            os_call(WebFFI.closesocket, "int", clientSocket)
             os_free(buf)
-            lock(inst.mu, || {
-                inst.activeConnections = inst.activeConnections - 1
-            })
             give false
         }
         
-        # 4. Strict Protocol Decoding
         method = ""
         fullPath = ""
         headers = {}
@@ -175,7 +414,6 @@ model App {
             }
         }
         
-        # Parse Safe Case-Insensitive Headers
         hBlock = substr(requestBuilt, firstLBreak + 2, headerEnd - (firstLBreak + 2))
         hLines = split(hBlock, "\r\n")
         get hl in hLines {
@@ -183,24 +421,19 @@ model App {
             when cIdx != -1 {
                 k = lower(substr(hl, 0, cIdx))
                 v = substr(hl, cIdx + 1, len(hl) - (cIdx + 1))
-                
-                while len(v) > 0 and substr(v, 0, 1) == " " { v = substr(v, 1, len(v) - 1) } # trim prefix
+                while len(v) > 0 and substr(v, 0, 1) == " " { v = substr(v, 1, len(v) - 1) }
                 headers[k] = v
-                
-                when k == "content-length" { contentLen = os_call(NetFFI.atoiFunc, "int", v) }
+                when k == "content-length" { contentLen = os_call(WebFFI.atoiFunc, "int", v) }
             }
         }
         
-        # 5. Restrictive Memory Cap Limits (Max 10MB)
-        MAX_PAYLOAD = 10485760
-        when contentLen > MAX_PAYLOAD { contentLen = 0 }
+        when contentLen > 10485760 { contentLen = 0 }
         
         bodyStart = headerEnd + 4
         body = substr(requestBuilt, bodyStart, len(requestBuilt) - bodyStart)
-        
         while len(body) < contentLen {
-            bytesRead = os_call(NetFFI.recv, "int", clientSocket, buf, 8191, 0)
-            when bytesRead <= 0 { break }
+            bytesRead = os_call(WebFFI.recv, "int", clientSocket, buf, 8191, 0)
+            when bytesRead <= 0 { escape }
             os_write_byte(buf, bytesRead, 0)
             body = body + os_read_string_ptr(buf)
         }
@@ -212,10 +445,12 @@ model App {
             "body": body,
             "headers": headers,
             "query": {},
-            "form": {}
+            "form": {},
+            "params": {},
+            "cookies": {},
+            "session": {}
         }
         
-        # 6. Form & Query Generic Native Binding Extractions
         pathParts = split(fullPath, "?")
         req["path"] = pathParts[0]
         
@@ -225,9 +460,9 @@ model App {
             get pair in qPairs {
                 eIdx = indexOf(pair, "=")
                 when eIdx != -1 {
-                    req["query"][NetUtils.urlDecode(substr(pair, 0, eIdx))] = NetUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1)))
+                    req["query"][WebUtils.urlDecode(substr(pair, 0, eIdx))] = WebUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1)))
                 } other {
-                    req["query"][NetUtils.urlDecode(pair)] = true
+                    req["query"][WebUtils.urlDecode(pair)] = true
                 }
             }
         }
@@ -238,22 +473,98 @@ model App {
                 get pair in fPairs {
                     eIdx = indexOf(pair, "=")
                     when eIdx != -1 {
-                        req["form"][NetUtils.urlDecode(substr(pair, 0, eIdx))] = NetUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1)))
+                        req["form"][WebUtils.urlDecode(substr(pair, 0, eIdx))] = WebUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1)))
                     } other {
-                        req["form"][NetUtils.urlDecode(pair)] = true
+                        req["form"][WebUtils.urlDecode(pair)] = true
                     }
                 }
             }
         }
         
-        # 7. Framework Application Router
-        routeKey = req["method"] + "_" + req["path"]
+        when has_key(headers, "cookie") {
+            cStr = headers["cookie"]
+            cPairs = split(cStr, ";")
+            get pair in cPairs {
+                pair = trim(pair)
+                eIdx = indexOf(pair, "=")
+                when eIdx != -1 {
+                    req["cookies"][substr(pair, 0, eIdx)] = substr(pair, eIdx + 1, len(pair) - (eIdx + 1))
+                }
+            }
+        }
+        
+        sessionId = nil
+        when has_key(req["cookies"], "ez_session") {
+            sessionId = req["cookies"]["ez_session"]
+            when has_key(inst.sessions, sessionId) {
+                hKeys = keys(inst.sessions[sessionId])
+                get hk in hKeys { req["session"][hk] = inst.sessions[sessionId][hk] }
+            }
+        }
+        
+        # Parse routing parameters
+        reqParts = split(req["path"], "/")
+        
         handled = false
         respStr = ""
         
-        when has_key(inst.routes, routeKey) {
+        routeKeys = keys(inst.routes)
+        matchedRoute = nil
+        
+        i_route = 0
+        while i_route < len(routeKeys) {
+            rKey = routeKeys[i_route]
+            when startsWith(rKey, method + "_") {
+                routeObj = inst.routes[rKey]
+                pattParts = routeObj["pattern"]
+                
+                when len(pattParts) == len(reqParts) {
+                    match = true
+                    tempParams = {}
+                    i = 0
+                    while i < len(pattParts) {
+                        p1 = pattParts[i]
+                        p2 = reqParts[i]
+                        
+                        when startsWith(p1, "<") and indexOf(p1, ">") != -1 {
+                            paramName = substr(p1, 1, len(p1) - 2)
+                            tempParams[paramName] = WebUtils.urlDecode(p2)
+                        } other when p1 != p2 {
+                            match = false
+                            i = len(pattParts) # emulate escape
+                        }
+                        when match { i = i + 1 }
+                    }
+                    
+                    when match {
+                        req["params"] = tempParams
+                        matchedRoute = routeObj
+                        i_route = len(routeKeys) # emulate escape for outer
+                    }
+                }
+            }
+            i_route = i_route + 1
+        }
+        
+        when matchedRoute != nil {
             handled = true
-            result = inst.routes[routeKey](req)
+            
+            result = nil
+            i_mid = 0
+            while i_mid < len(inst.middlewares) {
+                m_res = inst.middlewares[i_mid](req)
+                when m_res != nil {
+                    result = m_res
+                    i_mid = len(inst.middlewares)
+                } other {
+                    i_mid = i_mid + 1
+                }
+            }
+            
+            when result == nil {
+                result = matchedRoute["handler"](req)
+            }
+            
             t = type(result)
             b = ""
             status = 200
@@ -285,76 +596,57 @@ model App {
             }
             
             statusPhrase = "OK"
-            when has_key(NetUtils.HTTP_STATUS, status) { statusPhrase = NetUtils.HTTP_STATUS[status] }
+            when has_key(WebUtils.HTTP_STATUS, status) { statusPhrase = WebUtils.HTTP_STATUS[status] }
+            
+            sessionModified = false
+            sKeys = keys(req["session"])
+            when len(sKeys) > 0 { sessionModified = true }
+            
+            when sessionModified {
+                when sessionId == nil {
+                    sessionId = str(os_call(Kernel32FFI.getFileAttributes, "ptr", "nul")) + str(len(req["headers"]))
+                    # Quick pseudo-random generation using memory ptr basically
+                }
+                inst.sessions[sessionId] = req["session"]
+                h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/"
+            }
             
             respStr = "HTTP/1.1 " + str(status) + " " + statusPhrase + "\r\n"
-            when not has_key(h, "Server") { h["Server"] = "EZ-Native Framework" }
+            when not has_key(h, "Server") { h["Server"] = "EZ Web Framework" }
             when not has_key(h, "Connection") { h["Connection"] = "close" }
             
             hKeys = keys(h)
             get hk in hKeys { respStr = respStr + hk + ": " + str(h[hk]) + "\r\n" }
             respStr = respStr + "Content-Length: " + str(len(b)) + "\r\n\r\n" + b
+            
+            os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
         }
         
         when not handled {
-            k_list = keys(inst.staticPaths)
-            get k in k_list {
-                when startsWith(req["path"], k) {
-                    handled = true
-                    pLength = len(req["path"])
-                    kLength = len(k)
-                    filePath = inst.staticPaths[k] + "\\" + substr(req["path"], kLength, pLength - kLength)
-                    
-                    fileRes = NetUtils.serveFile(filePath)
-                    status = fileRes["status"]
-                    b = fileRes["body"]
-                    statusPhrase = "OK"
-                    when has_key(NetUtils.HTTP_STATUS, status) { statusPhrase = NetUtils.HTTP_STATUS[status] }
-                    
-                    respStr = "HTTP/1.1 " + str(status) + " " + statusPhrase + "\r\n"
-                    respStr = respStr + "Server: EZ-Native Framework\r\n"
-                    respStr = respStr + "Connection: close\r\n"
-                    
-                    when has_key(fileRes, "headers") {
-                        h = fileRes["headers"]
-                        hKeys = keys(h)
-                        get hk in hKeys { respStr = respStr + hk + ": " + str(h[hk]) + "\r\n" }
-                    }
-                    
-                    respStr = respStr + "Content-Length: " + str(len(b)) + "\r\n\r\n" + b
-                }
+            when inst.errorHandlers["404"] != nil {
+                result = inst.errorHandlers["404"](req)
+                t = type(result)
+                b = ""
+                when t == "dictionary" { b = to_json(result) } other { b = str(result) }
+                respStr = "HTTP/1.1 404 Not Found\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(len(b)) + "\r\n\r\n" + b
+                os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
+            } other {
+                b = "<h1>404 Not Found</h1><p>The route does not exist.</p>"
+                respStr = "HTTP/1.1 404 Not Found\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(len(b)) + "\r\n\r\n" + b
+                os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
             }
         }
         
-        when not handled {
-            b = "<h1>404 Not Found</h1><p>The route <strong>" + req["path"] + "</strong> does not exist on this natively hardened EZ server.</p>"
-            respStr = "HTTP/1.1 404 Not Found\r\nServer: EZ-Native Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(len(b)) + "\r\n\r\n" + b
-        }
-        
-        os_call(NetFFI.send, "int", clientSocket, respStr, len(respStr), 0)
-        os_call(NetFFI.closesocket, "int", clientSocket)
+        os_call(WebFFI.closesocket, "int", clientSocket)
         os_free(buf)
-        
-        lock(inst.mu, || {
-            inst.activeConnections = inst.activeConnections - 1
-        })
     }
-
-    # Initiates Windows Network Hooks securely
-    task listen(port) {
+    
+    task run(port) {
         wsaData = os_alloc(400)
-        started = os_call(NetFFI.wsaStartup, "int", 514, wsaData)
+        os_call(WebFFI.wsaStartup, "int", 514, wsaData)
         os_free(wsaData)
-        when started != 0 {
-            out "Failed to start Winsock framework!"
-            give false
-        }
         
-        listenSocket = os_call(NetFFI.socket, "ptr", 2, 1, 6)
-        when listenSocket == -1 {
-            out "Socket generation collapsed securely."
-            give false
-        }
+        listenSocket = os_call(WebFFI.socket, "ptr", 2, 1, 6)
         
         addr = os_alloc(16)
         b1 = port & 255
@@ -367,21 +659,19 @@ model App {
         os_write_uint64(addr, 4, 0)
         os_write_uint64(addr, 8, 0)
         
-        bound = os_call(NetFFI.bind, "int", listenSocket, addr, 16)
+        bound = os_call(WebFFI.bind, "int", listenSocket, addr, 16)
         os_free(addr)
         
-        when bound != 0 {
-            out "Failed to bind to locked FFI port " + str(port)
-            give false
-        }
-        
-        os_call(NetFFI.listen, "int", listenSocket, 128)
-        out " EZ Server listening on http://localhost:" + str(port)
+        os_call(WebFFI.listen, "int", listenSocket, 128)
+        out "==================================================="
+        out " EZ Web Framework (Flask-Style) "
+        out " Listening natively on http://localhost:" + str(port)
+        out "==================================================="
         
         while true {
-            clientSocket = os_call(NetFFI.accept, "ptr", listenSocket, 0, 0)
+            clientSocket = os_call(WebFFI.accept, "ptr", listenSocket, 0, 0)
             when clientSocket != 0 and clientSocket != -1 {
-                spawn(App._handleClient, clientSocket, self)
+                spawn(WebApp._handleClient, clientSocket, self)
             }
         }
     }
