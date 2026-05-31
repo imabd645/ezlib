@@ -1,24 +1,29 @@
-// ============================================================================
-// DATETIME - Date and Time Library for EZ Language
-// Version 2.0.0 (Ported to New Interpreter)
-// Uses Unix Timestamp (milliseconds since 1970-01-01 UTC)
-// ============================================================================
+# ============================================================================
+# DATETIME - Date and Time Library for EZ Language
+# Version 2.0.0 (Ported to New Interpreter)
+# Uses Unix Timestamp (milliseconds since 1970-01-01 UTC)
+# ============================================================================
 
-// Constants
+# Milliseconds in one second
 MS_PER_SEC = 1000
+# Milliseconds in one minute
 MS_PER_MIN = 60000
+# Milliseconds in one hour
 MS_PER_HOUR = 3600000
+# Milliseconds in one day
 MS_PER_DAY = 86400000
 
-// ============================================================================
-// Helpers
-// ============================================================================
+# ============================================================================
+# Helpers
+# ============================================================================
 
+# Performs floor division of two numbers (a / b)
 task floorDiv(a, b) {
     rem = a % b
     give (a - rem) / b
 }
 
+# Checks if a given year is a leap year
 task isLeap(year) {
     when (year % 4 == 0) and ((year % 100 != 0) or (year % 400 == 0)) {
         give true
@@ -26,14 +31,16 @@ task isLeap(year) {
     give false
 }
 
+# Pads a single-digit number with a leading zero for formatting
 task padZero(num) {
     s = str(num)
-    when s.len == 1 {
+    when len(s) == 1 {
         give "0" + s
     }
     give s
 }
 
+# Returns the number of days in a specific month of a given year
 task daysInMonth(year, month) {
     when month == 2 {
         when isLeap(year) { give 29 }
@@ -47,14 +54,16 @@ task daysInMonth(year, month) {
     give 31
 }
 
-// ============================================================================
-// Core Functions
-// ============================================================================
+# ============================================================================
+# Core Functions
+# ============================================================================
 
+# Returns the current system time in milliseconds (Unix timestamp)
 task now() {
     give clock()
 }
 
+# Decomposes a millisecond timestamp into year, month, day, hour, etc.
 task getComponents(ts) {
     total_ms = ts
     ms = total_ms % 1000
@@ -70,7 +79,7 @@ task getComponents(ts) {
     total_days = floorDiv(total_hours, 24)
     
     current_year = 1970
-    weekday = (total_days + 4) % 7 // 1970-01-01 was Thursday (4)
+    weekday = (total_days + 4) % 7 # 1970-01-01 was Thursday (4)
     
     days_in_year = 365
     when isLeap(current_year) { days_in_year = 366 }
@@ -106,6 +115,7 @@ task getComponents(ts) {
     }
 }
 
+# Creates a Unix timestamp from date and time components
 task makeTimestamp(y, m, d, h, mn, s) {
     total_days = 0
     curr_y = 1970
@@ -134,21 +144,25 @@ task makeTimestamp(y, m, d, h, mn, s) {
     give total_ms
 }
 
+# Formats a timestamp into a human-readable YYYY-MM-DD HH:MM:SS string
 task format(ts) {
     c = getComponents(ts)
     give str(c.year) + "-" + padZero(c.month) + "-" + padZero(c.day) + " " + padZero(c.hour) + ":" + padZero(c.minute) + ":" + padZero(c.second)
 }
 
+# Returns the date portion of a timestamp as a YYYY-MM-DD string
 task dateStr(ts) {
     c = getComponents(ts)
     give str(c.year) + "-" + padZero(c.month) + "-" + padZero(c.day)
 }
 
+# Returns the time portion of a timestamp as an HH:MM:SS string
 task timeStr(ts) {
     c = getComponents(ts)
     give padZero(c.hour) + ":" + padZero(c.minute) + ":" + padZero(c.second)
 }
 
+# Adds an arbitrary amount of time to a timestamp
 task addTime(ts, days, hours, mins, secs) {
     ms = ts
     ms = ms + (days * MS_PER_DAY)
@@ -158,25 +172,30 @@ task addTime(ts, days, hours, mins, secs) {
     give ms
 }
 
+# Calculates the difference between two timestamps in milliseconds
 task diffMs(ts1, ts2) {
     give ts1 - ts2
 }
 
+# Calculates the difference between two timestamps in full days
 task diffDays(ts1, ts2) {
     diff = ts1 - ts2
     give floorDiv(diff, MS_PER_DAY)
 }
 
+# Returns a formatted date string with an optional hour offset
 task dateTime(x) {
     time = now()
     time = addTime(time, 0, x, 0, 0)
     give format(time)
 }
 
+# Returns the current date as a YYYY-MM-DD string
 task dateNow() {
     give dateStr(now()) 
 }
 
+# Returns the current time as an HH:MM:SS string with an optional hour offset
 task timeNow(x) {
     time = now()
     time = addTime(time, 0, x, 0, 0)
