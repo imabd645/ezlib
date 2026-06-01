@@ -1,13 +1,27 @@
 # ============================================================================
-# Serve - Advanced Flask-like Web Framework & Templating Engine for EZ
+# Web - Advanced Flask-like Web Framework & Templating Engine for EZ
 # Pure FFI Sockets, Native Templating, Dynamic Routing
 # ============================================================================
 
+__kernel32 = os_load_lib("kernel32.dll")
 __ws32 = os_load_lib("ws2_32.dll")
 __msv = os_load_lib("msvcrt.dll")
 
-model Kernel32FFI = {
-    "getFileAttributes": os_load_symbol("kernel32.dll", "GetFileAttributesA")
+# Safe indexOf wrapper that supports 3 arguments on pre-compiled binaries
+task indexOfSafe(s, search, start) {
+    when type(start) == "nil" {
+        give indexOf(s, search)
+    }
+    when start < 0 { start = 0 }
+    when start >= len(s) { give -1 }
+    sub = substr(s, start, len(s) - start)
+    rel = indexOf(sub, search)
+    when rel == -1 { give -1 }
+    give start + rel
+}
+
+Kernel32FFI = {
+    "getFileAttributes": os_get_func(__kernel32, "GetFileAttributesA")
 }
 
 model WebFFI {
@@ -22,6 +36,7 @@ model WebFFI {
     static closesocket = os_get_func(__ws32, "closesocket")
     static setsockopt = os_get_func(__ws32, "setsockopt")
     static atoiFunc = os_get_func(__msv, "atoi")
+    static atofFunc = os_get_func(__msv, "atof")
 }
 
 model WebUtils {
@@ -88,14 +103,29 @@ model TemplateEngine {
         give cur
     }
 
+    static task getTokens(s) {
+        parts = split(s, " ")
+        tokens = []
+        i = 0
+        l = len(parts)
+        while i < l {
+            p = trim(parts[i])
+            when len(p) > 0 {
+                push(tokens, p)
+            }
+            i = i + 1
+        }
+        give tokens
+    }
+
     static task render(tmpl, ctx) {
         res = ""
         i = 0
         l = len(tmpl)
         
         while i < l {
-            vStart = indexOf(tmpl, "{{", i)
-            sStart = indexOf(tmpl, "{%", i)
+            vStart = indexOfSafe(tmpl, "{{", i)
+            sStart = indexOfSafe(tmpl, "{%", i)
             
             when vStart == -1 and sStart == -1 {
                 res = res + substr(tmpl, i, l - i)
@@ -124,7 +154,7 @@ model TemplateEngine {
             res = res + substr(tmpl, i, closest - i)
             
             when not isStmt {
-                vEnd = indexOf(tmpl, "}}", closest)
+                vEnd = indexOfSafe(tmpl, "}}", closest)
                 when vEnd == -1 {
                     res = res + substr(tmpl, closest, l - closest)
                     escape
@@ -134,132 +164,147 @@ model TemplateEngine {
                 res = res + str(val)
                 i = vEnd + 2
             } other {
-                sEnd = indexOf(tmpl, "%}", closest)
+                sEnd = indexOfSafe(tmpl, "%}", closest)
                 when sEnd == -1 {
                     res = res + substr(tmpl, closest, l - closest)
                     escape
                 }
                 stmtRaw = trim(substr(tmpl, closest + 2, sEnd - (closest + 2)))
-                stmtParts = split(stmtRaw, " ")
-                cmd = stmtParts[0]
+                stmtTokens = TemplateEngine.getTokens(stmtRaw)
                 
-                when cmd == "if" {
-                    condVar = stmtParts[1]
-                    condVal = TemplateEngine.resolve(ctx, condVar)
-                    truthy = false
-                    
-                    tType = type(condVal)
-                    when tType == "boolean" { truthy = condVal }
-                    other when tType == "number" { truthy = condVal != 0 }
-                    other when tType == "string" { truthy = len(condVal) > 0 }
-                    other when tType == "array" or tType == "dictionary" { truthy = len(keys(condVal)) > 0 }
-                    other when condVal != nil { truthy = true }
-                    
-                    # Find matching endif or else
-                    blockContent = ""
-                    elseContent = ""
-                    
-                    # Need to parse block
-                    endIfIdx = indexOf(tmpl, "{% endif %}", sEnd + 2)
-                    elseIdx = indexOf(tmpl, "{% else %}", sEnd + 2)
-                    
-                    when endIfIdx == -1 {
-                        res = res + "[TEMPLATE ERROR: MISSING ENDIF]"
-                        escape
-                    }
-                    
-                    when elseIdx != -1 and elseIdx < endIfIdx {
-                        blockContent = substr(tmpl, sEnd + 2, elseIdx - (sEnd + 2))
-                        elseContent = substr(tmpl, elseIdx + 10, endIfIdx - (elseIdx + 10))
-                    } other {
-                        blockContent = substr(tmpl, sEnd + 2, endIfIdx - (sEnd + 2))
-                    }
-                    
-                    when truthy {
-                        res = res + TemplateEngine.render(blockContent, ctx)
-                    } other when len(elseContent) > 0 {
-                        res = res + TemplateEngine.render(elseContent, ctx)
-                    }
-                    
-                    i = endIfIdx + 11
-                } other when cmd == "for" {
-                    # {% for item in items %}
-                    iterVar = stmtParts[1]
-                    listVar = stmtParts[3]
-                    listVal = TemplateEngine.resolve(ctx, listVar)
-                    
-                    endForIdx = indexOf(tmpl, "{% endfor %}", sEnd + 2)
-                    when endForIdx == -1 {
-                        res = res + "[TEMPLATE ERROR: MISSING ENDFOR]"
-                        escape
-                    }
-                    
-                    blockContent = substr(tmpl, sEnd + 2, endForIdx - (sEnd + 2))
-                    
-                    when type(listVal) == "array" {
-                        get item in listVal {
-                            ctx[iterVar] = item
-                            res = res + TemplateEngine.render(blockContent, ctx)
-                        }
-                    } other when type(listVal) == "dictionary" {
-                        kList = keys(listVal)
-                        get k in kList {
-                            ctx[iterVar] = listVal[k]
-                            res = res + TemplateEngine.render(blockContent, ctx)
-                        }
-                    }
-                    
-                    i = endForIdx + 12
-                } other when cmd == "extends" {
-                    parentPath = stmtParts[1]
-                    parentPath = substr(parentPath, 1, len(parentPath) - 2)
-                    when has_key(ctx, "__base_dir__") { parentPath = ctx["__base_dir__"] + parentPath }
-                    
-                    when not has_key(ctx, "__blocks__") { ctx["__blocks__"] = {} }
-                    
-                    bIdx = i
-                    while true {
-                        bStart = indexOf(tmpl, "{% block ", bIdx)
-                        when bStart == -1 { escape }
-                        bEnd = indexOf(tmpl, "%}", bStart)
-                        bCmd = trim(substr(tmpl, bStart + 2, bEnd - (bStart + 2)))
-                        bP = split(bCmd, " ")
-                        bName = bP[1]
-                        
-                        bClose = indexOf(tmpl, "{% endblock %}", bEnd + 2)
-                        when bClose != -1 {
-                            ctx["__blocks__"][bName] = substr(tmpl, bEnd + 2, bClose - (bEnd + 2))
-                            bIdx = bClose + 14
-                        } other { escape }
-                    }
-                    
-                    parentTmpl = readFile(parentPath)
-                    give TemplateEngine.render(parentTmpl, ctx)
-                } other when cmd == "block" {
-                    bName = stmtParts[1]
-                    endBlockIdx = indexOf(tmpl, "{% endblock %}", sEnd + 2)
-                    when endBlockIdx == -1 {
-                        res = res + "[TEMPLATE ERROR: MISSING ENDBLOCK]"
-                        escape
-                    }
-                    defaultContent = substr(tmpl, sEnd + 2, endBlockIdx - (sEnd + 2))
-                    
-                    when has_key(ctx, "__blocks__") and has_key(ctx["__blocks__"], bName) {
-                        res = res + TemplateEngine.render(ctx["__blocks__"][bName], ctx)
-                    } other {
-                        res = res + TemplateEngine.render(defaultContent, ctx)
-                    }
-                    i = endBlockIdx + 14
-                } other when cmd == "include" {
-                    incPath = stmtParts[1]
-                    incPath = substr(incPath, 1, len(incPath) - 2)
-                    when has_key(ctx, "__base_dir__") { incPath = ctx["__base_dir__"] + incPath }
-                    incTmpl = readFile(incPath)
-                    res = res + TemplateEngine.render(incTmpl, ctx)
+                when len(stmtTokens) == 0 {
                     i = sEnd + 2
                 } other {
-                    # Unknown stmt
-                    i = sEnd + 2
+                    cmd = stmtTokens[0]
+                    
+                    when cmd == "if" {
+                        condVar = ""
+                        when len(stmtTokens) > 1 { condVar = stmtTokens[1] }
+                        condVal = TemplateEngine.resolve(ctx, condVar)
+                        truthy = false
+                        
+                        tType = type(condVal)
+                        when tType == "bool" { truthy = condVal }
+                        other when tType == "integer" or tType == "float" { truthy = condVal != 0 }
+                        other when tType == "string" { truthy = len(condVal) > 0 }
+                        other when tType == "array" { truthy = len(condVal) > 0 }
+                        other when tType == "dictionary" { truthy = len(keys(condVal)) > 0 }
+                        other when condVal != nil { truthy = true }
+                        
+                        # Find matching endif or else
+                        blockContent = ""
+                        elseContent = ""
+                        
+                        # Need to parse block
+                        endIfIdx = indexOfSafe(tmpl, "{% endif %}", sEnd + 2)
+                        elseIdx = indexOfSafe(tmpl, "{% else %}", sEnd + 2)
+                        
+                        when endIfIdx == -1 {
+                            res = res + "[TEMPLATE ERROR: MISSING ENDIF]"
+                            escape
+                        }
+                        
+                        when elseIdx != -1 and elseIdx < endIfIdx {
+                            blockContent = substr(tmpl, sEnd + 2, elseIdx - (sEnd + 2))
+                            elseContent = substr(tmpl, elseIdx + 10, endIfIdx - (elseIdx + 10))
+                        } other {
+                            blockContent = substr(tmpl, sEnd + 2, endIfIdx - (sEnd + 2))
+                        }
+                        
+                        when truthy {
+                            res = res + TemplateEngine.render(blockContent, ctx)
+                        } other when len(elseContent) > 0 {
+                            res = res + TemplateEngine.render(elseContent, ctx)
+                        }
+                        
+                        i = endIfIdx + 11
+                    } other when cmd == "for" {
+                        # {% for item in items %}
+                        iterVar = ""
+                        listVar = ""
+                        when len(stmtTokens) > 1 { iterVar = stmtTokens[1] }
+                        when len(stmtTokens) > 3 { listVar = stmtTokens[3] }
+                        listVal = TemplateEngine.resolve(ctx, listVar)
+                        
+                        endForIdx = indexOfSafe(tmpl, "{% endfor %}", sEnd + 2)
+                        when endForIdx == -1 {
+                            res = res + "[TEMPLATE ERROR: MISSING ENDFOR]"
+                            escape
+                        }
+                        
+                        blockContent = substr(tmpl, sEnd + 2, endForIdx - (sEnd + 2))
+                        
+                        when type(listVal) == "array" {
+                            get item in listVal {
+                                ctx[iterVar] = item
+                                res = res + TemplateEngine.render(blockContent, ctx)
+                            }
+                        } other when type(listVal) == "dictionary" {
+                            kList = keys(listVal)
+                            get k in kList {
+                                ctx[iterVar] = listVal[k]
+                                res = res + TemplateEngine.render(blockContent, ctx)
+                            }
+                        }
+                        
+                        i = endForIdx + 12
+                    } other when cmd == "extends" {
+                        parentPath = ""
+                        when len(stmtTokens) > 1 { parentPath = stmtTokens[1] }
+                        parentPath = substr(parentPath, 1, len(parentPath) - 2)
+                        when has_key(ctx, "__base_dir__") { parentPath = ctx["__base_dir__"] + parentPath }
+                        
+                        when not has_key(ctx, "__blocks__") { ctx["__blocks__"] = {} }
+                        
+                        bIdx = i
+                        while true {
+                            bStart = indexOfSafe(tmpl, "{% block ", bIdx)
+                            when bStart == -1 { escape }
+                            bEnd = indexOfSafe(tmpl, "%}", bStart)
+                            bCmd = trim(substr(tmpl, bStart + 2, bEnd - (bStart + 2)))
+                            bTokens = TemplateEngine.getTokens(bCmd)
+                            when len(bTokens) < 2 {
+                                escape
+                            }
+                            bName = bTokens[1]
+                            
+                            bClose = indexOfSafe(tmpl, "{% endblock %}", bEnd + 2)
+                            when bClose != -1 {
+                                ctx["__blocks__"][bName] = substr(tmpl, bEnd + 2, bClose - (bEnd + 2))
+                                bIdx = bClose + 14
+                            } other { escape }
+                        }
+                        
+                        parentTmpl = readFile(parentPath)
+                        give TemplateEngine.render(parentTmpl, ctx)
+                    } other when cmd == "block" {
+                        bName = ""
+                        when len(stmtTokens) > 1 { bName = stmtTokens[1] }
+                        endBlockIdx = indexOfSafe(tmpl, "{% endblock %}", sEnd + 2)
+                        when endBlockIdx == -1 {
+                            res = res + "[TEMPLATE ERROR: MISSING ENDBLOCK]"
+                            escape
+                        }
+                        defaultContent = substr(tmpl, sEnd + 2, endBlockIdx - (sEnd + 2))
+                        
+                        when has_key(ctx, "__blocks__") and has_key(ctx["__blocks__"], bName) {
+                            res = res + TemplateEngine.render(ctx["__blocks__"][bName], ctx)
+                        } other {
+                            res = res + TemplateEngine.render(defaultContent, ctx)
+                        }
+                        i = endBlockIdx + 14
+                    } other when cmd == "include" {
+                        incPath = ""
+                        when len(stmtTokens) > 1 { incPath = stmtTokens[1] }
+                        incPath = substr(incPath, 1, len(incPath) - 2)
+                        when has_key(ctx, "__base_dir__") { incPath = ctx["__base_dir__"] + incPath }
+                        incTmpl = readFile(incPath)
+                        res = res + TemplateEngine.render(incTmpl, ctx)
+                        i = sEnd + 2
+                    } other {
+                        # Unknown stmt
+                        i = sEnd + 2
+                    }
                 }
             }
         }
@@ -305,11 +350,12 @@ model WebApp {
             "500": nil
         }
         self.sessions = {}
+        self.sessionCounter = 0
     }
     
     task fileExists(path) {
         attr = os_call(Kernel32FFI.getFileAttributes, "ptr", path)
-        give attr != -1
+        give attr != -1 and attr != 4294967295
     }
     
     task use(handler) {
@@ -324,14 +370,14 @@ model WebApp {
         self.errorHandlers["500"] = handler
     }
     
-    task static(url_prefix, folder_path) {
+    task serve_static(url_prefix, folder_path) {
         # Ensure no trailing slashes for clean matching
         while endsWith(url_prefix, "/") { url_prefix = substr(url_prefix, 0, len(url_prefix) - 1) }
         while endsWith(folder_path, "/") { folder_path = substr(folder_path, 0, len(folder_path) - 1) }
         
-        self._addRoute("GET", url_prefix + "/<file>", |req, fp=folder_path| {
+        self._addRoute("GET", url_prefix + "/<file>", |req| {
             fileName = req["params"]["file"]
-            fullFile = fp + "/" + fileName
+            fullFile = folder_path + "/" + fileName
             
             # Simple security check to prevent directory traversal
             when indexOf(fileName, "..") != -1 {
@@ -600,12 +646,12 @@ model WebApp {
             
             sessionModified = false
             sKeys = keys(req["session"])
-            when len(sKeys) > 0 { sessionModified = true }
+            when len(sKeys) > 0 or sessionId != nil { sessionModified = true }
             
             when sessionModified {
                 when sessionId == nil {
-                    sessionId = str(os_call(Kernel32FFI.getFileAttributes, "ptr", "nul")) + str(len(req["headers"]))
-                    # Quick pseudo-random generation using memory ptr basically
+                    inst.sessionCounter = inst.sessionCounter + 1
+                    sessionId = "sess_" + str(inst.sessionCounter) + "_" + replace(str(clock()), ".", "")
                 }
                 inst.sessions[sessionId] = req["session"]
                 h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/"

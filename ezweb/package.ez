@@ -1,10 +1,10 @@
 {
-    "name": "serve",
+    "name": "web",
     "version": "1.0.0",
     "description": "Flask/Express style Web App Framework for EZ",
     "author": "EZ Development Team",
     "main": "main.ez",
     "dependencies": {
-        "fs": "*"
+        
     }
 }
