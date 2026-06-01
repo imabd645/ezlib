@@ -15,7 +15,7 @@ ez install email
 ## Quick Start (Gmail SMTPS Example)
 
 ```ez
-use "lib/email.ez"
+use "email"
 
 # 1. Initialize the SMTP Client
 # SmtpClient(smtp_server, port, username, password)
@@ -51,6 +51,9 @@ out "Email sent successfully!"
 * **`useSsl`** (boolean, default: `true`): Enables SSL/TLS upgrades.
 * **`verbose`** (boolean, default: `false`): Enables libcurl's deep connection trace logging on stdout.
 * **`isHtml`** (boolean, default: `false`): Sets the content type to `text/html`. If false, defaults to `text/plain`.
+* **`replyTo`** (string, default: `""`): Sets a custom reply-to address (e.g. `support@yourdomain.com`).
+* **`priority`** (string, default: `""`): Sets priority value (e.g. `"1"` for High, `"3"` for Normal, `"5"` for Low). Adds `X-Priority` and standard `Importance` headers.
+* **`customHeaders`** (dictionary, default: `{}`): A key-value dictionary of custom MIME headers to include in the email (e.g., `{"X-Mailer": "EZ SMTP"}`).
 
 #### Methods
 * **`init(server, port, username, password)`**: Instantiates a new SMTP Client.
