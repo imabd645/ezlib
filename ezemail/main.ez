@@ -47,6 +47,9 @@ model SmtpClient {
         self.useSsl = true
         self.verbose = false
         self.isHtml = false
+        self.replyTo = ""
+        self.priority = ""  # e.g., "1" (High), "3" (Normal), "5" (Low)
+        self.customHeaders = {}
     }
 
     task send(fromEmail, toEmail, subject, body) {
@@ -97,6 +100,29 @@ model SmtpClient {
         payload = "To: " + toEmail + "\r\n"
         payload = payload + "From: " + fromEmail + "\r\n"
         payload = payload + "Subject: " + subject + "\r\n"
+        
+        when len(self.replyTo) > 0 {
+            payload = payload + "Reply-To: " + self.replyTo + "\r\n"
+        }
+        
+        when len(self.priority) > 0 {
+            payload = payload + "X-Priority: " + self.priority + "\r\n"
+            when self.priority == "1" {
+                payload = payload + "Importance: High\r\n"
+            } other when self.priority == "5" {
+                payload = payload + "Importance: Low\r\n"
+            }
+        }
+        
+        # Add custom headers
+        chKeys = keys(self.customHeaders)
+        i_ch = 0
+        while i_ch < len(chKeys) {
+            k = chKeys[i_ch]
+            v = self.customHeaders[k]
+            payload = payload + k + ": " + str(v) + "\r\n"
+            i_ch = i_ch + 1
+        }
         
         when self.isHtml {
             payload = payload + "Content-Type: text/html; charset=UTF-8\r\n\r\n"
