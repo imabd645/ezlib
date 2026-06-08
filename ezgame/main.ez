@@ -4,6 +4,25 @@
 # ============================================================================
 
 # Virtual Key Codes
+# ----------------------------------------------------------------------------
+# FFI Bindings for Audio and Graphics
+winmm = os_load_lib("winmm.dll")
+user32 = os_load_lib("user32.dll")
+gdi32 = os_load_lib("gdi32.dll")
+msimg32 = os_load_lib("msimg32.dll")
+
+mciSendStringA = os_get_func(winmm, "mciSendStringA")
+LoadImageA = os_get_func(user32, "LoadImageA")
+FindWindowA = os_get_func(user32, "FindWindowA")
+GetDC = os_get_func(user32, "GetDC")
+ReleaseDC = os_get_func(user32, "ReleaseDC")
+CreateCompatibleDC = os_get_func(gdi32, "CreateCompatibleDC")
+SelectObject = os_get_func(gdi32, "SelectObject")
+DeleteDC = os_get_func(gdi32, "DeleteDC")
+DeleteObject = os_get_func(gdi32, "DeleteObject")
+TransparentBlt = os_get_func(msimg32, "TransparentBlt")
+# ----------------------------------------------------------------------------
+
 KEYS = {
     "LEFT": 37,
     "UP": 38,
@@ -87,6 +106,48 @@ model GUIGame {
     task drawText(text, x, y, size, r, g, b) { gui_draw_text(self.win, text, x, y, size, r, g, b) }
     task isKeyDown(key) { give gui_is_key_down(key) == 1 }
     task getCenter() { give [self.width / 2, self.height / 2] }
+
+    # ========================================================================
+    # FFI Methods: Audio and Graphics
+    # ========================================================================
+    task playSound(path) {
+        os_call(mciSendStringA, "int", "play " + path + " from 0", 0, 0, 0)
+    }
+    
+    task loopSound(path) {
+        os_call(mciSendStringA, "int", "play " + path + " from 0 repeat", 0, 0, 0)
+    }
+    
+    task stopSound(path) {
+        os_call(mciSendStringA, "int", "stop " + path, 0, 0, 0)
+    }
+    
+    task loadImage(path) {
+        # LoadImageA(NULL, path, IMAGE_BITMAP(0), 0, 0, LR_LOADFROMFILE(0x10))
+        give os_call(LoadImageA, "ptr", 0, path, 0, 0, 0, 16)
+    }
+    
+    task drawImage(imgHandle, x, y, w, h, srcW, srcH, tR, tG, tB) {
+        # 1. Get raw HWND for this window using its title
+        hwnd = os_call(FindWindowA, "ptr", 0, self.title)
+        when hwnd == 0 { give false }
+        
+        # 2. Setup Device Contexts
+        hdcDest = os_call(GetDC, "ptr", hwnd)
+        hdcSrc = os_call(CreateCompatibleDC, "ptr", hdcDest)
+        
+        # 3. Select Bitmap
+        oldBmp = os_call(SelectObject, "ptr", hdcSrc, imgHandle)
+        
+        # 4. Draw with Transparency (COLORREF = R | (G << 8) | (B << 16))
+        crTransparent = tR + (tG * 256) + (tB * 65536)
+        os_call(TransparentBlt, "int", hdcDest, x, y, w, h, hdcSrc, 0, 0, srcW, srcH, crTransparent)
+        
+        # 5. Cleanup Resources
+        os_call(SelectObject, "ptr", hdcSrc, oldBmp)
+        os_call(DeleteDC, "int", hdcSrc)
+        os_call(ReleaseDC, "int", hwnd, hdcDest)
+    }
 }
 
 # Factory function
