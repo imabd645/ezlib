@@ -38,11 +38,11 @@ model GUIGame {
     }
 
     task onUpdateCall(callback) {
-        self.onUpdate = callback
+        self.onUpdateCb = [callback]
     }
 
     task onDrawCall(callback) {
-        self.onDraw = callback
+        self.onDrawCb = [callback]
     }
 
     task stop() {
@@ -55,13 +55,15 @@ model GUIGame {
         when self.isExiting { give false }
         
         # 1. Update Game State
-        when self.onUpdate != nil {
-            self.onUpdate()
+        when self.onUpdateCb != nil {
+            cb = self.onUpdateCb[0]
+            cb()
         }
         
         # 2. Render
-        when self.onDraw != nil {
-            self.onDraw()
+        when self.onDrawCb != nil {
+            cb = self.onDrawCb[0]
+            cb()
         }
     }
 
