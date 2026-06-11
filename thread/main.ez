@@ -1,63 +1,784 @@
 # ============================================================================
-# EZ Production-Ready Threading Library
-# High-level concurrency primitives leveraging native async/await
+# EZ Thread Library — Production-Ready Concurrency Primitives
+# Version 2.0
+#
+# Built on top of native EZ primitives:
+#   spawn(fn, ...args) → future   — runs fn on a real OS thread
+#   await(future)      → value    — blocks until future is ready
+#   wait(ms)                      — sleep for ms milliseconds
+#   clock()            → number   — Unix timestamp in milliseconds
+#
+# All shared state (arrays, dicts, instances) is reference-counted and safe
+# to share across threads. Closures are deep-copied into each thread.
 # ============================================================================
 
-# --- Task Combinators ---
+# ============================================================================
+# SECTION 1: Core Combinators
+# ============================================================================
 
-# Waits for all futures in a list and returns their results as an array.
-# Usage: results = thread.all([f1, f2, f3])
+# ---------------------------------------------------------------------------
+# all(futures) → array
+# Awaits every future in the list and returns all results in order.
+# If any future throws, the error propagates immediately.
+# ---------------------------------------------------------------------------
 task all(futures) {
     results = []
     get f in futures {
-        push(results, await f)
+        push(results, await(f))
     }
     give results
 }
 
-# --- High-Level Parallel Patterns ---
+# ---------------------------------------------------------------------------
+# allSettled(futures) → array of {ok, value} or {ok:false, error}
+# Like all() but never throws. Every settled result is captured.
+# ---------------------------------------------------------------------------
+task allSettled(futures) {
+    results = []
+    get f in futures {
+        try {
+            val = await(f)
+            push(results, {"ok": true, "value": val, "error": nil})
+        } catch e {
+            push(results, {"ok": false, "value": nil, "error": str(e)})
+        }
+    }
+    give results
+}
 
-# Processes an array in parallel by spawning an async task for each item.
-# Best for CPU-bound tasks or I/O bound tasks that can run concurrently.
-# Usage: results = thread.parallelMap(items, |x| { return x * 2 })
+# ---------------------------------------------------------------------------
+# any(futures) → first resolved value
+# Returns the result of the first future that completes successfully.
+# Throws if ALL futures fail.
+# Uses polling with 1ms sleep to avoid busy-wait overhead.
+# ---------------------------------------------------------------------------
+task any(futures) {
+    done = {"resolved": false, "value": nil, "errors": []}
+    remaining = len(futures)
+
+    task monitorOne(f, shared) {
+        try {
+            val = await(f)
+            when not shared["resolved"] {
+                shared["resolved"] = true
+                shared["value"] = val
+            }
+        } catch e {
+            push(shared["errors"], str(e))
+        }
+    }
+
+    monitors = []
+    get f in futures {
+        push(monitors, spawn(monitorOne, f, done))
+    }
+
+    # Poll until resolved or all failed
+    while not done["resolved"] and len(done["errors"]) < remaining {
+        wait(1)
+    }
+
+    # Drain monitors
+    get m in monitors {
+        try { await(m) } catch e { }
+    }
+
+    when done["resolved"] {
+        give done["value"]
+    }
+    throw "thread.any: all " + str(remaining) + " futures rejected"
+}
+
+# ---------------------------------------------------------------------------
+# race(futures) → first result (value or thrown error)
+# Returns the result of the first future that settles (resolved OR rejected).
+# ---------------------------------------------------------------------------
+task race(futures) {
+    done = {"settled": false, "value": nil, "error": nil, "isError": false}
+
+    task monitorOne(f, shared) {
+        try {
+            val = await(f)
+            when not shared["settled"] {
+                shared["settled"] = true
+                shared["value"] = val
+                shared["isError"] = false
+            }
+        } catch e {
+            when not shared["settled"] {
+                shared["settled"] = true
+                shared["error"] = str(e)
+                shared["isError"] = true
+            }
+        }
+    }
+
+    monitors = []
+    get f in futures {
+        push(monitors, spawn(monitorOne, f, done))
+    }
+
+    while not done["settled"] { wait(1) }
+
+    get m in monitors {
+        try { await(m) } catch e { }
+    }
+
+    when done["isError"] {
+        throw done["error"]
+    }
+    give done["value"]
+}
+
+# ============================================================================
+# SECTION 2: Parallel Mapping & Iteration
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# parallelMap(items, mapper) → array
+# Spawns mapper(item) for each item concurrently, returns results in order.
+# ---------------------------------------------------------------------------
 task parallelMap(items, mapper) {
     futures = []
     get item in items {
-        # Offload each mapping to a background thread
-        push(futures, async mapper(item))
+        push(futures, spawn(mapper, item))
     }
-    
-    # Wait for all background tasks to complete
     give all(futures)
 }
 
-# --- Task Group Management ---
+# ---------------------------------------------------------------------------
+# parallelFilter(items, predicate) → array
+# Runs predicate(item) for each item concurrently, returns items where true.
+# ---------------------------------------------------------------------------
+task parallelFilter(items, predicate) {
+    task testItem(item) {
+        give {"item": item, "keep": predicate(item)}
+    }
 
-# A TaskGroup collects multiple async operations so they can be awaited together.
+    futures = []
+    get item in items {
+        push(futures, spawn(testItem, item))
+    }
+
+    results = all(futures)
+    filtered = []
+    get r in results {
+        when r["keep"] { push(filtered, r["item"]) }
+    }
+    give filtered
+}
+
+# ---------------------------------------------------------------------------
+# parallelForEach(items, fn)
+# Runs fn(item) for each item concurrently. Waits for all to finish.
+# Useful for side effects (writing files, sending requests, etc.)
+# ---------------------------------------------------------------------------
+task parallelForEach(items, fn) {
+    futures = []
+    get item in items {
+        push(futures, spawn(fn, item))
+    }
+    all(futures)
+}
+
+# ---------------------------------------------------------------------------
+# parallelMapBatched(items, mapper, batchSize) → array
+# Processes items in batches to avoid spawning too many threads at once.
+# Useful when items list is very large.
+# ---------------------------------------------------------------------------
+task parallelMapBatched(items, mapper, batchSize) {
+    when batchSize <= 0 { batchSize = 8 }
+    results = []
+    i = 0
+    total = len(items)
+
+    while i < total {
+        # Build batch
+        batch = []
+        j = i
+        while j < total and j < i + batchSize {
+            push(batch, items[j])
+            j = j + 1
+        }
+
+        # Process batch in parallel
+        batchResults = parallelMap(batch, mapper)
+        get r in batchResults {
+            push(results, r)
+        }
+
+        i = i + batchSize
+    }
+    give results
+}
+
+# ============================================================================
+# SECTION 3: Task Groups
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# TaskGroup — Collects and awaits multiple async tasks.
+# ---------------------------------------------------------------------------
 model TaskGroup {
     init() {
         self.tasks = []
     }
-    
-    # Adds a new operation to the group
-    task add(func, arg) {
-        t = async func(arg)
+
+    # Add a task: spawn fn(arg) immediately and track it
+    task add(fn, arg) {
+        t = spawn(fn, arg)
         push(self.tasks, t)
         give t
     }
-    
-    # Waits for all tasks in the group and returns results
+
+    # Add a no-argument task
+    task addTask(fn) {
+        t = spawn(fn)
+        push(self.tasks, t)
+        give t
+    }
+
+    # Await all tasks, returns results array
     task wait() {
         give all(self.tasks)
     }
+
+    # Await all tasks, never throws — returns allSettled results
+    task waitSettled() {
+        give allSettled(self.tasks)
+    }
+
+    # Count pending tasks
+    task size() {
+        give len(self.tasks)
+    }
 }
 
-# Returns a new TaskGroup instance
+# Factory
 task createGroup() {
     give TaskGroup()
 }
 
-# Standardized Sleep (millis)
+# ============================================================================
+# SECTION 4: Deferred / Promise-like pattern
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# deferred() → {future, resolve, state}
+# Creates a manually resolvable future backed by a shared state dict.
+#
+# Usage:
+#   d = deferred()
+#   spawn(|| { wait(100)   d.resolve("hello") })
+#   result = await(d.future)
+# ---------------------------------------------------------------------------
+task deferred() {
+    state = {"resolved": false, "value": nil}
+
+    task waitForResolve(s) {
+        while not s["resolved"] { wait(1) }
+        give s["value"]
+    }
+
+    fut = spawn(waitForResolve, state)
+
+    task resolveDeferred(val) {
+        state["value"] = val
+        state["resolved"] = true
+    }
+
+    give {"future": fut, "resolve": resolveDeferred, "state": state}
+}
+
+# ============================================================================
+# SECTION 5: Retry & Resilience
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# retry(fn, maxAttempts, delayMs) → value
+# Calls fn() up to maxAttempts times. Waits delayMs between retries.
+# Throws the last error if all attempts fail.
+# ---------------------------------------------------------------------------
+task retry(fn, maxAttempts, delayMs) {
+    when maxAttempts <= 0 { maxAttempts = 3 }
+    when delayMs < 0 { delayMs = 0 }
+
+    lastError = "retry: no attempts made"
+    attempt = 0
+
+    while attempt < maxAttempts {
+        attempt = attempt + 1
+        try {
+            give fn()
+        } catch e {
+            lastError = e
+            when attempt < maxAttempts and delayMs > 0 {
+                wait(delayMs)
+            }
+        }
+    }
+
+    throw lastError
+}
+
+# ---------------------------------------------------------------------------
+# retryAsync(fn, maxAttempts, delayMs) → value
+# Like retry() but fn() is run on a new thread each attempt.
+# ---------------------------------------------------------------------------
+task retryAsync(fn, maxAttempts, delayMs) {
+    when maxAttempts <= 0 { maxAttempts = 3 }
+    when delayMs < 0 { delayMs = 0 }
+
+    lastError = "retryAsync: no attempts made"
+    attempt = 0
+
+    while attempt < maxAttempts {
+        attempt = attempt + 1
+        try {
+            fut = spawn(fn)
+            give await(fut)
+        } catch e {
+            lastError = e
+            when attempt < maxAttempts and delayMs > 0 {
+                wait(delayMs)
+            }
+        }
+    }
+
+    throw lastError
+}
+
+# ============================================================================
+# SECTION 6: Timeout Utilities
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# withTimeout(future, ms) → value
+# Awaits a future but throws "timeout" if it doesn't complete within ms.
+# ---------------------------------------------------------------------------
+task withTimeout(future, ms) {
+    state = {"settled": false, "value": nil, "error": nil, "isError": false}
+    deadline = clock() + ms
+
+    task awaitFuture(f, s) {
+        try {
+            val = await(f)
+            s["value"] = val
+            s["isError"] = false
+        } catch e {
+            s["error"] = str(e)
+            s["isError"] = true
+        }
+        s["settled"] = true
+    }
+
+    monitor = spawn(awaitFuture, future, state)
+
+    while not state["settled"] {
+        when clock() >= deadline {
+            throw "timeout after " + str(ms) + "ms"
+        }
+        wait(1)
+    }
+
+    try { await(monitor) } catch e { }
+
+    when state["isError"] {
+        throw state["error"]
+    }
+    give state["value"]
+}
+
+# ---------------------------------------------------------------------------
+# timeoutFn(fn, ms) → value
+# Runs fn() in background and throws if it takes longer than ms.
+# ---------------------------------------------------------------------------
+task timeoutFn(fn, ms) {
+    fut = spawn(fn)
+    give withTimeout(fut, ms)
+}
+
+# ---------------------------------------------------------------------------
+# delay(ms) → future
+# Returns a future that resolves to nil after ms milliseconds.
+# ---------------------------------------------------------------------------
+task delayTask(ms) {
+    wait(ms)
+    give nil
+}
+
+task delay(ms) {
+    give spawn(delayTask, ms)
+}
+
+# ============================================================================
+# SECTION 7: Rate Limiting & Throttling
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# throttle(fn, minDelayMs) → wrapper function
+# Returns a new function that won't call fn more than once per minDelayMs.
+# Subsequent calls within the window are silently ignored.
+# ---------------------------------------------------------------------------
+task throttle(fn, minDelayMs) {
+    state = {"lastCall": 0}
+
+    give || {
+        now = clock()
+        when now - state["lastCall"] >= minDelayMs {
+            state["lastCall"] = now
+            give fn()
+        }
+        give nil
+    }
+}
+
+# ---------------------------------------------------------------------------
+# debounce(fn, waitMs) → wrapper function
+# Delays calling fn until waitMs ms after the last call.
+# ---------------------------------------------------------------------------
+task debounce(fn, waitMs) {
+    state = {"lastCall": 0, "pending": false}
+
+    give || {
+        state["lastCall"] = clock()
+
+        when not state["pending"] {
+            state["pending"] = true
+            spawn(|| {
+                while clock() - state["lastCall"] < waitMs {
+                    wait(1)
+                }
+                state["pending"] = false
+                fn()
+            })
+        }
+        give nil
+    }
+}
+
+# ============================================================================
+# SECTION 8: Channels (Producer/Consumer)
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Channel — A thread-safe unbounded FIFO queue using shared dict state.
+# ---------------------------------------------------------------------------
+model Channel {
+    init() {
+        self.state = {
+            "queue": [],
+            "closed": false,
+            "size": 0
+        }
+    }
+
+    # Send a value to the channel
+    task send(value) {
+        when self.state["closed"] {
+            throw "Channel: send on closed channel"
+        }
+        push(self.state["queue"], value)
+        self.state["size"] = self.state["size"] + 1
+        give self
+    }
+
+    # Receive a value, blocking until one is available
+    task receive() {
+        while self.state["size"] == 0 {
+            when self.state["closed"] {
+                throw "Channel: receive on empty closed channel"
+            }
+            wait(1)
+        }
+        val = self.state["queue"][0]
+        newQueue = []
+        i = 1
+        while i < len(self.state["queue"]) {
+            push(newQueue, self.state["queue"][i])
+            i = i + 1
+        }
+        self.state["queue"] = newQueue
+        self.state["size"] = self.state["size"] - 1
+        give val
+    }
+
+    # Try to receive without blocking — returns nil if empty
+    task tryReceive() {
+        when self.state["size"] == 0 { give nil }
+        val = self.state["queue"][0]
+        newQueue = []
+        i = 1
+        while i < len(self.state["queue"]) {
+            push(newQueue, self.state["queue"][i])
+            i = i + 1
+        }
+        self.state["queue"] = newQueue
+        self.state["size"] = self.state["size"] - 1
+        give val
+    }
+
+    # Receive with a timeout; throws "timeout" if nothing arrives within ms
+    task receiveTimeout(ms) {
+        deadline = clock() + ms
+        while self.state["size"] == 0 {
+            when self.state["closed"] {
+                throw "Channel: receive on empty closed channel"
+            }
+            when clock() >= deadline {
+                throw "Channel: receive timeout after " + str(ms) + "ms"
+            }
+            wait(1)
+        }
+        give self.receive()
+    }
+
+    # Close the channel — no more sends allowed
+    task close() {
+        self.state["closed"] = true
+        give self
+    }
+
+    task isClosed() { give self.state["closed"] }
+    task len()      { give self.state["size"] }
+
+    # Drain all pending items as an array
+    task drain() {
+        items = []
+        while self.state["size"] > 0 {
+            push(items, self.receive())
+        }
+        give items
+    }
+}
+
+task createChannel() {
+    give Channel()
+}
+
+# ============================================================================
+# SECTION 9: Mutex
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Mutex — Mutual exclusion lock using shared dictionary spin state.
+# ---------------------------------------------------------------------------
+model Mutex {
+    init() {
+        self.state = {"locked": false}
+    }
+
+    task acquire() {
+        while self.state["locked"] { wait(1) }
+        self.state["locked"] = true
+        give self
+    }
+
+    task acquireTimeout(ms) {
+        deadline = clock() + ms
+        while self.state["locked"] {
+            when clock() >= deadline {
+                throw "Mutex: acquire timeout after " + str(ms) + "ms"
+            }
+            wait(1)
+        }
+        self.state["locked"] = true
+        give self
+    }
+
+    task release() {
+        self.state["locked"] = false
+        give self
+    }
+
+    task tryAcquire() {
+        when self.state["locked"] { give false }
+        self.state["locked"] = true
+        give true
+    }
+
+    task withLock(fn) {
+        self.acquire()
+        try {
+            result = fn()
+            self.release()
+            give result
+        } catch e {
+            self.release()
+            throw e
+        }
+    }
+
+    task isLocked() { give self.state["locked"] }
+}
+
+task createMutex() {
+    give Mutex()
+}
+
+# ============================================================================
+# SECTION 10: Semaphore
+# ============================================================================
+
+model Semaphore {
+    init(maxConcurrent) {
+        self.state = {"count": maxConcurrent, "max": maxConcurrent}
+    }
+
+    task acquire() {
+        while self.state["count"] <= 0 { wait(1) }
+        self.state["count"] = self.state["count"] - 1
+        give self
+    }
+
+    task acquireTimeout(ms) {
+        deadline = clock() + ms
+        while self.state["count"] <= 0 {
+            when clock() >= deadline {
+                throw "Semaphore: acquire timeout after " + str(ms) + "ms"
+            }
+            wait(1)
+        }
+        self.state["count"] = self.state["count"] - 1
+        give self
+    }
+
+    task release() {
+        when self.state["count"] < self.state["max"] {
+            self.state["count"] = self.state["count"] + 1
+        }
+        give self
+    }
+
+    task tryAcquire() {
+        when self.state["count"] <= 0 { give false }
+        self.state["count"] = self.state["count"] - 1
+        give true
+    }
+
+    task withPermit(fn) {
+        self.acquire()
+        try {
+            result = fn()
+            self.release()
+            give result
+        } catch e {
+            self.release()
+            throw e
+        }
+    }
+
+    task available() { give self.state["count"] }
+    task max()       { give self.state["max"] }
+}
+
+task createSemaphore(n) {
+    give Semaphore(n)
+}
+
+# ============================================================================
+# SECTION 11: Worker Pool
+# ============================================================================
+
+model WorkerPool {
+    init(size) {
+        self.sem = Semaphore(size)
+        self.size = size
+    }
+
+    task mapAll(items, mapper) {
+        sem = self.sem
+        task pooledMapper(item) {
+            sem.acquire()
+            try {
+                result = mapper(item)
+                sem.release()
+                give result
+            } catch e {
+                sem.release()
+                throw e
+            }
+        }
+        give parallelMap(items, pooledMapper)
+    }
+}
+
+task createPool(size) {
+    give WorkerPool(size)
+}
+
+# ============================================================================
+# SECTION 12: Utility Helpers
+# ============================================================================
+
 task sleep(ms) {
     wait(ms)
 }
+
+task times(n, fn) {
+    indices = []
+    i = 0
+    while i < n {
+        push(indices, i)
+        i = i + 1
+    }
+    give parallelMap(indices, fn)
+}
+
+task sequential(fns) {
+    results = []
+    get fn in fns {
+        push(results, fn())
+    }
+    give results
+}
+
+task memoizeAsync(fn) {
+    cache = {}
+    give |arg| {
+        key = str(arg)
+        when has_key(cache, key) {
+            give cache[key]
+        }
+        result = fn(arg)
+        cache[key] = result
+        give result
+    }
+}
+
+# ============================================================================
+# SECTION 13: Thread namespace dictionary
+# ============================================================================
+
+thread = {}
+
+thread["all"]               = all
+thread["allSettled"]        = allSettled
+thread["any"]               = any
+thread["race"]              = race
+thread["parallelMap"]       = parallelMap
+thread["parallelFilter"]    = parallelFilter
+thread["parallelForEach"]   = parallelForEach
+thread["parallelMapBatched"]= parallelMapBatched
+thread["times"]             = times
+thread["sequential"]        = sequential
+thread["createGroup"]       = createGroup
+thread["deferred"]          = deferred
+thread["TaskGroup"]         = TaskGroup
+thread["retry"]             = retry
+thread["retryAsync"]        = retryAsync
+thread["withTimeout"]       = withTimeout
+thread["timeoutFn"]         = timeoutFn
+thread["delay"]             = delay
+thread["throttle"]          = throttle
+thread["debounce"]          = debounce
+thread["createChannel"]     = createChannel
+thread["Channel"]           = Channel
+thread["createMutex"]       = createMutex
+thread["Mutex"]             = Mutex
+thread["createSemaphore"]   = createSemaphore
+thread["Semaphore"]         = Semaphore
+thread["createPool"]        = createPool
+thread["WorkerPool"]        = WorkerPool
+thread["sleep"]             = sleep
+thread["memoizeAsync"]      = memoizeAsync

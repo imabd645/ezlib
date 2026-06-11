@@ -1,587 +1,160 @@
-# EZ GUI Library
+# ezgui — GUI Desktop Application Library for EZ
 
-A high-level, object-oriented GUI framework for the EZ programming language. Build desktop applications with 20+ widgets, smart layouts, dialogs, timers, and themes — all in clean, readable EZ syntax.
+> **Version:** 1.0  
+> **Import:** `use "ezgui"`  
+> **File:** `E:\ezlib\ezgui\main.ez`  
+> **Requires:** EZ GUI runtime built-ins
 
 ---
 
-## Installation
+## Overview
 
-```bash
-ez install gui
-```
+`ezgui` is a high-level, object-oriented desktop GUI library for EZ, built on native EZ GUI built-ins. It provides:
+
+- **Window and widget creation** — labels, buttons, inputs, dropdowns, checkboxes, etc.
+- **Layout managers** — `VBox` (vertical stack), `HBox` (horizontal stack), `Grid`
+- **Menus** — menu bar, context menus, submenus
+- **Advanced widgets** — ListView, TreeView, DatePicker, Spinner, ProgressBar, Tabs
+- **Window management** — resize, center, opacity, always-on-top, drag-and-drop
+- **Themes** — neon, retro, ocean
+- **Dialogs** — alert, confirm, input, file open/save, color picker, font picker
+- **System tray** integration
+- **Notification/balloon** messages
 
 ---
 
 ## Quick Start
 
 ```ez
-use "gui"
+use "ezgui"
 
-win = gui.window("Hello EZ", 400, 300)
+win = gui.window("My App", 400, 300)
 
-win.label("Hello, World!", 50, 100, 300, 50)
-   .color("blue")
-   .font("Arial", 24)
+win.label("Hello, World!", 10, 10, 200, 30)
 
+btn = win.button("Click Me", 10, 60, 120, 35, || {
+    gui.alert("You clicked the button!")
+})
+
+win.show()
 win.run()
 ```
 
-> **Note:** Always call `win.run()` last — it starts the event loop.
-
 ---
 
-## Table of Contents
+## `gui` Object
 
-- [Window](#window)
-- [Widgets](#widgets)
-  - [Label](#label)
-  - [Button](#button)
-  - [Input](#input)
-  - [TextArea](#textarea)
-  - [Checkbox](#checkbox)
-  - [Radio](#radio)
-  - [Dropdown](#dropdown)
-  - [Slider](#slider)
-  - [ProgressBar](#progressbar)
-  - [Spinner](#spinner)
-  - [DatePicker](#datepicker)
-  - [ListView](#listview)
-  - [TreeView](#treeview)
-  - [Image](#image)
-  - [Panel & ScrollPanel](#panel--scrollpanel)
-  - [Tabs](#tabs)
-  - [Toolbar & StatusBar](#toolbar--statusbar)
-- [Layouts](#layouts)
-  - [VBox](#vbox)
-  - [HBox](#hbox)
-  - [Grid](#grid)
-- [Styling](#styling)
-  - [Colors](#colors)
-  - [Fonts](#fonts)
-  - [Themes](#themes)
-- [Dialogs](#dialogs)
-- [Timers](#timers)
-- [Events](#events)
-- [Menus](#menus)
-- [Examples](#examples)
+After `use "ezgui"`, a `gui` global dictionary provides the main entry points.
 
----
-
-## Window
-
-Creates a top-level application window.
+### `gui.window(title, width, height)` → `Window`
+Creates a new top-level window.
 
 ```ez
-win = gui.window(title, width, height)
+use "ezgui"
+
+win = gui.window("My Application", 800, 600)
+win.show()
+win.run()
 ```
 
-### Window Methods
-
-| Method | Description |
-|--------|-------------|
-| `win.run()` | Start the event loop (call last) |
-| `win.setTitle(text)` | Change the window title |
-| `win.resize(w, h)` | Resize the window |
-| `win.center()` | Center on screen |
-| `win.getSize()` | Returns `[width, height]` |
-| `win.getPos()` | Returns `[x, y]` |
-| `win.setMinSize(w, h)` | Set minimum window size |
-| `win.setAlwaysOnTop(v)` | Keep window above others |
-| `win.setOpacity(a)` | Set opacity (0.0–1.0) |
-| `win.setIcon(path)` | Set window icon |
-| `win.minimize()` | Minimize |
-| `win.maximize()` | Maximize |
-| `win.restore()` | Restore from min/max |
-| `win.onClose(cb)` | Callback when closed |
-| `win.onResize(cb)` | Callback when resized |
-| `win.onKeyPress(cb)` | Callback on key down |
-| `win.onKeyUp(cb)` | Callback on key up |
-| `win.onDrop(cb)` | Callback on file drop |
-
----
-
-## Widgets
-
-All widgets inherit these universal methods:
-
-| Method | Description |
-|--------|-------------|
-| `widget.text(v)` | Set displayed text/value |
-| `widget.value()` | Get current text/value |
-| `widget.color(name)` | Set background color (auto text contrast) |
-| `widget.font(name, size)` | Set font |
-| `widget.pos(x, y, w, h)` | Reposition widget |
-| `widget.show()` | Make visible |
-| `widget.hide()` | Hide |
-| `widget.enable()` | Enable interaction |
-| `widget.disable()` | Disable interaction |
-| `widget.setTooltip(text)` | Set hover tooltip |
-| `widget.style(bg, fg, font, size)` | Combined styling |
-| `widget.onClick(cb)` | Click callback |
-| `widget.onFocus(cb)` | Focus callback |
-| `widget.onBlur(cb)` | Blur callback |
-| `widget.onHover(cb)` | Hover callback |
-| `widget.onRightClick(cb)` | Right-click callback |
-| `widget.onDoubleClick(cb)` | Double-click callback |
-
----
-
-### Label
-
-Displays static or dynamic text.
+### `gui.alert(title, message)`
+Shows a modal alert dialog. If called with one argument, shows `"EZ"` as title.
 
 ```ez
-lbl = win.label("Hello", x, y, w, h)
-lbl.text("Updated text")
-lbl.font("Arial", 18).color("dark")
+gui.alert("Warning", "File not found!")
+gui.alert("Short alert message")  # Title = "EZ"
 ```
 
----
-
-### Button
-
-Clickable button with a callback.
-
-```ez
-btn = win.button("Save", x, y, w, h, || {
-    out "Saved!"
-})
-btn.color("green")
-```
-
----
-
-### Input
-
-Single-line text field.
+### `gui.setTheme(name)`
+Sets the global color theme. Available themes:
+- `"neon"` — Dark background with cyan accents
+- `"retro"` — Warm browns with orange accents
+- `"ocean"` — Deep blue with blue accents
 
 ```ez
-inp = win.input(x, y, w, h)
-inp.text("Default value")
+use "ezgui"
 
-value = inp.value()
-
-inp.onTextChange(|| {
-    out "Changed: " + inp.value()
-})
-```
-
----
-
-### TextArea
-
-Multi-line text editor.
-
-```ez
-ta = win.textarea(x, y, w, h)
-ta.text("Line one\nLine two")
-content = ta.value()
-
-ta.onTextChange(|| {
-    out ta.value()
-})
-```
-
----
-
-### Checkbox
-
-Toggleable on/off control.
-
-```ez
-cb = win.checkbox("Remember me", x, y, w, h)
-cb.setChecked(1)
-
-when cb.checked() {
-    out "Checked"
-}
-
-cb.onChange(|| {
-    out "State: " + str(cb.checked())
-})
-```
-
----
-
-### Radio
-
-Single-selection radio button. Pass `groupStart = 1` for the first button in a group.
-
-```ez
-opt1 = win.radio("Option A", x, y,    w, h, 1)
-opt2 = win.radio("Option B", x, y+30, w, h, 0)
-opt3 = win.radio("Option C", x, y+60, w, h, 0)
-
-when opt1.selected() {
-    out "A selected"
-}
-```
-
----
-
-### Dropdown
-
-ComboBox selection list.
-
-```ez
-dd = win.dropdown(x, y, w, h)
-dd.add("Apple").add("Banana").add("Cherry")
-
-choice = dd.selected()
-
-dd.onChange(|| {
-    out "Selected: " + dd.selected()
-})
-```
-
----
-
-### Slider
-
-Horizontal range slider.
-
-```ez
-sl = win.slider(x, y, w, h, 0, 100)
-sl.setValue(50)
-
-current = sl.value()
-
-sl.onChange(|| {
-    out "Value: " + str(sl.value())
-})
-```
-
----
-
-### ProgressBar
-
-Visual progress indicator.
-
-```ez
-pb = win.progressBar(x, y, w, h)
-pb.setRange(0, 100)
-pb.setValue(75)
-```
-
----
-
-### Spinner
-
-Numeric up/down spinner.
-
-```ez
-sp = win.spinner(x, y, w, h, 1, 99)
-sp.setValue(25)
-
-age = sp.value()
-```
-
----
-
-### DatePicker
-
-Calendar date picker control.
-
-```ez
-dp = win.datePicker(x, y, w, h)
-dp.setValue(2025, 6, 15)
-
-date = dp.value()  # Returns "2025-06-15"
-
-dp.onChange(|| {
-    out dp.value()
-})
-```
-
----
-
-### ListView
-
-Multi-column list with sortable rows.
-
-```ez
-lv = win.listView(x, y, w, h)
-
-lv.addColumn("Name", 150)
-  .addColumn("Age",  80)
-  .addColumn("City", 120)
-
-lv.addRow(["Alice", "25", "Karachi"])
-lv.addRow(["Bob",   "30", "Lahore"])
-
-idx  = lv.selected()
-row  = lv.getRow(0)  # ["Alice", "25", "Karachi"]
-
-lv.removeRow(1)
-lv.clear()
-
-lv.onChange(|| {
-    out "Selected row: " + str(lv.selected())
-})
-```
-
----
-
-### TreeView
-
-Hierarchical tree structure.
-
-```ez
-tv = win.treeView(x, y, w, h)
-
-root   = tv.add(0, "Root")
-child1 = tv.add(root, "Child A")
-child2 = tv.add(root, "Child B")
-        tv.add(child1, "Grandchild")
-
-tv.onChange(|| {
-    out "Selected: " + str(tv.selected())
-})
-
-tv.clear()
-```
-
----
-
-### Image
-
-Displays an image from file.
-
-```ez
-img = win.image("photo.png", x, y, w, h)
-img.load("other.jpg")
-```
-
----
-
-### Panel & ScrollPanel
-
-Panels are child containers that can hold any widget.
-
-```ez
-panel = win.panel(x, y, w, h)
-panel.color("light")
-panel.label("Inside panel", 10, 10, 100, 30)
-panel.button("Go", 10, 50, 80, 30, || { out "clicked" })
-```
-
-For scrollable areas with large content:
-
-```ez
-scroll = win.scrollPanel(x, y, w, h)
-scroll.contentSize(w, 2000)
-
-repeat i = 0 to 49 {
-    scroll.label("Row " + str(i), 10, i * 40, 200, 30)
-}
-```
-
----
-
-### Tabs
-
-Tabbed page switcher.
-
-```ez
-tabs = win.tabs(x, y, w, h, || {
-    out "Tab changed to: " + str(tabs.selected())
-})
-
-tabs.add("Home").add("Settings").add("About")
-```
-
----
-
-### Toolbar & StatusBar
-
-```ez
-tb = win.toolbar(x, y, w, h)
-tb.addButton("New",  || { out "New"  })
-tb.addButton("Open", || { out "Open" })
-tb.addButton("Save", || { out "Save" })
-
-sb = win.statusbar()
-sb.setText("Ready")
-```
-
----
-
-## Layouts
-
-Layouts automatically position widgets — no manual x/y math needed.
-
-### VBox
-
-Stacks widgets vertically with consistent padding.
-
-```ez
-vb = win.vbox(10)  # 10px padding
-
-vb.label("Name:", 380, 25)
-nameIn = vb.input(380, 35)
-
-vb.label("Email:", 380, 25)
-emailIn = vb.input(380, 35)
-
-vb.addSpace(20)
-
-vb.button("Submit", 380, 50, || {
-    out nameIn.value()
-}).color("blue")
-```
-
-**Available VBox methods:**
-`label` · `button` · `input` · `textarea` · `dropdown` · `checkbox` · `radio` · `slider` · `progressBar` · `listView` · `treeView` · `datePicker` · `spinner` · `image` · `groupbox` · `separator` · `addSpace`
-
----
-
-### HBox
-
-Places widgets side by side horizontally.
-
-```ez
-hb = win.hbox(10)
-
-hb.label("Sort by:", 80, 30)
-hb.dropdown(150, 30)
-hb.button("Go", 80, 30, || { out "go" })
-```
-
-**Available HBox methods:**
-`label` · `button` · `input` · `dropdown` · `checkbox` · `image` · `separator` · `addSpace`
-
----
-
-### Grid
-
-Arranges widgets in a column grid, wrapping automatically.
-
-```ez
-grid = win.grid(3, 10, 10)  # 3 columns, 10px x/y padding
-grid.setCellSize(100, 40)
-
-grid.button("1", || { out "1" })
-grid.button("2", || { out "2" })
-grid.button("3", || { out "3" })
-grid.button("4", || { out "4" })  # Wraps to row 2
-
-grid.skipCell()                   # Leave a cell empty
-grid.newRow()                     # Force next row
-```
-
-For variable column widths:
-
-```ez
-grid.setColWidths([200, 120, 80])
-```
-
-**Available Grid methods:**
-`label` · `button` · `input` · `textarea` · `checkbox` · `dropdown` · `spinner` · `image` · `skipCell` · `newRow`
-
----
-
-## Styling
-
-### Colors
-
-Apply a named color to any widget. Text contrast is calculated automatically.
-
-```ez
-widget.color("blue")
-```
-
-| Name | RGB | Auto Text |
-|------|-----|-----------|
-| `white` | 255, 255, 255 | Dark |
-| `black` | 0, 0, 0 | White |
-| `gray` | 128, 128, 128 | Dark |
-| `dark` | 40, 40, 40 | White |
-| `light` | 240, 240, 240 | Dark |
-| `red` | 255, 0, 0 | White |
-| `green` | 0, 200, 0 | White |
-| `blue` | 0, 0, 255 | White |
-| `neon` | 0, 255, 255 | Dark |
-| `yellow` | 255, 255, 0 | Dark |
-| `purple` | 128, 0, 128 | White |
-| `orange` | 255, 165, 0 | Dark |
-
-### Fonts
-
-```ez
-widget.font("Consolas", 14)
-```
-
-### Style Helper
-
-Combines background color, text color, font, and size in one call. Pass `0` to skip any field.
-
-```ez
-widget.style("dark", "neon", "Consolas", 14)
-widget.style("blue", 0, 0, 0)        # Background only
-widget.style(0, 0, "Arial", 16)      # Font only
-```
-
-### Themes
-
-Apply a global theme before creating widgets.
-
-```ez
 gui.setTheme("neon")
-
-win = gui.window("My App", 600, 400)
+win = gui.window("Neon App", 600, 400)
 ```
 
-| Theme | Description |
-|-------|-------------|
-| `"default"` | Clean, professional |
-| `"neon"` | Dark background, cyan accents |
-| `"retro"` | Warm brown/orange palette |
-| `"ocean"` | Deep blue, light blue accents |
+### `gui.contextMenu()` → `ContextMenu`
+Creates a new context (right-click) menu.
 
 ---
 
-## Dialogs
+## Model: `Window`
 
-### Alert
+Extends `ContainerWidget`. Creates a top-level native window.
 
+### `Window(title, width, height)`
 ```ez
-gui.alert("Title", "Message text")
-gui.alert("Single-arg message")
+use "ezgui"
+
+win = Window("My Window", 600, 400)
 ```
 
-### Confirm
-
+Or use the shorthand:
 ```ez
-result = gui.dialog.confirm("Confirm", "Are you sure?")
-when result {
-    out "Confirmed"
-}
+win = gui.window("My Window", 600, 400)
 ```
 
-### Input Prompt
+---
+
+## Window Management
 
 ```ez
-name = gui.dialog.input("Enter Name", "What is your name?")
-when name {
-    out "Hello, " + name
-}
+use "ezgui"
+
+win = gui.window("Demo", 600, 400)
+
+win.center()                 # Center on screen
+win.setTitle("New Title")   # Change title
+win.resize(800, 600)         # Resize window
+win.setOpacity(200)          # 0–255 transparency
+win.setAlwaysOnTop(true)    # Float above other windows
+win.setMinSize(300, 200)    # Set minimum resize boundary
+win.setIcon("app.ico")      # Set window icon (ICO file)
+win.minimize()               # Minimize to taskbar
+win.maximize()               # Maximize
+win.restore()                # Restore from min/max
+
+size = win.getSize()         # → [width, height]
+pos = win.getPos()           # → [x, y]
 ```
 
-### File Dialogs
+---
+
+## Window Events
 
 ```ez
-path = gui.dialog.openFile("Open", "*.txt")
-path = gui.dialog.saveFile("Save As", "*.txt")
-dir  = gui.dialog.openFolder()
-```
+use "ezgui"
 
-### Color Picker
+win = gui.window("Events Demo", 400, 300)
 
-```ez
-hex = gui.dialog.colorPicker()  # Returns "#RRGGBB"
-when hex {
-    out "Picked: " + hex
-}
+win.onClose(|| {
+    out "Window closing!"
+})
+
+win.onResize(|| {
+    size = win.getSize()
+    out "Resized to " + str(size[0]) + "x" + str(size[1])
+})
+
+win.onKeyPress(|key| {
+    out "Key pressed: " + str(key)
+})
+
+win.onKeyUp(|key| {
+    out "Key released: " + str(key)
+})
+
+win.onDrop(|files| {
+    out "Files dropped: " + str(files)
+})
+
+win.show()
+win.run()
 ```
 
 ---
@@ -589,233 +162,513 @@ when hex {
 ## Timers
 
 ```ez
-timerId = win.setTimer(1000, || {  # Every 1000ms
-    out "tick"
+use "ezgui"
+
+win = gui.window("Timer Demo", 300, 200)
+count = 0
+
+timerId = win.setTimer(1000, || {
+    count = count + 1
+    out "Tick: " + str(count)
+    when count >= 10 { win.killTimer(timerId) }
 })
 
-win.killTimer(timerId)
+win.show()
+win.run()
 ```
 
 ---
 
-## Events
+## Widget Reference
 
-Events are registered using `widget.on(event, callback)` or named helpers:
+All widgets are created via factory methods on `Window` or `Panel`. Widgets extend `Widget` (which extends `ContainerWidget` for containers).
 
+### Common Widget Methods (from `Widget`)
+
+| Method | Description |
+|---|---|
+| `widget.text(v)` | Set text/value |
+| `widget.value()` | Get text/value |
+| `widget.getText()` | Alias for `value()` |
+| `widget.setText(v)` | Alias for `text(v)` |
+| `widget.show()` | Show widget |
+| `widget.hide()` | Hide widget |
+| `widget.enable()` | Enable widget |
+| `widget.disable()` | Disable widget |
+| `widget.color(name)` | Set background color (auto-contrast text) |
+| `widget.font(name, size)` | Set font |
+| `widget.pos(x, y, w, h)` | Set position and size |
+| `widget.setTooltip(text)` | Set hover tooltip |
+| `widget.onClick(cb)` | Click handler (legacy) |
+| `widget.on(event, cb)` | Generic event handler |
+| `widget.onFocus(cb)` | Focus event |
+| `widget.onBlur(cb)` | Blur event |
+| `widget.onRightClick(cb)` | Right-click event |
+| `widget.onDoubleClick(cb)` | Double-click event |
+| `widget.onHover(cb)` | Hover event |
+| `widget.style(bg, fg, font, size)` | Combined style setter |
+
+---
+
+## Widget Factory Methods
+
+All of these are available on `Window`, `Panel`, and layout managers.
+
+### `win.label(text, x, y, w, h)` → `Label`
 ```ez
-widget.onClick(cb)
-widget.onFocus(cb)
-widget.onBlur(cb)
-widget.onHover(cb)
-widget.onRightClick(cb)
-widget.onDoubleClick(cb)
-
-win.onClose(cb)
-win.onResize(cb)
-win.onKeyPress(cb)
-win.onKeyUp(cb)
-win.onDrop(cb)
+lbl = win.label("Name:", 10, 10, 80, 25)
+lbl.color("dark")
+lbl.font("Arial", 12)
 ```
 
-`onChange` is available on: `Input`, `TextArea`, `Checkbox`, `Radio`, `Dropdown`, `Slider`, `ListView`, `TreeView`, `DatePicker`
+### `win.button(text, x, y, w, h, callback)` → `Button`
+```ez
+btn = win.button("Submit", 10, 50, 100, 35, || {
+    out "Submitted!"
+})
+btn.color("blue")
+btn.click(|| { out "Alternative click handler" })
+```
+
+### `win.input(x, y, w, h)` → `Input`
+```ez
+field = win.input(10, 90, 200, 28)
+field.text("Default value")
+field.onTextChange(|| {
+    out "Input changed: " + field.value()
+})
+val = field.value()
+```
+
+### `win.textarea(x, y, w, h)` → `TextArea`
+```ez
+ta = win.textarea(10, 130, 300, 150)
+ta.text("Initial content\nLine 2")
+ta.onTextChange(|| {
+    out "Content: " + ta.value()
+})
+```
+
+### `win.dropdown(x, y, w, h)` → `Dropdown`
+```ez
+drp = win.dropdown(10, 290, 200, 150)
+drp.add("Option 1")
+drp.add("Option 2")
+drp.add("Option 3")
+drp.onChange(|| {
+    out "Selected: " + str(drp.selected())
+})
+```
+
+### `win.checkbox(text, x, y, w, h)` → `Checkbox`
+```ez
+chk = win.checkbox("Enable notifications", 10, 330, 200, 25)
+chk.setChecked(true)
+chk.onChange(|| {
+    out "Checked: " + str(chk.checked())
+})
+```
+
+### `win.radio(text, x, y, w, h, groupStart)` → `Radio`
+```ez
+# groupStart = true for first radio in group, false/0 for others
+r1 = win.radio("Option A", 10, 360, 100, 25, true)
+r2 = win.radio("Option B", 10, 390, 100, 25, false)
+r3 = win.radio("Option C", 10, 420, 100, 25, false)
+
+r1.onChange(|| { out "A selected: " + str(r1.selected()) })
+```
+
+### `win.slider(x, y, w, h, min, max)` → `Slider`
+```ez
+slider = win.slider(10, 450, 300, 25, 0, 100)
+slider.setValue(50)
+slider.onChange(|| {
+    out "Value: " + str(slider.value())
+})
+```
+
+### `win.progressBar(x, y, w, h)` → `ProgressBar`
+```ez
+pb = win.progressBar(10, 490, 300, 20)
+pb.setRange(0, 100)
+pb.setValue(75)
+```
+
+### `win.listView(x, y, w, h)` → `ListView`
+```ez
+lv = win.listView(10, 10, 400, 200)
+lv.addColumn("Name", 150)
+lv.addColumn("Age", 100)
+lv.addColumn("Email", 150)
+
+lv.addRow(["Alice", "30", "alice@example.com"])
+lv.addRow(["Bob", "25", "bob@example.com"])
+
+lv.onChange(|| {
+    idx = lv.selected()
+    row = lv.getRow(idx)
+    out "Selected: " + str(row)
+})
+
+lv.removeRow(0)  # Remove first row
+lv.clear()       # Remove all rows
+```
+
+### `win.treeView(x, y, w, h)` → `TreeView`
+```ez
+tv = win.treeView(10, 230, 200, 200)
+
+root = tv.add(0, "Root")
+child1 = tv.add(root, "Child 1")
+child2 = tv.add(root, "Child 2")
+tv.add(child1, "Leaf 1")
+
+tv.onChange(|| {
+    sel = tv.selected()
+    out "Selected: " + str(sel)
+})
+```
+
+### `win.datePicker(x, y, w, h)` → `DatePicker`
+```ez
+dp = win.datePicker(10, 450, 200, 28)
+dp.setValue(2025, 6, 11)  # Year, Month, Day
+dp.onChange(|| {
+    date = dp.value()
+    out "Date: " + str(date)
+})
+```
+
+### `win.spinner(x, y, w, h, min, max)` → `Spinner`
+```ez
+sp = win.spinner(10, 490, 100, 28, 1, 100)
+sp.setValue(42)
+out sp.value()  # → 42
+```
+
+### `win.image(path, x, y, w, h)` → `Image`
+```ez
+img = win.image("logo.png", 10, 10, 200, 100)
+img.load("other_image.png")  # Change image
+```
+
+### `win.panel(x, y, w, h)` → `Panel`
+A child container that can hold its own widgets.
+```ez
+pnl = win.panel(10, 10, 300, 200)
+pnl.label("Inside panel", 5, 5, 150, 25)
+pnl.button("Panel Button", 5, 40, 100, 30, || { out "Panel button!" })
+```
+
+### `win.scrollPanel(x, y, w, h)` → `ScrollPanel`
+A scrollable container.
+```ez
+sp = win.scrollPanel(10, 10, 300, 200)
+sp.contentSize(600, 800)  # Virtual content size (scrollable area)
+sp.label("Far right", 550, 10, 100, 25)
+sp.label("Far down", 10, 750, 100, 25)
+```
+
+### `win.groupbox(text, x, y, w, h)` → `GroupBox`
+A labeled group frame.
+```ez
+gb = win.groupbox("Settings", 10, 10, 250, 150)
+```
+
+### `win.separator(x, y, w, h)` → `Separator`
+A horizontal/vertical line divider.
+```ez
+sep = win.separator(10, 100, 380, 2)  # Horizontal divider
+```
+
+---
+
+## Tabs
+
+```ez
+use "ezgui"
+
+win = gui.window("Tabbed App", 600, 400)
+
+tabs = win.tabs(0, 0, 600, 400, || {
+    out "Tab changed to: " + str(tabs.selected())
+})
+
+tabs.add("General")
+tabs.add("Advanced")
+tabs.add("About")
+
+win.show()
+win.run()
+```
 
 ---
 
 ## Menus
 
 ### Menu Bar
-
 ```ez
-mb   = win.menubar()
-file = mb.addMenu("File")
+use "ezgui"
 
-file.item("New",  || { out "new"  })
-file.item("Open", || { out "open" })
-file.separator()
-file.item("Exit", || { out "exit" })
+win = gui.window("Menus Demo", 600, 400)
+bar = win.menubar()
 
-edit = mb.addMenu("Edit")
-edit.item("Undo", || { out "undo" })
+fileMenu = bar.addMenu("File")
+fileMenu.item("New", || { out "New file" })
+fileMenu.item("Open...", || { out "Opening..." })
+fileMenu.separator()
+fileMenu.item("Exit", || { out "Exiting..." })
 
-sub = edit.submenu("Advanced")
-sub.item("Find", || { out "find" })
+editMenu = bar.addMenu("Edit")
+editMenu.item("Cut", || { out "Cut" })
+editMenu.item("Copy", || { out "Copy" })
+editMenu.item("Paste", || { out "Paste" })
+
+# Submenu
+toolsMenu = bar.addMenu("Tools")
+extMenu = toolsMenu.submenu("Extensions")
+extMenu.item("Plugin Manager", || { out "Plugin Manager" })
+
+win.show()
+win.run()
 ```
 
 ### Context Menu
+```ez
+use "ezgui"
+
+win = gui.window("Right-Click Demo", 400, 300)
+
+ctxMenu = gui.contextMenu()
+ctxMenu.item("Copy", || { out "Copy" })
+ctxMenu.item("Paste", || { out "Paste" })
+ctxMenu.separator()
+ctxMenu.item("Delete", || { out "Delete" })
+
+win.onRightClick(|x, y| {
+    ctxMenu.show(x, y)
+})
+
+win.show()
+win.run()
+```
+
+---
+
+## Layout Managers
+
+### VBox — Vertical Stack
 
 ```ez
-ctx = gui.contextMenu()
-ctx.item("Copy",   || { out "copy"   })
-ctx.item("Paste",  || { out "paste"  })
-ctx.separator()
-ctx.item("Delete", || { out "delete" })
+use "ezgui"
 
-widget.onRightClick(|| {
-    ctx.show(mouseX, mouseY)
+win = gui.window("VBox Demo", 300, 400)
+
+vb = win.vbox(10)   # padding = 10
+
+lbl  = vb.label("Username:", 200, 25)
+name = vb.input(200, 28)
+lbl2 = vb.label("Password:", 200, 25)
+pass = vb.input(200, 28)
+vb.addSpace(10)
+btn  = vb.button("Login", 200, 40, || {
+    out "Login: " + name.value()
+})
+
+win.show()
+win.run()
+```
+
+### HBox — Horizontal Stack
+
+```ez
+use "ezgui"
+
+win = gui.window("HBox Demo", 600, 100)
+
+hb = win.hbox(10)
+
+hb.button("File", 80, 35, || { out "File" })
+hb.button("Edit", 80, 35, || { out "Edit" })
+hb.button("View", 80, 35, || { out "View" })
+hb.separator(35)
+hb.button("Help", 80, 35, || { out "Help" })
+
+win.show()
+win.run()
+```
+
+### Grid — Column Layout
+
+```ez
+use "ezgui"
+
+win = gui.window("Grid Demo", 500, 400)
+
+g = win.grid(2, 10, 10)    # 2 columns, 10px padding each axis
+g.setCellSize(220, 30)
+
+g.label("First Name")
+inp1 = g.input()
+
+g.label("Last Name")
+inp2 = g.input()
+
+g.label("Email")
+inp3 = g.input()
+
+g.label("Age")
+sp = g.spinner(18, 120)
+
+g.skipCell()    # Empty cell
+g.button("Submit", || {
+    out "Submitting..."
+})
+
+win.show()
+win.run()
+```
+
+---
+
+## Dialogs
+
+```ez
+use "ezgui"
+
+win = gui.window("Dialogs", 400, 300)
+
+# Confirm dialog
+win.button("Confirm?", 10, 10, 150, 35, || {
+    result = gui.dialog.confirm("Confirm", "Are you sure?")
+    out result   # → true/false
+})
+
+# Input dialog
+win.button("Get Name", 10, 60, 150, 35, || {
+    name = gui.dialog.input("Name", "Enter your name:")
+    out "Name: " + name
+})
+
+# Open file dialog
+win.button("Open File", 10, 110, 150, 35, || {
+    path = gui.dialog.openFile("Open", "*.ez;*.txt")
+    out "Path: " + path
+})
+
+# Save file dialog
+win.button("Save File", 10, 160, 150, 35, || {
+    path = gui.dialog.saveFile("Save As", "*.txt")
+    out "Save to: " + path
+})
+
+# Color picker
+win.button("Pick Color", 10, 210, 150, 35, || {
+    color = gui.dialog.colorPicker()
+    out "Color: " + str(color)
+})
+
+# Font picker
+win.button("Pick Font", 10, 260, 150, 35, || {
+    font = gui.dialog.fontPicker()
+    out "Font: " + str(font)
+})
+
+win.show()
+win.run()
+```
+
+---
+
+## Colors
+
+The `guiColors` map is exported globally. Use color names with `widget.color(name)`:
+
+| Name | RGB |
+|---|---|
+| `"white"` | 255, 255, 255 |
+| `"black"` | 0, 0, 0 |
+| `"gray"` | 128, 128, 128 |
+| `"dark"` | 40, 40, 40 |
+| `"light"` | 240, 240, 240 |
+| `"red"` | 255, 0, 0 |
+| `"green"` | 0, 200, 0 |
+| `"blue"` | 0, 0, 255 |
+| `"neon"` | 0, 255, 255 |
+| `"yellow"` | 255, 255, 0 |
+| `"purple"` | 128, 0, 128 |
+| `"orange"` | 255, 165, 0 |
+
+`widget.color()` auto-selects white or dark text based on background luminance.
+
+---
+
+## Full Example: Calculator
+
+```ez
+use "ezgui"
+
+win = gui.window("Calculator", 300, 400)
+display = ""
+
+vb = win.vbox(5)
+
+screen = vb.label("0", 280, 50)
+screen.color("dark")
+screen.font("Consolas", 24)
+
+digits = [
+    ["7", "8", "9", "/"],
+    ["4", "5", "6", "*"],
+    ["1", "2", "3", "-"],
+    ["0", ".", "=", "+"]
+]
+
+get row in digits {
+    hb = win.hbox(5)
+    hb.addSpace(5)
+    get key in row {
+        btn = hb.button(key, 60, 55, || {})
+        btn.color("gray")
+    }
+}
+
+vb.button("C", 280, 40, || {
+    display = ""
+    screen.text("0")
+})
+
+win.show()
+win.run()
+```
+
+---
+
+## Edge Cases & Important Notes
+
+### Threading
+All GUI operations must happen on the main thread. Do not call `win.label()`, `win.button()`, etc. from spawned tasks. Use timers (`win.setTimer()`) for background updates to the GUI.
+
+### `win.run()` Blocks
+`win.run()` enters the Windows message loop and blocks until the window is closed. Put all setup code before `win.run()`.
+
+### Dropdown Height
+When creating dropdowns manually, set the height large enough (e.g. `150`) to allow the dropdown list to expand. VBox's `dropdown()` automatically sets a minimum height of 150 if the given height is less.
+
+### `groupStart` in Radio Buttons
+Pass `true` (or `1`) as the last argument to the first radio button in a group. All subsequent radios in the same group should pass `false` (or `0`). This sets the `WS_GROUP` style correctly.
+
+### Widget Callbacks are Closures
+Callbacks capture variables by reference. If you need to pass state to a callback, close over it:
+```ez
+count = 0
+btn = win.button("Count", 10, 10, 100, 30, || {
+    count = count + 1
+    out count
 })
 ```
 
 ---
 
-## Examples
-
-### Counter
-
-```ez
-use "gui"
-
-win = gui.window("Counter", 300, 200)
-
-count = 0
-lbl   = win.label("0", 100, 60, 100, 40)
-lbl.font("Arial", 28)
-
-win.button("+", 60,  120, 80, 40, || {
-    count = count + 1
-    lbl.text(str(count))
-}).color("green")
-
-win.button("-", 160, 120, 80, 40, || {
-    count = count - 1
-    lbl.text(str(count))
-}).color("red")
-
-win.run()
-```
-
----
-
-### Registration Form
-
-```ez
-use "gui"
-
-win = gui.window("Register", 450, 550)
-vb  = win.vbox(10)
-vb.addSpace(10)
-
-vb.label("Create Account", 430, 40).font("Arial", 22)
-
-vb.label("Full Name:", 430, 24)
-nameIn = vb.input(430, 35)
-
-vb.label("Email:", 430, 24)
-emailIn = vb.input(430, 35)
-
-vb.label("Country:", 430, 24)
-countryDrop = vb.dropdown(430, 35)
-countryDrop.add("Pakistan").add("USA").add("UK")
-
-agreeCheck = vb.checkbox("I agree to Terms & Conditions", 430, 30)
-
-vb.addSpace(10)
-vb.button("Register", 430, 50, || {
-    when not agreeCheck.checked() {
-        gui.alert("Error", "Please agree to terms")
-        give 0
-    }
-    gui.alert("Success", "Welcome, " + nameIn.value() + "!")
-}).color("blue")
-
-win.run()
-```
-
----
-
-### Todo List
-
-```ez
-use "gui"
-
-win = gui.window("Todos", 500, 560)
-
-win.label("New task:", 10, 10, 90, 25)
-inp = win.input(105, 10, 285, 25)
-
-win.button("Add", 400, 10, 80, 25, || {
-    task = inp.value()
-    when len(task) > 0 {
-        lv.addRow([task, "Pending"])
-        inp.text("")
-    }
-}).color("green")
-
-lv = win.listView(10, 50, 480, 460)
-lv.addColumn("Task",   360)
-  .addColumn("Status", 110)
-
-win.button("Done",   10,  520, 100, 30, || {
-    i = lv.selected()
-    when i >= 0 {
-        r = lv.getRow(i)
-        lv.removeRow(i)
-        lv.addRow([r[0], "Done"])
-    }
-}).color("blue")
-
-win.button("Delete", 120, 520, 100, 30, || {
-    i = lv.selected()
-    when i >= 0 { lv.removeRow(i) }
-}).color("red")
-
-win.run()
-```
-
----
-
-### Progress Simulation with Timer
-
-```ez
-use "gui"
-
-win = gui.window("Progress", 400, 200)
-vb  = win.vbox(10)
-vb.addSpace(10)
-
-vb.label("Processing…", 380, 25)
-pb = vb.progressBar(380, 30)
-pb.setRange(0, 100)
-
-prog = 0
-timerId = 0
-
-vb.button("Start", 380, 45, || {
-    prog    = 0
-    timerId = win.setTimer(50, || {
-        prog = prog + 1
-        pb.setValue(prog)
-        when prog >= 100 {
-            win.killTimer(timerId)
-            gui.alert("Done", "Complete!")
-        }
-    })
-}).color("green")
-
-win.run()
-```
-
----
-
-## Common Issues
-
-**Widget not showing** — Make sure `win.run()` is the last call.
-
-**Can't read input value** — Store the widget in a variable: `inp = win.input(...)`, then `inp.value()`.
-
-**Dropdown too small** — Use a height of 150 or more: `win.dropdown(x, y, w, 150)`.
-
-**Grid cells overlapping** — Call `grid.setCellSize(w, h)` before adding widgets.
-
-**All radio buttons selectable** — Set `groupStart = 1` on the first button in each group only.
-
----
-
-## Related Libraries
-
-- **db** — SQLite database access
-- **pdf** — PDF generation
-- **datetime** — Date and time operations
-
----
-
-*MIT License — Free for any use*
+*Documentation generated from `E:\ezlib\ezgui\main.ez` — EZ GUI Library*
