@@ -1,306 +1,541 @@
-# ezhttp — HTTP Client
+# ezhttp — HTTP Client Library for EZ
 
-> Production-ready HTTP client for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
-
-**ezhttp** is a full-featured HTTP client library for EZ. It provides a fluent request builder, typed response model, automatic JSON serialization, retries, timeouts, interceptors, async support, and a reusable `HTTPClient` for API integrations — all in pure EZ.
+> **Version:** 2.0  
+> **Import:** `use "ezhttp"`  
+> **File:** `E:\ezlib\ezhttp\main.ez`
 
 ---
 
-## Installation
+## Overview
 
-```
-ez install http
-```
+`ezhttp` is a production-ready HTTP client for EZ, providing a fluent request builder API with retries, timeouts, interceptors, and query parameter encoding. It wraps EZ's built-in `http_get` and `http_post` primitives.
+
+After import, all functionality is available via:
+- `http` — Main namespace dictionary
+- `HTTPRequest`, `HTTPResponse`, `HTTPClient` — Model classes
+- `hGet`, `hPost`, `hPut`, `hDelete`, `hPatch` — Global shorthands
+- `json` — JSON parse/stringify helpers
+- HTTP status code constants (`HTTP_OK`, `HTTP_NOT_FOUND`, etc.)
 
 ---
 
 ## Quick Start
 
 ```ez
-use "http"
+use "ezhttp"
 
 # Simple GET
-res = hGet("https://api.example.com/users", nil)
-out res.statusCode   # 200
-out res.body
+response = httpGet("https://api.github.com/users/octocat", nil)
+out response.statusCode   # → 200
+out response.body         # → JSON string
 
-# Simple POST with JSON
-res = hPost("https://api.example.com/users", { "name": "Alice" }, nil)
-out res.isOk()       # true
-out res.json()       # parsed response body
+# POST JSON
+data = {"name": "Alice", "age": 30}
+response = httpPost("https://api.example.com/users", data, nil)
+out response.statusCode   # → 200 or 201
+```
+
+---
+
+## HTTP Status Code Constants
+
+```ez
+use "ezhttp"
+
+out HTTP_OK               # → 200
+out HTTP_CREATED          # → 201
+out HTTP_BAD_REQUEST      # → 400
+out HTTP_UNAUTHORIZED     # → 401
+out HTTP_FORBIDDEN        # → 403
+out HTTP_NOT_FOUND        # → 404
+out HTTP_INTERNAL_SERVER_ERROR  # → 500
+```
+
+Full list of exported constants:
+`HTTP_CONTINUE`, `HTTP_OK`, `HTTP_CREATED`, `HTTP_ACCEPTED`, `HTTP_NO_CONTENT`, `HTTP_RESET_CONTENT`, `HTTP_PARTIAL_CONTENT`, `HTTP_MULTIPLE_CHOICES`, `HTTP_MOVED_PERMANENTLY`, `HTTP_FOUND`, `HTTP_SEE_OTHER`, `HTTP_NOT_MODIFIED`, `HTTP_TEMPORARY_REDIRECT`, `HTTP_PERMANENT_REDIRECT`, `HTTP_BAD_REQUEST`, `HTTP_UNAUTHORIZED`, `HTTP_FORBIDDEN`, `HTTP_NOT_FOUND`, `HTTP_METHOD_NOT_ALLOWED`, `HTTP_CONFLICT`, `HTTP_GONE`, `HTTP_UNPROCESSABLE_ENTITY`, `HTTP_TOO_MANY_REQUESTS`, `HTTP_INTERNAL_SERVER_ERROR`, `HTTP_BAD_GATEWAY`, `HTTP_SERVICE_UNAVAILABLE`, `HTTP_GATEWAY_TIMEOUT`.
+
+---
+
+## Model: `HTTPResponse`
+
+All request functions return an `HTTPResponse` object.
+
+### Properties
+| Property | Type | Description |
+|---|---|---|
+| `statusCode` | `number` | HTTP status code (e.g. 200, 404) |
+| `body` | `string` | Raw response body |
+| `headers` | `dictionary` | Response headers (may be empty) |
+| `url` | `string` | The URL that was requested |
+| `duration` | `number` | Time in milliseconds |
+| `ok` | `boolean` | `true` if status 200–299 |
+
+### `response.isOk()` → `boolean`
+Returns `true` if `statusCode` is 200–299.
+
+### `response.is(code)` → `boolean`
+Returns `true` if `statusCode == code`.
+
+### `response.json()` → `dictionary | array | nil`
+Parses the body as JSON. Returns `nil` if body is empty.
+
+```ez
+use "ezhttp"
+
+res = httpGet("https://httpbin.org/get", nil)
+data = res.json()
+out data["url"]   # → "https://httpbin.org/get"
+```
+
+### `response.header(name)` → `string | nil`
+Gets a response header by name (case-insensitive).
+
+```ez
+use "ezhttp"
+
+res = httpGet("https://example.com", nil)
+ct = res.header("Content-Type")
+out ct
+```
+
+### `response.contentType()` → `string | nil`
+Returns the Content-Type header without parameters (e.g. `"application/json"` not `"application/json; charset=utf-8"`).
+
+### `response.raiseForStatus()` → `self`
+Throws `"HTTP {code}: {body}"` if status is not 2xx.
+
+```ez
+use "ezhttp"
+
+try {
+    res = httpGet("https://api.example.com/protected", nil)
+    res.raiseForStatus()
+    out res.json()
+} catch e {
+    out "Request failed: " + e  # → "HTTP 401: Unauthorized"
+}
+```
+
+---
+
+## Model: `HTTPRequest`
+
+A fluent request builder. Created manually or via `HTTPClient`.
+
+### `HTTPRequest(method, url)`
+Creates a request.
+
+```ez
+use "ezhttp"
+
+req = HTTPRequest("GET", "https://example.com")
+req = HTTPRequest("POST", "https://api.example.com/data")
+```
+
+### `req.header(key, value)` → `self`
+Adds a single header.
+
+```ez
+use "ezhttp"
+
+req = HTTPRequest("GET", "https://api.example.com")
+req.header("Authorization", "Bearer mytoken123")
+req.header("Accept", "application/json")
+res = req.send()
+```
+
+### `req.headers(dict)` → `self`
+Adds multiple headers from a dictionary.
+
+```ez
+use "ezhttp"
+
+req = HTTPRequest("POST", "https://api.example.com/data")
+req.headers({
+    "Authorization": "Bearer token",
+    "Content-Type": "application/json",
+    "X-Request-ID": "abc-123"
+})
+```
+
+### `req.data(body)` → `self`
+Sets the request body. Dictionaries/arrays are auto-serialized to JSON with `Content-Type: application/json`.
+
+```ez
+use "ezhttp"
+
+# JSON body (auto-serialized)
+req = HTTPRequest("POST", "https://api.example.com/users")
+req.data({"name": "Alice", "age": 30})
+
+# String body
+req2 = HTTPRequest("POST", "https://api.example.com/raw")
+req2.data("plain text body")
+```
+
+### `req.raw(body)` → `self`
+Sets the request body as-is (no auto-JSON-serialization).
+
+### `req.param(key, value)` → `self`
+Adds a single query parameter (URL-encoded).
+
+### `req.query(dict)` → `self`
+Adds multiple query parameters.
+
+```ez
+use "ezhttp"
+
+req = HTTPRequest("GET", "https://api.github.com/search/repositories")
+req.query({"q": "EZ language", "sort": "stars", "per_page": 10})
+res = req.send()
+# → GET https://api.github.com/search/repositories?q=EZ%20language&sort=stars&per_page=10
+```
+
+### `req.timeout(ms)` → `self`
+Sets the timeout in milliseconds (default: 30000).
+
+### `req.retries(count)` → `self`
+Sets the number of retry attempts on failure (default: 3).
+
+### `req.noRedirect()` → `self`
+Disables redirect following.
+
+### `req.send()` → `HTTPResponse`
+Executes the request and returns an `HTTPResponse`.
+
+```ez
+use "ezhttp"
+
+res = HTTPRequest("GET", "https://httpbin.org/get")
+    .header("User-Agent", "EZApp/1.0")
+    .param("format", "json")
+    .send()
+
+out res.statusCode
+out res.json()
 ```
 
 ---
 
 ## Quick Functions
 
-One-liner helpers for the most common cases:
+### `httpGet(url, params)` → `HTTPResponse`
+Quick GET with optional query parameters dictionary.
 
 ```ez
+use "ezhttp"
+
+# Simple GET
+res = httpGet("https://api.example.com/users", nil)
+
 # GET with query params
-res = hGet("https://api.example.com/search", { "q": "ez lang", "page": "1" })
+res = httpGet("https://api.example.com/search", {
+    "query": "hello",
+    "page": 1,
+    "limit": 20
+})
+
+out res.json()
+```
+
+---
+
+### `httpPost(url, body, headers)` → `HTTPResponse`
+Quick POST.
+
+```ez
+use "ezhttp"
 
 # POST JSON body
-res = hPost("https://api.example.com/items", { "name": "Widget", "price": 9.99 }, nil)
+res = httpPost("https://api.example.com/users", {
+    "name": "Bob",
+    "email": "bob@example.com"
+}, nil)
 
-# PUT
-res = hPut("https://api.example.com/items/1", { "name": "Updated" }, nil)
-
-# PATCH
-res = hPatch("https://api.example.com/items/1", { "price": 4.99 }, nil)
-
-# DELETE
-res = hDelete("https://api.example.com/items/1", nil)
+# POST with custom headers
+res = httpPost(
+    "https://api.example.com/data",
+    "raw-text-data",
+    {"Authorization": "Bearer token", "Content-Type": "text/plain"}
+)
 ```
-
-All quick functions return an `HTTPResponse` object.
 
 ---
 
-## Request Builder
-
-For full control, use `HTTPRequest` directly with a fluent chainable API:
+### `httpPut(url, body, headers)` → `HTTPResponse`
+Quick PUT.
 
 ```ez
-use "http"
+use "ezhttp"
 
-res = HTTPRequest("GET", "https://api.example.com/users")
-    .param("role", "admin")
-    .param("active", "true")
-    .header("Authorization", "Bearer my-token")
-    .timeout(10000)
-    .retries(2)
+res = httpPut("https://api.example.com/users/1", {"name": "Alice Updated"}, nil)
+```
+
+---
+
+### `httpPatch(url, body, headers)` → `HTTPResponse`
+Quick PATCH.
+
+```ez
+use "ezhttp"
+
+res = httpPatch("https://api.example.com/users/1", {"email": "new@example.com"}, nil)
+```
+
+---
+
+### `httpDelete(url, headers)` → `HTTPResponse`
+Quick DELETE.
+
+```ez
+use "ezhttp"
+
+res = httpDelete("https://api.example.com/users/1", nil)
+out res.statusCode  # → 200 or 204
+```
+
+---
+
+## Model: `HTTPClient`
+
+A base-URL client with default headers, timeout, and interceptors. Use this for APIs where you want to share a base URL and auth token.
+
+### `HTTPClient(baseUrl)`
+Creates a client with a base URL.
+
+```ez
+use "ezhttp"
+
+client = HTTPClient("https://api.example.com")
+client.header("Authorization", "Bearer my-api-key")
+client.timeout(10000)   # 10 second timeout
+```
+
+### `client.header(key, value)` → `self`
+Sets a default header applied to all requests.
+
+### `client.timeout(ms)` → `self`
+Sets the default timeout.
+
+### `client.onRequest(fn)` → `self`
+Adds a request interceptor. The function receives the `HTTPRequest` and can modify it.
+
+```ez
+use "ezhttp"
+
+client = HTTPClient("https://api.example.com")
+client.onRequest(|req| {
+    # Add timestamp to all requests
+    req.header("X-Timestamp", str(clock()))
+})
+```
+
+### `client.onResponse(fn)` → `self`
+Adds a response interceptor.
+
+### `client.get(path)` → `HTTPRequest`
+Creates a GET request relative to the base URL. Returns an `HTTPRequest` — call `.send()` to execute.
+
+### `client.post(path)` → `HTTPRequest`
+Creates a POST request.
+
+### `client.put(path)` / `client.patch(path)` / `client.delete(path)` / `client.head(path)` / `client.options(path)` → `HTTPRequest`
+
+```ez
+use "ezhttp"
+
+client = HTTPClient("https://api.github.com")
+client.header("Authorization", "Bearer ghp_abc123")
+client.header("Accept", "application/vnd.github.v3+json")
+
+# GET user
+userRes = client.get("/users/octocat").send()
+out userRes.json()["public_repos"]
+
+# GET repos
+reposRes = client.get("/users/octocat/repos")
+    .query({"sort": "stars", "per_page": 5})
     .send()
-```
-
-### Builder Methods
-
-| Method | Description |
-|---|---|
-| `.header(key, value)` | Add a single request header |
-| `.headers(dict)` | Add multiple headers from a dictionary |
-| `.data(body)` | Set request body — auto-serializes dicts/arrays to JSON |
-| `.raw(body)` | Set raw string body without serialization |
-| `.param(key, value)` | Add a single URL query parameter |
-| `.query(dict)` | Add multiple query parameters |
-| `.timeout(ms)` | Set request timeout in milliseconds (default: `30000`) |
-| `.retries(count)` | Set number of retry attempts on failure (default: `3`) |
-| `.noRedirect()` | Disable automatic redirect following |
-| `.send()` | Execute the request and return an `HTTPResponse` |
-
----
-
-## The Response Object
-
-All requests return an `HTTPResponse` with these fields and methods:
-
-### Fields
-
-| Field | Type | Description |
-|---|---|---|
-| `res.statusCode` | int | HTTP status code (e.g. `200`, `404`) |
-| `res.body` | string | Raw response body |
-| `res.headers` | dictionary | Response headers |
-| `res.url` | string | Final request URL |
-| `res.duration` | float | Request duration in milliseconds |
-| `res.ok` | bool | `true` if status is 2xx |
-
-### Methods
-
-| Method | Returns | Description |
-|---|---|---|
-| `.isOk()` | bool | `true` if status code is 2xx |
-| `.is(code)` | bool | `true` if status matches the given code |
-| `.json()` | dict/array | Parses body as JSON |
-| `.header(name)` | string | Gets a response header (case-insensitive) |
-| `.contentType()` | string | Returns the `Content-Type` without parameters |
-| `.raiseForStatus()` | self | Throws an error if status is not 2xx |
-
-### Examples
-
-```ez
-res = hGet("https://api.example.com/users/1", nil)
-
-# Check success
-when res.isOk() {
-    user = res.json()
-    out user["name"]
-}
-
-# Check specific code
-when res.is(HTTP_NOT_FOUND) {
-    out "User not found"
-}
-
-# Get a header
-out res.header("Content-Type")   # "application/json"
-out res.contentType()            # "application/json"
-
-# Throw on error
-res.raiseForStatus()
-```
-
----
-
-## HTTPClient — Reusable API Client
-
-`HTTPClient` is ideal for talking to a single API. Set a base URL, default headers, and timeout once — then make requests without repeating yourself.
-
-```ez
-use "http"
-
-client = HTTPClient("https://api.example.com")
-client.header("Authorization", "Bearer my-token")
-client.header("Accept", "application/json")
-client.timeout(15000)
-
-# Requests are relative to the base URL
-res = client.get("/users").send()
-out res.json()
-
-res = client.post("/users").data({ "name": "Bob" }).send()
-out res.statusCode   # 201
-```
-
-### Client Methods
-
-| Method | Description |
-|---|---|
-| `.header(key, value)` | Set a default header for all requests |
-| `.timeout(ms)` | Set default timeout for all requests |
-| `.onRequest(fn)` | Add a request interceptor |
-| `.onResponse(fn)` | Add a response interceptor |
-| `.get(path)` | Returns an `HTTPRequest` for GET |
-| `.post(path)` | Returns an `HTTPRequest` for POST |
-| `.put(path)` | Returns an `HTTPRequest` for PUT |
-| `.patch(path)` | Returns an `HTTPRequest` for PATCH |
-| `.delete(path)` | Returns an `HTTPRequest` for DELETE |
-| `.head(path)` | Returns an `HTTPRequest` for HEAD |
-| `.options(path)` | Returns an `HTTPRequest` for OPTIONS |
-
-### Interceptors
-
-Interceptors let you mutate every request or response automatically — useful for logging, auth token injection, or centralized error handling.
-
-```ez
-client = HTTPClient("https://api.example.com")
-
-# Request interceptor — runs before every request
-client.onRequest(task(req) {
-    req.header("X-Request-Id", uuid())
-})
-
-# Response interceptor — runs after every response
-client.onResponse(task(res) {
-    when not res.isOk() {
-        out "Request failed: " + str(res.statusCode)
-    }
-})
-```
-
----
-
-## Async Requests
-
-Fire HTTP requests in the background using EZ's `spawn`:
-
-```ez
-use "http"
-
-asyncGet("https://api.example.com/users", task(err, res) {
-    when err {
-        out "Error: " + err
-        give
-    }
-    out res.json()
-})
-
-asyncPost("https://api.example.com/users", { "name": "Carol" }, task(err, res) {
-    when err { out "Error: " + err }
-    other { out "Created: " + str(res.statusCode) }
-})
+out len(reposRes.json())   # → 5
 ```
 
 ---
 
 ## URL Utilities
 
-```ez
-use "http"
+### `buildUrl(base, params)` → `string`
+Builds a URL with query parameters (URL-encoded).
 
-# Build a URL with query parameters
-url = buildUrl("https://api.example.com/search", {
+```ez
+use "ezhttp"
+
+url = buildUrl("https://search.example.com", {
     "q": "hello world",
-    "page": "2"
+    "lang": "en",
+    "page": 2
 })
 out url
-# https://api.example.com/search?q=hello%20world&page=2
-
-# Parse a URL's query string into a dictionary
-params = parseQuery("https://api.example.com/search?q=hello&page=2")
-out params["q"]     # "hello"
-out params["page"]  # "2"
+# → "https://search.example.com?q=hello%20world&lang=en&page=2"
 ```
 
 ---
 
-## Status Code Constants
-
-ezhttp exports named constants for all standard HTTP status codes:
+### `parseQuery(url)` → `dictionary`
+Parses query string parameters from a URL.
 
 ```ez
-use "http"
+use "ezhttp"
 
-when res.is(HTTP_OK)                    { out "Success" }
-when res.is(HTTP_CREATED)               { out "Created" }
-when res.is(HTTP_NO_CONTENT)            { out "Empty response" }
-when res.is(HTTP_BAD_REQUEST)           { out "Bad request" }
-when res.is(HTTP_UNAUTHORIZED)          { out "Auth required" }
-when res.is(HTTP_FORBIDDEN)             { out "Access denied" }
-when res.is(HTTP_NOT_FOUND)             { out "Not found" }
-when res.is(HTTP_TOO_MANY_REQUESTS)     { out "Rate limited" }
-when res.is(HTTP_INTERNAL_SERVER_ERROR) { out "Server error" }
+params = parseQuery("https://example.com/search?q=hello&page=2&limit=20")
+out params["q"]      # → "hello"
+out params["page"]   # → "2"
+out params["limit"]  # → "20"
 ```
-
-Full list: `HTTP_CONTINUE`, `HTTP_SWITCHING_PROTOCOLS`, `HTTP_OK`, `HTTP_CREATED`, `HTTP_ACCEPTED`, `HTTP_NO_CONTENT`, `HTTP_RESET_CONTENT`, `HTTP_PARTIAL_CONTENT`, `HTTP_MULTIPLE_CHOICES`, `HTTP_MOVED_PERMANENTLY`, `HTTP_FOUND`, `HTTP_SEE_OTHER`, `HTTP_NOT_MODIFIED`, `HTTP_TEMPORARY_REDIRECT`, `HTTP_PERMANENT_REDIRECT`, `HTTP_BAD_REQUEST`, `HTTP_UNAUTHORIZED`, `HTTP_PAYMENT_REQUIRED`, `HTTP_FORBIDDEN`, `HTTP_NOT_FOUND`, `HTTP_METHOD_NOT_ALLOWED`, `HTTP_NOT_ACCEPTABLE`, `HTTP_REQUEST_TIMEOUT`, `HTTP_CONFLICT`, `HTTP_GONE`, `HTTP_PAYLOAD_TOO_LARGE`, `HTTP_URI_TOO_LONG`, `HTTP_UNSUPPORTED_MEDIA_TYPE`, `HTTP_IM_A_TEAPOT`, `HTTP_UNPROCESSABLE_ENTITY`, `HTTP_TOO_MANY_REQUESTS`, `HTTP_INTERNAL_SERVER_ERROR`, `HTTP_NOT_IMPLEMENTED`, `HTTP_BAD_GATEWAY`, `HTTP_SERVICE_UNAVAILABLE`, `HTTP_GATEWAY_TIMEOUT`
 
 ---
 
-## Complete Example — REST API Integration
+## JSON Helpers
 
 ```ez
-use "http"
+use "ezhttp"
 
-api = HTTPClient("https://jsonplaceholder.typicode.com")
-api.header("Accept", "application/json")
+# Parse JSON
+data = json.parse("{\"name\": \"Alice\", \"age\": 30}")
+out data["name"]  # → "Alice"
 
-# Fetch all posts
-res = api.get("/posts").send()
-posts = res.json()
-out "Total posts: " + str(len(posts))
+# Stringify to JSON
+str = json.stringify({"x": 1, "y": 2})
+out str  # → '{"x":1,"y":2}'
+```
 
-# Fetch a single post
-res = api.get("/posts/1").send()
-when res.isOk() {
-    post = res.json()
-    out post["title"]
+---
+
+## Async HTTP
+
+### `asyncGet(url, callback)`
+Spawns a GET request in the background.
+
+```ez
+use "ezhttp"
+
+asyncGet("https://api.example.com/data", |err, res| {
+    when err {
+        out "Error: " + err
+    } other {
+        out "Status: " + str(res.statusCode)
+    }
+})
+
+out "Request sent in background..."
+```
+
+### `asyncPost(url, body, callback)`
+Spawns a POST request in the background.
+
+---
+
+## Edge Cases & Important Notes
+
+### Status Code Limitations
+The EZ built-ins `http_get` and `http_post` return only the response body — they do NOT return HTTP status codes. `ezhttp` defaults `statusCode` to `200` for all successful calls. For APIs that return error info in JSON, it attempts to read a `status` or `statusCode` field from the response body.
+
+This means: `response.isOk()` may return `true` even for logical errors if the server returns a 200 with `{"status": "error"}`.
+
+### PUT/PATCH/DELETE via Method Override
+Since EZ's native HTTP only supports GET and POST, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` are sent as POST with the `X-HTTP-Method-Override` header. Many servers support this pattern, but some may not.
+
+For full HTTP method support, use `ezdb` (the `ezai` library internally uses `http_post` directly) or the curl-based `ezemail` pattern.
+
+### Retry on Network Errors
+The retry loop only catches thrown errors (network failures). It does NOT retry on HTTP 5xx responses — only on exceptions from the underlying `http_get` / `http_post` calls.
+
+### Query Parameter Encoding
+Parameters are URL-encoded via the EZ built-in `url_encode()`. Spaces become `%20`, special chars are properly encoded.
+
+---
+
+## Full Example: REST API Client
+
+```ez
+use "ezhttp"
+
+# GitHub API client
+github = HTTPClient("https://api.github.com")
+github.header("Accept", "application/vnd.github.v3+json")
+github.header("User-Agent", "EZ-App/1.0")
+
+task getUser(username) {
+    res = github.get("/users/" + username).send()
+    when not res.isOk() { give nil }
+    data = res.json()
+    give {
+        "name": data["name"],
+        "repos": data["public_repos"],
+        "followers": data["followers"]
+    }
 }
 
-# Create a new post
-res = api.post("/posts")
-    .data({ "title": "Hello EZ", "body": "My first post", "userId": 1 })
-    .send()
+task searchRepos(query, lang) {
+    res = github.get("/search/repositories")
+        .query({"q": query + " language:" + lang, "sort": "stars", "per_page": 5})
+        .send()
+    when not res.isOk() { give [] }
+    data = res.json()
+    give data["items"]
+}
 
-res.raiseForStatus()
-out "Created with ID: " + str(res.json()["id"])
+# Get user info
+user = getUser("torvalds")
+out "Name: " + user["name"]
+out "Public Repos: " + str(user["repos"])
+out "Followers: " + str(user["followers"])
 
-# Filter with query params
-res = api.get("/comments").param("postId", "1").send()
-out "Comments: " + str(len(res.json()))
+# Search repos
+repos = searchRepos("kernel", "c")
+out "\nTop C kernel repos:"
+get r in repos {
+    out "  " + r["full_name"] + " ⭐ " + str(r["stargazers_count"])
+}
 ```
 
 ---
 
-## License
+## Full Example: Webhook Sender
 
-MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
+```ez
+use "ezhttp"
+
+task sendWebhook(url, event, data) {
+    payload = {
+        "event": event,
+        "timestamp": str(clock()),
+        "data": data
+    }
+    
+    req = HTTPRequest("POST", url)
+    req.header("Content-Type", "application/json")
+    req.header("X-Webhook-Signature", "sha256=abc")   # real apps would compute HMAC
+    req.data(payload)
+    req.retries(3)
+    req.timeout(5000)
+    
+    try {
+        res = req.send()
+        when res.isOk() {
+            out "Webhook delivered: " + event
+            give true
+        }
+        out "Webhook failed: HTTP " + str(res.statusCode)
+        give false
+    } catch e {
+        out "Webhook error: " + e
+        give false
+    }
+}
+
+sendWebhook("https://hooks.slack.com/services/xxx", "user_signup", {"userId": "123", "email": "user@example.com"})
+```
+
+---
+
+*Documentation generated from `E:\ezlib\ezhttp\main.ez` — EZ HTTP Client Library v2.0*
