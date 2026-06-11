@@ -1,43 +1,50 @@
-# eztest
+# eztest — Unit Testing Framework for EZ
 
-> Production-ready unit testing framework for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
-
-**eztest** brings a full Jest/Mocha-style testing experience to EZ. It features test suites, lifecycle hooks, 15 assertion types, spies/stubs/mocks, colored terminal output, and a summary report — all in pure EZ.
+> **Version:** 1.0.0  
+> **Import:** `use "eztest"`  
+> **File:** `E:\ezlib\eztest\main.ez`
 
 ---
 
-## Installation
+## Overview
 
-```
-ez install test
-```
+`eztest` is a production-ready unit testing framework for EZ, providing:
+
+- **Test suites** with `describe()` / `it()` blocks
+- **Lifecycle hooks** (`beforeEach`, `afterEach`, `beforeAll`, `afterAll`)
+- **Rich assertions** (equality, type, deep, range, throw, async)
+- **Mock / Spy / Stub** system
+- **Colored terminal output** with pass/fail/skip reporting
+- **Programmatic results** for CI/CD integration
+- **Global shorthand aliases** for all functions
 
 ---
 
 ## Quick Start
 
 ```ez
-use "test"
+use "eztest"
 
-describe("Math", task() {
-    it("adds two numbers", task() {
+describe("Math Tests", || {
+    it("adds numbers correctly", || {
         assertEqual(1 + 1, 2)
     })
-
-    it("handles negatives", task() {
-        assertEqual(-5 + 3, -2)
+    
+    it("multiplies correctly", || {
+        assertEqual(3 * 4, 12)
     })
 })
 
 run()
 ```
 
+**Output:**
 ```
 ═══ EZ Test Framework ═══
 
-Math
-  ✓ adds two numbers
-  ✓ handles negatives
+Math Tests
+  ✓ adds numbers correctly
+  ✓ multiplies correctly
 
 ═══════════════════════════════
   2 passed
@@ -48,375 +55,551 @@ Math
 
 ---
 
-## Defining Tests
+## Test Structure
 
-### `describe` / `suite` — Group related tests
+### `describe(suiteName, fn)`
+Defines a named test suite. Suites can be nested.
 
-```ez
-describe("User Model", task() {
-    it("creates a user", task() {
-        user = { "name": "Alice", "age": 30 }
-        assertNotNull(user)
-        assertEqual(user["name"], "Alice")
-    })
-})
+### `suite(name, fn)`
+Alias for `describe`.
 
-# describe and suite are identical
-suite("String Utils", task() {
-    it("trims whitespace", task() {
-        assertEqual(trim("  hello  "), "hello")
-    })
-})
-```
+### `it(testName, fn)`
+Defines a test case inside a `describe` block.
 
-### Nested Suites
+### `testCase(name, fn)`
+Alias for `it`.
+
+### `skipe(name, fn)`
+Defines a **skipped** test case (it won't run, shown as skipped in output).
 
 ```ez
-describe("API", task() {
-    describe("GET /users", task() {
-        it("returns 200", task() {
-            assertEqual(200, 200)
-        })
-    })
+use "eztest"
 
-    describe("POST /users", task() {
-        it("returns 201", task() {
-            assertEqual(201, 201)
-        })
+describe("String Tests", || {
+    it("length works", || {
+        assertEqual(len("hello"), 5)
+    })
+    
+    it("indexOf works", || {
+        assertEqual(indexOf("hello world", "world"), 6)
+    })
+    
+    skipe("concat works", || {
+        # TODO: implement this test
+        assertEqual("a" + "b", "ab")
     })
 })
+
+run()
 ```
-
-### `it` / `testCase` — Individual test cases
-
-```ez
-it("standalone test outside a suite", task() {
-    assert(true)
-})
-
-testCase("alternative syntax", task() {
-    assertEqual(1, 1)
-})
-```
-
-### `skipe` — Skip a test
-
-```ez
-describe("Feature X", task() {
-    it("works normally", task() {
-        assert(true)
-    })
-
-    skipe("not implemented yet", task() {
-        assert(false)   # never runs
-    })
-})
-```
-
-Skipped tests show as yellow in the output and are counted separately.
 
 ---
 
 ## Lifecycle Hooks
 
-Hooks run automatically around your tests. All four are available per suite.
+### `beforeEach(fn)`
+Runs before each `it()` in the current suite.
+
+### `afterEach(fn)`
+Runs after each `it()` in the current suite.
+
+### `beforeAll(fn)`
+Runs once before all tests in the suite.
+
+### `afterAll(fn)`
+Runs once after all tests in the suite.
 
 ```ez
-describe("Database", task() {
-    beforeAll(task() {
-        # Runs once before all tests in this suite
-        db = connect("test.db")
-    })
+use "eztest"
+use "ezdb"
 
-    afterAll(task() {
-        # Runs once after all tests in this suite
+db = nil
+
+describe("Database Tests", || {
+    beforeAll(|| {
+        db = Database(":memory:")
+        db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", nil)
+    })
+    
+    beforeEach(|| {
+        # Clean state before each test
+        db.execute("DELETE FROM users", nil)
+    })
+    
+    afterAll(|| {
         db.close()
     })
-
-    beforeEach(task() {
-        # Runs before every individual test
-        db.clear()
-        db.seed()
+    
+    it("inserts a user", || {
+        db.execute("INSERT INTO users (name) VALUES (?)", ["Alice"])
+        count = db.fetchScalar("SELECT COUNT(*) FROM users", nil)
+        assertEqual(count, 1)
     })
-
-    afterEach(task() {
-        # Runs after every individual test
-        db.rollback()
-    })
-
-    it("inserts a record", task() {
-        db.insert({ "id": 1, "name": "Alice" })
-        assertEqual(db.count(), 1)
-    })
-
-    it("deletes a record", task() {
-        db.delete(1)
-        assertEqual(db.count(), 0)
+    
+    it("finds no users initially", || {
+        count = db.fetchScalar("SELECT COUNT(*) FROM users", nil)
+        assertEqual(count, 0)
     })
 })
+
+run()
 ```
 
 ---
 
 ## Assertions
 
-All assertions throw a descriptive error message on failure. An optional final `message` argument overrides the default.
-
-### Boolean
-
-```ez
-assert(value)                    # value is truthy
-assertFalse(value)               # value is falsy
-```
-
-### Equality
+### `assert(value, message)` → `boolean`
+Asserts that `value` is truthy. Throws `message` if not.
 
 ```ez
-assertEqual(actual, expected)           # actual == expected
-assertNotEqual(actual, notExpected)     # actual != notExpected
-assertDeepEqual(actual, expected)       # deep equality for arrays and dicts
+use "eztest"
+
+assert(true)                         # passes
+assert(1 == 1)                        # passes
+assert(len("hello") == 5, "len failed")  # passes
+assert(false, "Expected truthy")     # throws
 ```
-
-### Null Checks
-
-```ez
-assertNull(value)       # value is nil
-assertNotNull(value)    # value is not nil
-```
-
-### Type Check
-
-```ez
-assertType(value, "string")       # typeOf(value) == "string"
-assertType(value, "number")
-assertType(value, "array")
-assertType(value, "dictionary")
-```
-
-### String / Array Membership
-
-```ez
-assertContains("hello world", "world")        # string contains substring
-assertInArray([1, 2, 3], 2)                   # array contains value
-```
-
-### Numeric Comparisons
-
-```ez
-assertGreaterThan(10, 5)                      # 10 > 5
-assertLessThan(3, 10)                         # 3 < 10
-assertApproxEqual(3.14159, 3.14, 0.01)        # within tolerance
-```
-
-### Error Handling
-
-```ez
-# Assert a function throws
-assertThrows(task() {
-    throw "oops"
-})
-
-# Assert it throws a specific message
-assertThrows(task() {
-    throw "invalid input"
-}, "invalid")
-
-# Assert a function does NOT throw
-assertDoesNotThrow(task() {
-    x = 1 + 1
-})
-```
-
-### Full Assertion Reference
-
-| Assertion | Description |
-|---|---|
-| `assert(val)` | Passes if val is truthy |
-| `assertFalse(val)` | Passes if val is falsy |
-| `assertEqual(a, b)` | Passes if `a == b` |
-| `assertNotEqual(a, b)` | Passes if `a != b` |
-| `assertDeepEqual(a, b)` | Deep equality for arrays and dicts |
-| `assertNull(val)` | Passes if val is `nil` |
-| `assertNotNull(val)` | Passes if val is not `nil` |
-| `assertType(val, type)` | Passes if `typeOf(val) == type` |
-| `assertContains(str, sub)` | Passes if string contains substring |
-| `assertInArray(arr, val)` | Passes if array contains value |
-| `assertGreaterThan(val, n)` | Passes if `val > n` |
-| `assertLessThan(val, n)` | Passes if `val < n` |
-| `assertApproxEqual(a, b, tol)` | Passes if `abs(a - b) <= tol` (default: `0.0001`) |
-| `assertThrows(fn, msg?)` | Passes if fn throws (optionally matching msg) |
-| `assertDoesNotThrow(fn)` | Passes if fn does not throw |
 
 ---
 
-## Spies, Stubs & Mocks
-
-### Spy — Track calls to a real function
+### `assertFalse(value, message)`
+Asserts that `value` is falsy.
 
 ```ez
-use "test"
+assertFalse(false)           # passes
+assertFalse(0)               # passes
+assertFalse(true, "was true")  # throws
+```
 
-called = false
-original = task(x) {
-    called = true
-    give x * 2
-}
+---
 
-s = Spy(original)
+### `assertEqual(actual, expected, message)`
+Asserts `actual == expected`.
+
+```ez
+assertEqual(2 + 2, 4)
+assertEqual("hello", "hello")
+assertEqual(nil, nil)
+assertEqual(1, 2)   # throws: "Expected 2, got: 1"
+```
+
+---
+
+### `assertNotEqual(actual, notExpected, message)`
+Asserts `actual != notExpected`.
+
+```ez
+assertNotEqual("hello", "world")   # passes
+assertNotEqual(42, 42)             # throws
+```
+
+---
+
+### `assertDeepEqual(actual, expected, message)`
+Asserts deep structural equality for arrays and dictionaries.
+
+```ez
+assertDeepEqual([1, 2, 3], [1, 2, 3])   # passes
+assertDeepEqual({"a": 1, "b": 2}, {"a": 1, "b": 2})  # passes
+assertDeepEqual([1, 2], [1, 3])  # throws
+assertDeepEqual({"a": 1}, {"a": 2})  # throws
+```
+
+---
+
+### `assertNull(value, message)`
+Asserts that `value` is `nil`.
+
+```ez
+assertNull(nil)          # passes
+assertNull(0)            # throws: "Expected null, got: 0"
+```
+
+---
+
+### `assertNotNull(value, message)`
+Asserts that `value` is NOT `nil`.
+
+```ez
+assertNotNull("hello")   # passes
+assertNotNull(nil)        # throws: "Expected non-null value"
+```
+
+---
+
+### `assertType(value, expectedType, message)`
+Asserts that `typeOf(value) == expectedType`.
+
+Valid type strings: `"string"`, `"number"`, `"boolean"`, `"nil"`, `"array"`, `"dictionary"`, `"function"`, `"model"`.
+
+```ez
+assertType("hello", "string")   # passes
+assertType(42, "number")         # passes
+assertType([], "array")          # passes
+assertType({}, "dictionary")     # passes
+assertType(42, "string")         # throws: "Expected type 'string', got: 'number'"
+```
+
+---
+
+### `assertContains(haystack, needle, message)`
+Asserts that string `haystack` contains string `needle`.
+
+```ez
+assertContains("Hello World", "World")   # passes
+assertContains("Hello World", "xyz")     # throws
+```
+
+---
+
+### `assertInArray(array, value, message)`
+Asserts that `value` exists in the array.
+
+```ez
+assertInArray([1, 2, 3], 2)    # passes
+assertInArray(["a", "b"], "c") # throws
+```
+
+---
+
+### `assertThrows(fn, expectedMessage, message)`
+Asserts that calling `fn()` throws an error. Optionally checks that the error message contains `expectedMessage`.
+
+```ez
+assertThrows(|| { throw "Something went wrong" })  # passes (threw)
+assertThrows(|| { throw "Connection failed" }, "Connection")  # passes
+assertThrows(|| { x = 1 + 1 }, nil, "should have thrown")   # throws (did not throw)
+assertThrows(|| { throw "abc" }, "xyz")  # throws (message mismatch)
+```
+
+---
+
+### `assertDoesNotThrow(fn, message)`
+Asserts that calling `fn()` does NOT throw.
+
+```ez
+assertDoesNotThrow(|| { x = 1 + 1 })   # passes
+assertDoesNotThrow(|| { throw "oops" })  # throws: "Expected no error, but threw: oops"
+```
+
+---
+
+### `assertApproxEqual(actual, expected, tolerance, message)`
+Asserts that `|actual - expected| <= tolerance`. Default tolerance: `0.0001`.
+
+```ez
+assertApproxEqual(3.14159, 3.14, 0.01)      # passes
+assertApproxEqual(0.1 + 0.2, 0.3, 0.0001)  # passes (floating point)
+assertApproxEqual(1.0, 2.0, 0.5)            # throws
+```
+
+---
+
+### `assertGreaterThan(value, threshold, message)`
+Asserts `value > threshold`.
+
+```ez
+assertGreaterThan(5, 3)    # passes
+assertGreaterThan(3, 5)    # throws
+assertGreaterThan(5, 5)    # throws (not strictly greater)
+```
+
+---
+
+### `assertLessThan(value, threshold, message)`
+Asserts `value < threshold`.
+
+```ez
+assertLessThan(3, 5)    # passes
+assertLessThan(5, 3)    # throws
+```
+
+---
+
+## Mock / Spy / Stub System
+
+### `spy(targetFn)`
+Creates a function that records all calls to it.
+
+```ez
+use "eztest"
+
+callLog = []
+originalFn = |x| { push(callLog, x)   give x * 2 }
+
+spyFn = spy(originalFn)
+spyFn(5)
+spyFn(10)
+
+# Note: spy() returns a wrapper lambda, not a Spy model directly
+# For full Spy functionality, use Spy() directly:
+s = Spy(originalFn)
 s.call(5)
-
-assertEqual(s.callCount(), 1)
-assert(s.calledWith(5))
-assertEqual(s.getCall(0)["args"], 5)
+s.call(10)
+out s.callCount()          # → 2
+out s.getCall(0)["args"]   # → 5
+out s.calledWith(10)       # → true
+s.reset()
+out s.callCount()          # → 0
 ```
 
-### Stub — Replace a function with a fixed return value
+---
+
+### `stub(returnValue)`
+Creates a function that always returns the given value, recording calls.
 
 ```ez
-double = stub(42)
-result = double(99)   # ignores input, always returns 42
-assertEqual(result, 42)
+use "eztest"
+
+fetchUser = stub({"id": 1, "name": "Alice"})
+result = fetchUser(42)
+out result["name"]   # → "Alice"
 ```
 
-### Mock — Empty spy with no implementation
+---
+
+### `mock()`
+Creates a no-op function that records calls.
 
 ```ez
-fn = mock()
-fn("hello")
-fn("world")
+use "eztest"
 
-# Use the underlying Spy to inspect
-s = Spy(fn)
-# check s.callCount(), s.calledWith(), etc.
+logger = mock()
+logger("info message")
+logger("warn message")
+# Calls are recorded but nothing happens
 ```
-
-### Spy Methods
-
-| Method | Description |
-|---|---|
-| `.call(args)` | Invoke the spy |
-| `.callCount()` | Number of times called |
-| `.getCall(index)` | Get call info at index (`{ args, timestamp }`) |
-| `.calledWith(args)` | Returns `true` if ever called with these args |
-| `.reset()` | Clear call history |
-| `.returns(val)` | Set stub return value (disables call-through) |
 
 ---
 
 ## Running Tests
 
-### `run()` — Run all tests and exit
+### `runTests(options)` → `dictionary`
 
-```ez
-run()
+Runs all registered tests and suites. Returns a summary dictionary.
+
+**Options:**
+- `{"silent": true}` — Suppress all output (useful for programmatic use).
+
+**Returns:**
+```
+{
+  "passed": number,
+  "failed": number,
+  "skipped": number,
+  "total": number,
+  "duration": number,   # milliseconds
+  "success": boolean
+}
 ```
 
-Exits with code `1` if any tests fail — ideal for CI pipelines.
-
-### `runTests(options)` — Run and return results
-
 ```ez
+use "eztest"
+
+describe("Suite A", || {
+    it("test 1", || { assertEqual(1, 1) })
+    it("test 2", || { assertEqual(2, 2) })
+})
+
 results = runTests({})
-
-out results["passed"]    # number of passing tests
-out results["failed"]    # number of failing tests
-out results["skipped"]   # number of skipped tests
-out results["total"]     # total tests run
-out results["duration"]  # milliseconds
-out results["success"]   # true if zero failures
-```
-
-### Silent Mode — Suppress output
-
-```ez
-results = runTests({ "silent": true })
-# No terminal output; use results dict programmatically
-```
-
-### `clear()` — Reset test state
-
-```ez
-clear()   # wipe all registered suites and reset counters
+out results["passed"]   # → 2
+out results["failed"]   # → 0
+out results["success"]  # → true
 ```
 
 ---
 
-## Prefixed Global Aliases
-
-If you prefer not to use `test.` or the bare function names, every function is also exported with a `t` prefix to avoid naming conflicts:
+### `run()` → `dictionary`
+Runs tests and exits the process with code `1` if any tests failed.
 
 ```ez
-tDescribe, tSuite, tIt, tTestCase, tSkip
-tBeforeEach, tAfterEach, tBeforeAll, tAfterAll
-tAssert, tAssertEqual, tAssertDeepEqual, tAssertNotEqual
-tAssertNull, tAssertNotNull, tAssertType
-tAssertContains, tAssertInArray
-tAssertGreaterThan, tAssertLessThan, tAssertApproxEqual
-tAssertThrows, tAssertDoesNotThrow, tAssertFalse
-tSpy, tStub, tMock
-tRun, tRunTests, tClear
+use "eztest"
+
+describe("Basics", || {
+    it("works", || { assert(true) })
+})
+
+run()   # exits with 0 (success)
 ```
 
 ---
 
-## Complete Example
+### `clear()`
+Clears all registered tests for reloading.
+
+---
+
+## `test` Namespace Object
+
+Everything is also available under the `test` dictionary:
 
 ```ez
-use "test"
+use "eztest"
 
-describe("String Utils", task() {
-    describe("trim", task() {
-        it("removes leading spaces", task() {
-            assertEqual(trim("  hello"), "hello")
-        })
-
-        it("removes trailing spaces", task() {
-            assertEqual(trim("hello  "), "hello")
-        })
-
-        skip("handles tabs (TODO)", task() {
-            assertEqual(trim("\thello\t"), "hello")
-        })
-    })
-
-    describe("split", task() {
-        beforeEach(task() {
-            # setup per-test state here
-        })
-
-        it("splits on delimiter", task() {
-            parts = split("a,b,c", ",")
-            assertDeepEqual(parts, ["a", "b", "c"])
-        })
-
-        it("returns single element when no match", task() {
-            parts = split("hello", ",")
-            assertEqual(len(parts), 1)
-        })
+test.describe("My Tests", || {
+    test.it("works", || {
+        test.assertEqual(1 + 1, 2)
     })
 })
 
-describe("Math Utils", task() {
-    it("abs handles negatives", task() {
-        assertEqual(abs(-5), 5)
-    })
-
-    it("approx equal for floats", task() {
-        assertApproxEqual(0.1 + 0.2, 0.3, 0.0001)
-    })
-
-    it("throws on divide by zero", task() {
-        assertThrows(task() {
-            x = 1 / 0
-        })
-    })
-})
-
-run()
+test.run()
 ```
 
 ---
 
-## License
+## Global Shorthand Aliases
 
-MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
+| Global Alias | Maps To |
+|---|---|
+| `tAssert` | `test.assert` |
+| `tAssertFalse` | `test.assertFalse` |
+| `tAssertEqual` | `test.assertEqual` |
+| `tAssertDeepEqual` | `test.assertDeepEqual` |
+| `tAssertNotEqual` | `test.assertNotEqual` |
+| `tAssertNull` | `test.assertNull` |
+| `tAssertNotNull` | `test.assertNotNull` |
+| `tAssertType` | `test.assertType` |
+| `tAssertContains` | `test.assertContains` |
+| `tAssertInArray` | `test.assertInArray` |
+| `tAssertThrows` | `test.assertThrows` |
+| `tAssertDoesNotThrow` | `test.assertDoesNotThrow` |
+| `tAssertApproxEqual` | `test.assertApproxEqual` |
+| `tAssertGreaterThan` | `test.assertGreaterThan` |
+| `tAssertLessThan` | `test.assertLessThan` |
+| `tDescribe` | `test.describe` |
+| `tSuite` | `test.suite` |
+| `tIt` | `test.it` |
+| `tTestCase` | `test.test` |
+| `tSkip` | `test.skip` |
+| `tBeforeEach` | `test.beforeEach` |
+| `tAfterEach` | `test.afterEach` |
+| `tBeforeAll` | `test.beforeAll` |
+| `tAfterAll` | `test.afterAll` |
+| `tRun` | `test.run` |
+| `tRunTests` | `test.runTests` |
+| `tClear` | `test.clear` |
+| `tSpy` | `test.spy` |
+| `tStub` | `test.stub` |
+| `tMock` | `test.mock` |
+
+---
+
+## Edge Cases & Important Notes
+
+### Assertion Error Messages
+All assertions accept an optional `message` parameter. If not provided, a default message is generated using `__formatValue()` which shows the actual and expected values.
+
+### Error Handling in Assertions
+Assertions use `throw` to signal failures. The test runner wraps each `it()` in a `try/catch`. Any uncaught error (not just assertion errors) counts as a test failure.
+
+### Deep Equality Performance
+`assertDeepEqual()` recursively walks arrays and dictionaries. For very large structures, this may be slow.
+
+### Nested `describe()` Blocks
+Suites can be nested. Inner suites inherit the current suite context but have their own `beforeEach`/`afterEach` hooks. Parent hooks do NOT automatically run for child suites.
+
+### `beforeAll` Failure
+If `beforeAll()` throws, the entire suite is skipped and an error is printed. Individual tests are not run.
+
+### `afterEach` Errors
+If `afterEach()` throws and the test itself passed, the test is marked as **failed** with the `afterEach` error message.
+
+### Silent Mode
+`runTests({"silent": true})` suppresses all `out` calls in the framework (but not in your test functions themselves).
+
+---
+
+## Full Example: Testing a Calculator Module
+
+```ez
+use "eztest"
+
+# Calculator under test
+task add(a, b) { give a + b }
+task subtract(a, b) { give a - b }
+task multiply(a, b) { give a * b }
+task divide(a, b) {
+    when b == 0 { throw "Division by zero" }
+    give a / b
+}
+
+describe("Calculator", || {
+    describe("Addition", || {
+        it("adds positive numbers", || { assertEqual(add(2, 3), 5) })
+        it("adds negative numbers", || { assertEqual(add(-2, -3), -5) })
+        it("adds zero", || { assertEqual(add(5, 0), 5) })
+    })
+    
+    describe("Division", || {
+        it("divides correctly", || {
+            assertApproxEqual(divide(10, 3), 3.333, 0.001)
+        })
+        
+        it("throws on division by zero", || {
+            assertThrows(|| { divide(5, 0) }, "Division by zero")
+        })
+        
+        it("handles negative divisor", || {
+            assertEqual(divide(-10, 2), -5)
+        })
+    })
+    
+    describe("Multiplication", || {
+        it("multiplies", || { assertEqual(multiply(3, 4), 12) })
+        it("zero product", || { assertEqual(multiply(0, 999), 0) })
+    })
+})
+
+results = runTests({})
+when not results["success"] {
+    out "Some tests failed!"
+}
+```
+
+---
+
+## Full Example: CI-Friendly Test Runner
+
+```ez
+use "eztest"
+
+# Run silently and check results
+describe("Core", || {
+    it("string operations work", || {
+        assertEqual(len("hello"), 5)
+        assertContains("hello world", "world")
+    })
+    
+    it("array operations work", || {
+        arr = [1, 2, 3]
+        assertDeepEqual(arr, [1, 2, 3])
+        assertInArray(arr, 2)
+    })
+    
+    it("arithmetic is correct", || {
+        assertApproxEqual(3.14 * 2, 6.28, 0.01)
+        assertGreaterThan(10, 5)
+        assertLessThan(5, 10)
+    })
+})
+
+# Silent run for CI
+results = runTests({"silent": true})
+
+out "Tests: " + str(results["total"])
+out "Passed: " + str(results["passed"])
+out "Failed: " + str(results["failed"])
+out "Duration: " + str(results["duration"]) + "ms"
+
+when not results["success"] {
+    out "FAILED"
+    exit(1)
+}
+
+out "PASSED"
+```
+
+---
+
+*Documentation generated from `E:\ezlib\eztest\main.ez` — EZ Test Framework v1.0.0*

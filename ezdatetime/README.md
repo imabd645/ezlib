@@ -1,605 +1,459 @@
-# DateTime Library for EZ Language
+# ezdatetime — Date & Time Library for EZ
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/yourusername/ez-datetime)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+> **Version:** 2.0.0  
+> **Import:** `use "ezdatetime"`  
+> **File:** `E:\ezlib\ezdatetime\main.ez`
 
-A comprehensive date and time manipulation library for the EZ programming language. This library provides utilities for working with timestamps, formatting dates, performing date arithmetic, and extracting date components.
+---
 
-## Table of Contents
+## Overview
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Core Concepts](#core-concepts)
-- [API Reference](#api-reference)
-  - [Constants](#constants)
-  - [Current Time Functions](#current-time-functions)
-  - [Date Component Functions](#date-component-functions)
-  - [Timestamp Creation](#timestamp-creation)
-  - [Formatting Functions](#formatting-functions)
-  - [Date Arithmetic](#date-arithmetic)
-  - [Helper Functions](#helper-functions)
-- [Usage Examples](#usage-examples)
-- [Contributing](#contributing)
-- [License](#license)
+`ezdatetime` provides a complete, pure-EZ date and time library. It works with **Unix timestamps in milliseconds** (ms since `1970-01-01T00:00:00 UTC`) and provides decomposition, formatting, arithmetic, and comparison utilities.
 
-## Installation
+All timestamps are UTC-based. To display local time, add your timezone offset in hours using `addTime()` or the `dateTime()` / `timeNow()` helpers.
 
-Copy the `datetime.ez` file into your project directory and import it into your EZ programs.
-
-```ez
-// Import the datetime library
-load "datetime.ez"
-```
+---
 
 ## Quick Start
 
 ```ez
-load "datetime.ez"
+use "ezdatetime"
 
-// Get current timestamp
-current = now()
-say "Current timestamp: " + str(current)
-
-// Format current date and time
-say "Now: " + format(current)
-
-// Get just the date
-say "Today: " + dateNow()
-
-// Create a specific timestamp
-birthday = makeTimestamp(1990, 5, 15, 14, 30, 0)
-say "Birthday: " + format(birthday)
-
-// Add time to a timestamp
-future = addTime(current, 7, 0, 0, 0)  // Add 7 days
-say "Next week: " + format(future)
-
-// Calculate difference between dates
-days = diffDays(future, current)
-say "Days difference: " + str(days)
+ts = now()
+out format(ts)    # → "2025-06-11 08:30:00"
+out dateNow()     # → "2025-06-11"
+out timeNow(5)    # → "13:30:00" (UTC+5)
 ```
 
-## Core Concepts
+---
 
-### Unix Timestamp
-
-This library uses **Unix timestamps** measured in **milliseconds** since January 1, 1970 00:00:00 UTC (the Unix epoch). This is different from the standard Unix timestamp which uses seconds.
-
-**Example:**
-- `0` = January 1, 1970 00:00:00 UTC
-- `1000` = January 1, 1970 00:00:01 UTC
-- `86400000` = January 2, 1970 00:00:00 UTC
-
-### Weekday Numbering
-
-Weekdays are numbered 0-6:
-- `0` = Sunday
-- `1` = Monday
-- `2` = Tuesday
-- `3` = Wednesday
-- `4` = Thursday
-- `5` = Friday
-- `6` = Saturday
-
-## API Reference
-
-### Constants
-
-The library provides several time conversion constants:
+## Constants
 
 | Constant | Value | Description |
-|----------|-------|-------------|
-| `MS_PER_SEC` | 1000 | Milliseconds in one second |
-| `MS_PER_MIN` | 60000 | Milliseconds in one minute |
-| `MS_PER_HOUR` | 3600000 | Milliseconds in one hour |
-| `MS_PER_DAY` | 86400000 | Milliseconds in one day |
-
-**Example:**
-```ez
-three_hours = 3 * MS_PER_HOUR  // 10800000 milliseconds
-```
+|---|---|---|
+| `MS_PER_SEC` | `1000` | Milliseconds in 1 second |
+| `MS_PER_MIN` | `60000` | Milliseconds in 1 minute |
+| `MS_PER_HOUR` | `3600000` | Milliseconds in 1 hour |
+| `MS_PER_DAY` | `86400000` | Milliseconds in 1 day |
 
 ---
 
-### Current Time Functions
+## Core Functions
 
-#### `now()`
+### `now()` → `number`
+Returns the current Unix timestamp in milliseconds.
 
-Returns the current timestamp in milliseconds since Unix epoch.
-
-**Returns:** `Number` - Current timestamp
-
-**Example:**
 ```ez
-current_time = now()
-say "Current timestamp: " + str(current_time)
-```
+use "ezdatetime"
 
----
-
-#### `dateNow()`
-
-Returns the current date as a formatted string (YYYY-MM-DD).
-
-**Returns:** `String` - Current date in ISO format
-
-**Example:**
-```ez
-today = dateNow()
-say "Today's date: " + today  // "2024-02-03"
-```
-
----
-
-#### `timeNow(x)`
-
-Returns the current time plus `x` hours, formatted as HH:MM:SS.
-
-**Parameters:**
-- `x` (Number) - Hours to add to current time
-
-**Returns:** `String` - Time in HH:MM:SS format
-
-**Example:**
-```ez
-current = timeNow(0)      // Current time: "14:30:45"
-in_3_hours = timeNow(3)   // Time in 3 hours: "17:30:45"
-```
-
----
-
-### Date Component Functions
-
-#### `getComponents(ts)`
-
-Extracts all date and time components from a timestamp.
-
-**Parameters:**
-- `ts` (Number) - Unix timestamp in milliseconds
-
-**Returns:** `Object` with the following properties:
-- `year` (Number) - Four-digit year (e.g., 2024)
-- `month` (Number) - Month (1-12)
-- `day` (Number) - Day of month (1-31)
-- `hour` (Number) - Hour (0-23)
-- `minute` (Number) - Minute (0-59)
-- `second` (Number) - Second (0-59)
-- `millisecond` (Number) - Millisecond (0-999)
-- `weekday` (Number) - Day of week (0-6, Sunday=0)
-
-**Example:**
-```ez
 ts = now()
-components = getComponents(ts)
-
-say "Year: " + str(components.year)
-say "Month: " + str(components.month)
-say "Day: " + str(components.day)
-say "Hour: " + str(components.hour)
-say "Weekday: " + str(components.weekday)
+out ts   # → e.g. 1749556800000
 ```
+
+Internally wraps the EZ built-in `clock()`.
 
 ---
 
-### Timestamp Creation
+### `format(ts)` → `string`
+Formats a timestamp as `"YYYY-MM-DD HH:MM:SS"`.
 
-#### `makeTimestamp(y, m, d, h, mn, s)`
-
-Creates a Unix timestamp from individual date and time components.
-
-**Parameters:**
-- `y` (Number) - Year (e.g., 2024)
-- `m` (Number) - Month (1-12)
-- `d` (Number) - Day of month (1-31)
-- `h` (Number) - Hour (0-23)
-- `mn` (Number) - Minute (0-59)
-- `s` (Number) - Second (0-59)
-
-**Returns:** `Number` - Unix timestamp in milliseconds
-
-**Example:**
 ```ez
-// January 1, 2024 at 12:00:00
-new_year = makeTimestamp(2024, 1, 1, 12, 0, 0)
+use "ezdatetime"
 
-// December 25, 2024 at 18:30:45
-christmas = makeTimestamp(2024, 12, 25, 18, 30, 45)
+ts = makeTimestamp(2025, 6, 11, 14, 30, 0)
+out format(ts)   # → "2025-06-11 14:30:00"
 ```
+
+Hours, minutes, and seconds are zero-padded to 2 digits.
 
 ---
 
-### Formatting Functions
+### `dateStr(ts)` → `string`
+Returns only the date portion as `"YYYY-MM-DD"`.
 
-#### `format(ts)`
-
-Formats a timestamp as a complete date-time string.
-
-**Parameters:**
-- `ts` (Number) - Unix timestamp in milliseconds
-
-**Returns:** `String` - Formatted as "YYYY-MM-DD HH:MM:SS"
-
-**Example:**
 ```ez
-ts = makeTimestamp(2024, 7, 4, 16, 30, 0)
-formatted = format(ts)
-say formatted  // "2024-07-04 16:30:00"
-```
+use "ezdatetime"
 
----
-
-#### `dateStr(ts)`
-
-Formats a timestamp as a date-only string.
-
-**Parameters:**
-- `ts` (Number) - Unix timestamp in milliseconds
-
-**Returns:** `String` - Formatted as "YYYY-MM-DD"
-
-**Example:**
-```ez
 ts = now()
-date = dateStr(ts)
-say date  // "2024-02-03"
+out dateStr(ts)  # → "2025-06-11"
 ```
 
 ---
 
-#### `timeStr(ts)`
+### `timeStr(ts)` → `string`
+Returns only the time portion as `"HH:MM:SS"`.
 
-Formats a timestamp as a time-only string.
-
-**Parameters:**
-- `ts` (Number) - Unix timestamp in milliseconds
-
-**Returns:** `String` - Formatted as "HH:MM:SS"
-
-**Example:**
 ```ez
-ts = now()
-time = timeStr(ts)
-say time  // "14:30:45"
+use "ezdatetime"
+
+ts = makeTimestamp(2025, 1, 1, 9, 5, 3)
+out timeStr(ts)  # → "09:05:03"
 ```
 
 ---
 
-#### `dateTime(x)`
+### `dateNow()` → `string`
+Shorthand: returns today's UTC date as `"YYYY-MM-DD"`.
 
-Returns the current date and time plus `x` hours, fully formatted.
-
-**Parameters:**
-- `x` (Number) - Hours to add to current time
-
-**Returns:** `String` - Formatted as "YYYY-MM-DD HH:MM:SS"
-
-**Example:**
 ```ez
-now_str = dateTime(0)      // Current: "2024-02-03 14:30:00"
-later = dateTime(5)        // In 5 hours: "2024-02-03 19:30:00"
+use "ezdatetime"
+
+out dateNow()  # → "2025-06-11"
 ```
 
 ---
 
-### Date Arithmetic
-
-#### `addTime(ts, days, hours, mins, secs)`
-
-Adds or subtracts time from a timestamp.
+### `timeNow(offsetHours)` → `string`
+Returns the current time with an optional UTC offset in hours as `"HH:MM:SS"`.
 
 **Parameters:**
-- `ts` (Number) - Original timestamp in milliseconds
-- `days` (Number) - Days to add (use negative to subtract)
-- `hours` (Number) - Hours to add (use negative to subtract)
-- `mins` (Number) - Minutes to add (use negative to subtract)
-- `secs` (Number) - Seconds to add (use negative to subtract)
+- `offsetHours` — Integer hours to add (positive = ahead of UTC, negative = behind).
 
-**Returns:** `Number` - New timestamp in milliseconds
-
-**Example:**
 ```ez
-ts = now()
+use "ezdatetime"
 
-// Add 7 days
-next_week = addTime(ts, 7, 0, 0, 0)
-
-// Subtract 2 hours and 30 minutes
-earlier = addTime(ts, 0, -2, -30, 0)
-
-// Add 1 day, 3 hours, 15 minutes, 30 seconds
-future = addTime(ts, 1, 3, 15, 30)
+out timeNow(0)   # → "08:30:00" UTC
+out timeNow(5)   # → "13:30:00" UTC+5 (Pakistan Standard Time)
+out timeNow(-5)  # → "03:30:00" UTC-5 (Eastern Standard Time)
 ```
 
 ---
 
-#### `diffMs(ts1, ts2)`
+### `dateTime(offsetHours)` → `string`
+Returns the full formatted date-time string `"YYYY-MM-DD HH:MM:SS"` with a UTC hour offset.
 
-Calculates the difference between two timestamps in milliseconds.
-
-**Parameters:**
-- `ts1` (Number) - First timestamp
-- `ts2` (Number) - Second timestamp
-
-**Returns:** `Number` - Difference in milliseconds (ts1 - ts2)
-
-**Example:**
 ```ez
-start = makeTimestamp(2024, 1, 1, 0, 0, 0)
-end = makeTimestamp(2024, 1, 2, 0, 0, 0)
+use "ezdatetime"
 
-diff = diffMs(end, start)
-say "Difference: " + str(diff) + " ms"  // 86400000 ms
+out dateTime(5)   # → "2025-06-11 13:30:00" (UTC+5)
 ```
 
 ---
 
-#### `diffDays(ts1, ts2)`
+## Component Decomposition
 
-Calculates the difference between two timestamps in whole days.
+### `getComponents(ts)` → `dictionary`
+Decomposes a Unix millisecond timestamp into its date and time components.
 
-**Parameters:**
-- `ts1` (Number) - First timestamp
-- `ts2` (Number) - Second timestamp
+**Returns:** Dictionary with fields:
+- `year` — Full year (e.g. `2025`)
+- `month` — Month (1–12)
+- `day` — Day of month (1–31)
+- `hour` — Hour (0–23)
+- `minute` — Minute (0–59)
+- `second` — Second (0–59)
+- `millisecond` — Milliseconds (0–999)
+- `weekday` — Day of week: `0=Sunday, 1=Monday, ..., 6=Saturday`
 
-**Returns:** `Number` - Difference in days (rounded down)
-
-**Example:**
+**Examples:**
 ```ez
-start = makeTimestamp(2024, 1, 1, 0, 0, 0)
-end = makeTimestamp(2024, 1, 15, 0, 0, 0)
+use "ezdatetime"
 
-days = diffDays(end, start)
-say "Days between: " + str(days)  // 14
+ts = makeTimestamp(2025, 3, 15, 10, 45, 30)
+c = getComponents(ts)
+
+out c.year       # → 2025
+out c.month      # → 3
+out c.day        # → 15
+out c.hour       # → 10
+out c.minute     # → 45
+out c.second     # → 30
+out c.weekday    # → 6 (Saturday)
 ```
 
 ---
 
-### Helper Functions
+## Timestamp Construction
 
-#### `isLeap(year)`
-
-Determines if a year is a leap year.
+### `makeTimestamp(y, m, d, h, mn, s)` → `number`
+Creates a Unix millisecond timestamp from date/time components.
 
 **Parameters:**
-- `year` (Number) - Four-digit year
+- `y` — Year (e.g. `2025`)
+- `m` — Month (1–12)
+- `d` — Day (1–31)
+- `h` — Hour (0–23)
+- `mn` — Minute (0–59)
+- `s` — Second (0–59)
 
-**Returns:** `Boolean` - `true` if leap year, `false` otherwise
+**Returns:** Unix timestamp in milliseconds (UTC).
 
-**Example:**
+**Examples:**
 ```ez
-when isLeap(2024) {
-    say "2024 is a leap year"  // This will print
+use "ezdatetime"
+
+ts = makeTimestamp(2025, 12, 25, 0, 0, 0)
+out format(ts)   # → "2025-12-25 00:00:00"
+
+birthday = makeTimestamp(1990, 7, 4, 12, 0, 0)
+out dateStr(birthday)  # → "1990-07-04"
+
+# Epoch itself
+epoch = makeTimestamp(1970, 1, 1, 0, 0, 0)
+out epoch  # → 0
+```
+
+---
+
+## Arithmetic Functions
+
+### `addTime(ts, days, hours, mins, secs)` → `number`
+Adds an arbitrary duration to a timestamp.
+
+**Parameters:**
+- `ts` — Base timestamp in milliseconds.
+- `days` — Days to add.
+- `hours` — Hours to add.
+- `mins` — Minutes to add.
+- `secs` — Seconds to add.
+
+Use negative values to subtract time.
+
+**Examples:**
+```ez
+use "ezdatetime"
+
+now = makeTimestamp(2025, 6, 11, 12, 0, 0)
+
+# Add 1 day
+tomorrow = addTime(now, 1, 0, 0, 0)
+out dateStr(tomorrow)  # → "2025-06-12"
+
+# Add 2 hours 30 minutes
+later = addTime(now, 0, 2, 30, 0)
+out timeStr(later)   # → "14:30:00"
+
+# Subtract 7 days (go back a week)
+lastWeek = addTime(now, -7, 0, 0, 0)
+out dateStr(lastWeek)  # → "2025-06-04"
+```
+
+---
+
+### `diffMs(ts1, ts2)` → `number`
+Returns the difference `ts1 - ts2` in milliseconds.
+
+```ez
+use "ezdatetime"
+
+a = makeTimestamp(2025, 6, 11, 10, 0, 0)
+b = makeTimestamp(2025, 6, 11, 8, 0, 0)
+
+diff = diffMs(a, b)
+out diff          # → 7200000 (2 hours in ms)
+out diff / 3600000 # → 2.0
+```
+
+---
+
+### `diffDays(ts1, ts2)` → `number`
+Returns the number of full days between two timestamps (`ts1 - ts2` in days).
+
+```ez
+use "ezdatetime"
+
+start = makeTimestamp(2025, 1, 1, 0, 0, 0)
+end = makeTimestamp(2025, 12, 31, 0, 0, 0)
+
+out diffDays(end, start)  # → 364
+```
+
+---
+
+## Helper Functions
+
+### `isLeap(year)` → `boolean`
+Returns `true` if the given year is a leap year (divisible by 4, except centuries unless divisible by 400).
+
+```ez
+use "ezdatetime"
+
+out isLeap(2024)  # → true
+out isLeap(2025)  # → false
+out isLeap(1900)  # → false (century, not 400-divisible)
+out isLeap(2000)  # → true  (400-divisible)
+```
+
+---
+
+### `daysInMonth(year, month)` → `number`
+Returns the number of days in the given month, accounting for leap years.
+
+```ez
+use "ezdatetime"
+
+out daysInMonth(2024, 2)  # → 29 (leap year)
+out daysInMonth(2025, 2)  # → 28
+out daysInMonth(2025, 4)  # → 30 (April)
+out daysInMonth(2025, 1)  # → 31 (January)
+```
+
+---
+
+### `padZero(num)` → `string`
+Zero-pads a number to at least 2 digits.
+
+```ez
+use "ezdatetime"
+
+out padZero(5)   # → "05"
+out padZero(12)  # → "12"
+out padZero(0)   # → "00"
+```
+
+---
+
+### `floorDiv(a, b)` → `number`
+Integer floor division.
+
+```ez
+use "ezdatetime"
+
+out floorDiv(7, 3)    # → 2
+out floorDiv(-7, 3)   # → -3 (floor, not truncate)
+```
+
+---
+
+## Edge Cases & Important Notes
+
+### UTC Only
+All timestamps are UTC. There is no built-in timezone database. To convert to local time, manually add your UTC offset in hours:
+```ez
+use "ezdatetime"
+
+# Pakistan Standard Time (UTC+5)
+localTs = addTime(now(), 0, 5, 0, 0)
+out format(localTs)
+```
+
+### Negative Timestamps (Before 1970)
+Dates before Jan 1, 1970 would require negative timestamps. `getComponents()` is not designed for negative input — avoid calling it with `ts < 0`.
+
+### Month/Day Boundaries
+`addTime()` does not validate calendar boundaries. Adding 31 days to January 31 gives March 3 (or 4 in a leap year), not a date error. This is correct behavior (raw millisecond addition).
+
+### Weekday Values
+`weekday` in `getComponents()` is `0=Sunday` through `6=Saturday`, matching the JavaScript convention. `1970-01-01` was a Thursday (4).
+
+### Large Year Handling
+`getComponents()` iterates year-by-year through a `while` loop. Timestamps very far in the future (e.g., year 3000+) will be slow to decompose due to the linear iteration.
+
+### Millisecond Precision
+All operations are in milliseconds. The `millisecond` field in `getComponents()` gives the sub-second remainder.
+
+---
+
+## Full Example: Age Calculator
+
+```ez
+use "ezdatetime"
+
+task calculateAge(birthYear, birthMonth, birthDay) {
+    birthTs = makeTimestamp(birthYear, birthMonth, birthDay, 0, 0, 0)
+    currentTs = now()
+    
+    days = diffDays(currentTs, birthTs)
+    years = floor(days / 365.25)
+    months = floor((days % 365.25) / 30.44)
+    
+    out "Age: " + str(years) + " years, " + str(months) + " months"
+    out "That is " + str(days) + " days old!"
 }
 
-when isLeap(2023) {
-    say "2023 is a leap year"  // This won't print
-}
+calculateAge(1995, 3, 20)
 ```
 
 ---
 
-#### `daysInMonth(year, month)`
-
-Returns the number of days in a given month, accounting for leap years.
-
-**Parameters:**
-- `year` (Number) - Four-digit year
-- `month` (Number) - Month (1-12)
-
-**Returns:** `Number` - Days in the month (28-31)
-
-**Example:**
-```ez
-days_feb_2024 = daysInMonth(2024, 2)  // 29 (leap year)
-days_feb_2023 = daysInMonth(2023, 2)  // 28
-days_april = daysInMonth(2024, 4)     // 30
-```
-
----
-
-#### `padZero(num)`
-
-Pads a single-digit number with a leading zero.
-
-**Parameters:**
-- `num` (Number) - Number to pad
-
-**Returns:** `String` - Padded string
-
-**Example:**
-```ez
-padded = padZero(5)   // "05"
-normal = padZero(15)  // "15"
-```
-
----
-
-#### `floorDiv(a, b)`
-
-Performs integer division (floor division).
-
-**Parameters:**
-- `a` (Number) - Dividend
-- `b` (Number) - Divisor
-
-**Returns:** `Number` - Integer quotient
-
-**Example:**
-```ez
-result = floorDiv(17, 5)  // 3
-result2 = floorDiv(20, 4) // 5
-```
-
----
-
-## Usage Examples
-
-### Example 1: Age Calculator
+## Full Example: Countdown Timer Display
 
 ```ez
-load "datetime.ez"
+use "ezdatetime"
 
-// Birth date: May 15, 1990
-birth = makeTimestamp(1990, 5, 15, 0, 0, 0)
-today = now()
-
-// Calculate age in days
-age_days = diffDays(today, birth)
-age_years = floorDiv(age_days, 365)
-
-say "You are approximately " + str(age_years) + " years old"
-say "That's " + str(age_days) + " days!"
-```
-
-### Example 2: Countdown Timer
-
-```ez
-load "datetime.ez"
-
-// Event date: December 31, 2024 at midnight
-event = makeTimestamp(2024, 12, 31, 0, 0, 0)
-current = now()
-
-days_until = diffDays(event, current)
-
-say "Countdown to New Year 2025:"
-say str(days_until) + " days remaining"
-say "Event date: " + format(event)
-```
-
-### Example 3: Meeting Scheduler
-
-```ez
-load "datetime.ez"
-
-// Schedule a meeting for tomorrow at 2 PM
-meeting_time = addTime(now(), 1, 0, 0, 0)  // Add 1 day
-components = getComponents(meeting_time)
-
-// Set specific time to 14:00:00
-meeting = makeTimestamp(
-    components.year,
-    components.month,
-    components.day,
-    14,  // 2 PM
-    0,
-    0
-)
-
-say "Meeting scheduled for: " + format(meeting)
-```
-
-### Example 4: Working with Weekdays
-
-```ez
-load "datetime.ez"
-
-weekday_names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-
-current = now()
-components = getComponents(current)
-
-say "Today is " + weekday_names[components.weekday]
-```
-
-### Example 5: Time Zone Offset (Manual)
-
-```ez
-load "datetime.ez"
-
-// Current UTC time
-utc = now()
-
-// Convert to EST (UTC-5)
-est_offset_hours = -5
-est = addTime(utc, 0, est_offset_hours, 0, 0)
-
-say "UTC time: " + format(utc)
-say "EST time: " + format(est)
-```
-
-### Example 6: Date Validation
-
-```ez
-load "datetime.ez"
-
-task isValidDate(year, month, day) {
-    when month < 1 or month > 12 {
-        give false
+task countdown(targetYear, targetMonth, targetDay) {
+    targetTs = makeTimestamp(targetYear, targetMonth, targetDay, 0, 0, 0)
+    currentTs = now()
+    
+    diff = diffMs(targetTs, currentTs)
+    
+    when diff <= 0 {
+        out "Event has already passed!"
+        give
     }
     
-    when day < 1 {
-        give false
-    }
+    days = floor(diff / MS_PER_DAY)
+    remaining = diff % MS_PER_DAY
+    hours = floor(remaining / MS_PER_HOUR)
+    remaining = remaining % MS_PER_HOUR
+    minutes = floor(remaining / MS_PER_MIN)
     
-    max_days = daysInMonth(year, month)
-    when day > max_days {
-        give false
-    }
-    
-    give true
+    out "Time until event:"
+    out "  " + str(days) + " days"
+    out "  " + str(hours) + " hours"
+    out "  " + str(minutes) + " minutes"
 }
 
-// Test
-when isValidDate(2024, 2, 29) {
-    say "2024-02-29 is valid"  // Leap year
-}
-
-when isValidDate(2023, 2, 29) {
-    say "2023-02-29 is valid"  // Won't print - invalid
-} else {
-    say "2023-02-29 is invalid"
-}
+countdown(2025, 12, 25)  # Days until Christmas
 ```
-
-### Example 7: Duration Calculator
-
-```ez
-load "datetime.ez"
-
-start = makeTimestamp(2024, 1, 1, 9, 0, 0)
-end = makeTimestamp(2024, 1, 1, 17, 30, 0)
-
-diff_ms = diffMs(end, start)
-hours = floorDiv(diff_ms, MS_PER_HOUR)
-remaining_ms = diff_ms % MS_PER_HOUR
-minutes = floorDiv(remaining_ms, MS_PER_MIN)
-
-say "Work duration: " + str(hours) + " hours and " + str(minutes) + " minutes"
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-### Development Guidelines
-
-1. Maintain compatibility with EZ language syntax
-2. Include examples for new functions
-3. Update documentation when adding features
-4. Follow the existing code style and naming conventions
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Changelog
-
-### Version 2.0.0
-- Ported to new EZ interpreter
-- Improved performance and accuracy
-- Enhanced documentation
-- Added helper functions
-
-### Version 1.0.0
-- Initial release
-- Core datetime functionality
-- Basic formatting and arithmetic operations
-
-## Support
-
-For bugs, questions, or suggestions, please open an issue on the GitHub repository.
 
 ---
 
-**Made with ❤️ for the EZ Language Community**
+## Full Example: Event Log Timestamping
+
+```ez
+use "ezdatetime"
+
+events = []
+
+task logEvent(name) {
+    push(events, {
+        "name": name,
+        "time": now(),
+        "formatted": dateTime(5)  # UTC+5
+    })
+}
+
+logEvent("User login")
+wait(100)
+logEvent("Page load")
+wait(200)
+logEvent("User logout")
+
+get e in events {
+    out "[" + e["formatted"] + "] " + e["name"]
+}
+```
+
+---
+
+## Full Example: Date Range Iterator
+
+```ez
+use "ezdatetime"
+
+task eachDay(startYear, startMonth, startDay, endYear, endMonth, endDay) {
+    current = makeTimestamp(startYear, startMonth, startDay, 0, 0, 0)
+    end = makeTimestamp(endYear, endMonth, endDay, 0, 0, 0)
+    
+    days = []
+    while current <= end {
+        push(days, dateStr(current))
+        current = addTime(current, 1, 0, 0, 0)
+    }
+    give days
+}
+
+range = eachDay(2025, 6, 1, 2025, 6, 7)
+get d in range {
+    out d
+}
+# → 2025-06-01
+# → 2025-06-02
+# → ...
+# → 2025-06-07
+```
+
+---
+
+*Documentation generated from `E:\ezlib\ezdatetime\main.ez` — EZ DateTime Library v2.0.0*

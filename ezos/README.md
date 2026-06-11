@@ -1,203 +1,459 @@
-# ezos
+# ezos — Operating System Utilities Library for EZ
 
-> Comprehensive OS & System Utilities for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
-
-**ezos** is a pure-EZ standard library that exposes low-level operating system capabilities through FFI bindings to `Kernel32.dll`, `User32.dll`, `msvcrt.dll`, and `Shell32.dll` — no external dependencies required.
-
----
-
-## Installation
-
-```
-ez install os
-```
+> **Version:** 1.0  
+> **Import:** `use "ezos"`  
+> **File:** `E:\ezlib\ezos\main.ez`  
+> **Requires:** `Kernel32.dll`, `User32.dll`, `msvcrt.dll`, `shell32.dll`
 
 ---
 
-## Modules
+## Overview
 
-| Module | Description |
-|---|---|
-| `os.env` | Read, write, and load environment variables |
-| `os.path` | Path joining and inspection |
-| `os.process` | Run shell commands and subprocesses |
-| `os.clipboard` | Read and write the system clipboard |
-| `os.shell` | Open files and URLs with the default application |
+`ezos` is a comprehensive Windows system utilities library for EZ, exposing native OS APIs through FFI. After import, a ready-to-use `os` instance is available with sub-objects for:
+
+- **`os.env`** — Environment variable reading, writing, and `.env` file loading
+- **`os.path`** — Path manipulation utilities
+- **`os.process`** — Shell command execution and process management
+- **`os.clipboard`** — System clipboard read/write
+- **`os.shell`** — OS shell integration (open files/URLs)
+- **`os`** — System metrics (platform, uptime, memory, CWD)
 
 ---
 
-## Usage
-
-### Environment Variables
+## Quick Start
 
 ```ez
-use "os"
+use "ezos"
 
-# Get a variable
-home = os.env.get("USERPROFILE")
-out home  # C:\Users\you
+out os.platform()       # → "windows"
+out os.cwd()            # → "C:\Users\HP\Projects"
+out os.uptime()         # → seconds since boot
 
-# Set a variable
-os.env.set("MY_VAR", "hello")
+out os.env.get("PATH")  # → PATH env variable string
 
-# Load from a .env file (defaults to ".env" in cwd)
-os.env.load(".env")
-os.env.load("config/.env.production")
-```
-
-`.env` file format:
-```
-DB_HOST=localhost
-DB_PORT=5432
-API_KEY=my-secret-key
-# This is a comment
+result = os.process.exec("dir /b")
+out result              # → directory listing
 ```
 
 ---
 
-### Path Utilities
+## `os` — System Information
+
+### `os.platform()` → `string`
+Always returns `"windows"`. `ezos` is Windows-only.
+
+### `os.uptime()` → `number`
+Returns the system uptime in seconds (floating point precision).
+
+Uses `GetTickCount64` (milliseconds since boot) divided by 1000.
 
 ```ez
-use "os"
+use "ezos"
 
-full = os.path.join("C:\\Users\\you", "Documents")
-out full  # C:\Users\you\Documents
+secs = os.uptime()
+mins = floor(secs / 60)
+hours = floor(mins / 60)
+out "System uptime: " + str(hours) + "h " + str(mins % 60) + "m"
+```
 
-out os.path.isAbsolute("C:\\Windows")  # true
-out os.path.isAbsolute("relative\\path")  # false
+### `os.totalMemory()` → `number`
+Returns the total physical RAM in bytes.
+
+```ez
+use "ezos"
+
+total = os.totalMemory()
+out str(total / 1073741824) + " GB total RAM"
+```
+
+### `os.freeMemory()` → `number`
+Returns the available physical RAM in bytes.
+
+```ez
+use "ezos"
+
+free = os.freeMemory()
+used = os.totalMemory() - free
+pct = floor(used * 100 / os.totalMemory())
+out "Memory usage: " + str(pct) + "%"
+```
+
+### `os.cwd()` → `string`
+Returns the current working directory.
+
+```ez
+use "ezos"
+
+out os.cwd()   # → "C:\Users\HP\Projects\myapp"
+```
+
+### `os.chdir(path)` → `boolean`
+Changes the current working directory. Returns `true` on success.
+
+```ez
+use "ezos"
+
+ok = os.chdir("C:\\Windows")
+out ok             # → true
+out os.cwd()       # → "C:\Windows"
+
+ok = os.chdir("C:\\nonexistent")
+out ok             # → false
 ```
 
 ---
 
-### Process & Shell Commands
+## `os.env` — Environment Variables
+
+### `os.env.get(key)` → `string | nil`
+Gets an environment variable value. Returns `nil` if not set.
 
 ```ez
-use "os"
+use "ezos"
 
-# Capture command output
-result = os.process.exec("git log --oneline -5")
-out result
+out os.env.get("PATH")         # → system PATH string
+out os.env.get("USERNAME")     # → "HP" or current Windows user
+out os.env.get("TEMP")         # → temp directory path
+out os.env.get("MY_APP_KEY")   # → nil if not set
+```
 
-# Run a command without capturing output (returns exit code)
-code = os.process.system("mkdir build")
+### `os.env.set(key, value)`
+Sets an environment variable for the current process and its children.
 
-# Exit the program
-os.process.exit(0)
+```ez
+use "ezos"
+
+os.env.set("MY_APP_ENV", "production")
+os.env.set("DB_HOST", "localhost")
+os.env.set("PORT", "8080")
+
+out os.env.get("MY_APP_ENV")   # → "production"
+```
+
+### `os.env.load(path)` → `boolean`
+Loads environment variables from a `.env` file into the process environment.
+
+**Parameters:**
+- `path` — File path (default: `".env"` if `nil` or empty).
+
+**Format:** Each line in the `.env` file should be `KEY=VALUE`. Lines starting with `#` are ignored.
+
+**Returns:** `true` if the file was loaded, `false` if not found.
+
+```ez
+use "ezos"
+
+# .env file contents:
+# DB_HOST=localhost
+# DB_PORT=5432
+# DB_PASS=secret
+# # This is a comment
+
+ok = os.env.load(".env")
+when ok {
+    out os.env.get("DB_HOST")   # → "localhost"
+    out os.env.get("DB_PORT")   # → "5432"
+}
+```
+
+**Multi-value handling:** If a value contains `=`, only the first `=` is used as separator; everything after is the value including subsequent `=` signs.
+
+---
+
+## `os.path` — Path Utilities
+
+### `os.path.join(p1, p2)` → `string`
+Joins two path segments with a backslash.
+
+```ez
+use "ezos"
+
+out os.path.join("C:\\Users\\HP", "Documents")  # → "C:\Users\HP\Documents"
+out os.path.join("logs", "app.log")             # → "logs\app.log"
+```
+
+### `os.path.isAbsolute(p)` → `boolean`
+Returns `true` if the path starts with a drive letter (e.g. `C:`).
+
+```ez
+use "ezos"
+
+out os.path.isAbsolute("C:\\Windows")    # → true
+out os.path.isAbsolute("relative\\path") # → false
+out os.path.isAbsolute("D:\\Data")       # → true
 ```
 
 ---
 
-### Clipboard
+## `os.process` — Process & Shell Execution
+
+### `os.process.exec(cmd)` → `string`
+Executes a shell command and returns its **stdout** output as a string.
+
+Uses `_popen` / `fgets` to capture output line by line.
 
 ```ez
-use "os"
+use "ezos"
 
-# Write to clipboard
-os.clipboard.write("Hello from EZ!")
+# Run any shell command
+out os.process.exec("echo Hello World")    # → "Hello World\n"
+out os.process.exec("whoami")              # → "DESKTOP-XYZ\HP\n"
+out os.process.exec("dir /b C:\\Windows")  # → directory listing
 
-# Read from clipboard
+# Run Python
+out os.process.exec("python -c \"print(2+2)\"")  # → "4\n"
+
+# Run an EZ script
+out os.process.exec("ez myutil.ez")
+```
+
+**Note:** Does NOT capture stderr. Blocking — waits for command to complete.
+
+### `os.process.system(cmd)` → `number`
+Executes a shell command without capturing output. Returns the exit code.
+
+```ez
+use "ezos"
+
+code = os.process.system("mkdir output 2>nul")
+out code   # → 0 on success
+
+os.process.system("start notepad.exe")  # Opens Notepad (non-blocking)
+```
+
+### `os.process.exit(code)`
+Terminates the current EZ process with the given exit code.
+
+```ez
+use "ezos"
+
+out "About to exit with code 1"
+os.process.exit(1)
+out "This line is never reached"
+```
+
+---
+
+## `os.clipboard` — System Clipboard
+
+### `os.clipboard.read()` → `string`
+Reads text from the Windows clipboard.
+
+```ez
+use "ezos"
+
 text = os.clipboard.read()
-out text  # Hello from EZ!
+out "Clipboard contents: " + text
+```
 
-# Clear the clipboard
+### `os.clipboard.write(text)` → `boolean`
+Writes text to the Windows clipboard. Returns `true` on success.
+
+```ez
+use "ezos"
+
+os.clipboard.write("Hello, Clipboard!")
+out os.clipboard.read()   # → "Hello, Clipboard!"
+```
+
+### `os.clipboard.clear()` → `boolean`
+Clears the clipboard contents (writes empty string).
+
+```ez
+use "ezos"
+
+os.clipboard.write("some text")
 os.clipboard.clear()
+out os.clipboard.read()   # → ""
 ```
 
 ---
 
-### Shell — Open Files & URLs
+## `os.shell` — Shell Integration
+
+### `os.shell.open(path)` → `number`
+Opens a file, folder, or URL using the default Windows application.
+
+Uses `ShellExecuteA` with verb `"open"`.
 
 ```ez
-use "os"
+use "ezos"
 
-# Open a file with its default application
-os.shell.open("report.pdf")
-
-# Open a URL in the default browser
-os.shell.open("https://github.com/imabd645/EZ-language")
+# Open a file in its default app
+os.shell.open("C:\\Users\\HP\\Documents\\report.pdf")
 
 # Open a folder in Explorer
-os.shell.open("C:\\Users\\you\\Documents")
+os.shell.open("C:\\Users\\HP\\Downloads")
+
+# Open a URL in default browser
+os.shell.open("https://example.com")
+
+# Open a .ez file
+os.shell.open("myscript.ez")
 ```
 
 ---
 
-### System Information
+## Edge Cases & Important Notes
+
+### Windows-Only
+All features use Windows DLLs (`Kernel32.dll`, `User32.dll`, `msvcrt.dll`, `shell32.dll`). This library is **not portable** to Linux/macOS.
+
+### `os.env.load()` Strips `\r`
+The `.env` parser removes carriage return characters from values to handle Windows-style `\r\n` line endings.
+
+### `os.env.load()` Values with Multiple `=`
+Values containing `=` are handled correctly:
+```
+# .env
+JWT_SECRET=a=b=c
+```
+→ `os.env.get("JWT_SECRET")` returns `"a=b=c"`.
+
+### `os.process.exec()` Blocking
+`exec()` blocks until the command finishes. For long-running processes, use `os.process.system()` with `start /b` to run in background.
+
+### Clipboard Race Conditions
+If another application holds the clipboard open, `os.clipboard.read()` / `write()` may return `""` / `false`. Retry after a short delay if needed.
+
+### Memory Reporting
+`os.totalMemory()` and `os.freeMemory()` report physical RAM only. Virtual memory, pagefile, and GPU memory are not included.
+
+### Exit Codes
+`os.process.exit(0)` = success, any non-zero = error. Standard convention is `exit(1)` for generic errors.
+
+---
+
+## Full Example: System Info Dashboard
 
 ```ez
-use "os"
+use "ezos"
 
-out os.platform()       # windows
-out os.uptime()         # seconds since boot (e.g. 3600.5)
-out os.totalMemory()    # total RAM in bytes
-out os.freeMemory()     # available RAM in bytes
-out os.cwd()            # current working directory
+out "===== System Information ====="
+out "Platform : " + os.platform()
 
-# Change working directory
-os.chdir("C:\\Projects\\myapp")
+uptime = os.uptime()
+out "Uptime   : " + str(floor(uptime / 3600)) + "h " + str(floor((uptime % 3600) / 60)) + "m"
+
+total = os.totalMemory()
+free = os.freeMemory()
+used = total - free
+usedPct = floor(used * 100 / total)
+
+out "Total RAM: " + str(floor(total / 1073741824)) + " GB"
+out "Used RAM : " + str(floor(used / 1048576)) + " MB (" + str(usedPct) + "%)"
+out "Free RAM : " + str(floor(free / 1048576)) + " MB"
+out "CWD      : " + os.cwd()
+out "Username : " + os.env.get("USERNAME")
+out "Temp dir : " + os.env.get("TEMP")
+out "==============================="
 ```
 
 ---
 
-## API Reference
+## Full Example: .env Based App Config
 
-### `os.env`
+```ez
+use "ezos"
 
-| Method | Description |
-|---|---|
-| `os.env.get(key)` | Returns the value of an environment variable |
-| `os.env.set(key, value)` | Sets an environment variable for the current process |
-| `os.env.load(path?)` | Loads variables from a `.env` file (default: `".env"`) |
+# Expects a .env file with:
+# DB_HOST=localhost
+# DB_PORT=5432
+# API_KEY=secret-key-123
+# DEBUG=true
 
-### `os.path`
+ok = os.env.load(".env")
+when not ok {
+    out "Warning: .env file not found, using defaults"
+    os.env.set("DB_HOST", "localhost")
+    os.env.set("DB_PORT", "5432")
+}
 
-| Method | Description |
-|---|---|
-| `os.path.join(p1, p2)` | Joins two path segments with `\` |
-| `os.path.isAbsolute(path)` | Returns `true` if path is absolute (e.g. `C:\...`) |
+DB_HOST = os.env.get("DB_HOST")
+DB_PORT = os.env.get("DB_PORT")
+API_KEY = os.env.get("API_KEY")
+DEBUG = os.env.get("DEBUG") == "true"
 
-### `os.process`
-
-| Method | Description |
-|---|---|
-| `os.process.exec(cmd)` | Runs a command and returns its stdout as a string |
-| `os.process.system(cmd)` | Runs a command and returns the exit code |
-| `os.process.exit(code)` | Terminates the current EZ process |
-
-### `os.clipboard`
-
-| Method | Description |
-|---|---|
-| `os.clipboard.read()` | Returns the current clipboard text |
-| `os.clipboard.write(text)` | Writes text to the clipboard |
-| `os.clipboard.clear()` | Clears the clipboard |
-
-### `os.shell`
-
-| Method | Description |
-|---|---|
-| `os.shell.open(path)` | Opens a file, folder, or URL with the default application |
-
-### `OS` (top-level)
-
-| Method | Returns | Description |
-|---|---|---|
-| `os.platform()` | `"windows"` | Current OS platform |
-| `os.uptime()` | `float` | System uptime in seconds |
-| `os.totalMemory()` | `int` | Total installed RAM in bytes |
-| `os.freeMemory()` | `int` | Available RAM in bytes |
-| `os.cwd()` | `string` | Current working directory |
-| `os.chdir(path)` | `bool` | Changes the working directory |
+out "Connecting to " + DB_HOST + ":" + DB_PORT
+when DEBUG { out "[DEBUG MODE ON]" }
+```
 
 ---
 
-## Requirements
+## Full Example: Build Script
 
-- **Platform**: Windows only (uses `Kernel32.dll`, `User32.dll`, `msvcrt.dll`, `Shell32.dll`)
-- **EZ**: Any version supporting `os_load_lib`, `os_get_func`, and `os_call`
+```ez
+use "ezos"
+
+out "=== EZ Build Script ==="
+
+# Check compiler
+result = os.process.exec("g++ --version")
+when indexOf(result, "g++") == -1 {
+    out "ERROR: g++ not found. Install MinGW."
+    os.process.exit(1)
+}
+
+# Create output directory
+os.process.system("mkdir build 2>nul")
+
+# Compile
+out "Compiling..."
+code = os.process.system("g++ -O2 -o build/app src/*.cpp -lm")
+
+when code == 0 {
+    out "Build successful! Binary: build/app.exe"
+    
+    # Open output folder
+    os.shell.open("build")
+} other {
+    out "Build FAILED with code " + str(code)
+    os.process.exit(code)
+}
+```
 
 ---
 
-## License
+## Full Example: Clipboard Code Formatter
 
-MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
+```ez
+use "ezos"
+
+out "Reading code from clipboard..."
+code = os.clipboard.read()
+
+when len(code) == 0 {
+    out "Clipboard is empty."
+    os.process.exit(1)
+}
+
+# Simple formatter: add indentation markers
+lines = split(code, "\n")
+formatted = ""
+indent = 0
+
+get line in lines {
+    trimmed = replace(line, "\r", "")
+    
+    # Decrease indent on closing braces
+    when indexOf(trimmed, "}") == 0 and indent > 0 {
+        indent = indent - 1
+    }
+    
+    spaces = ""
+    repeat i = 0 to indent - 1 { spaces = spaces + "  " }
+    formatted = formatted + spaces + trimmed + "\n"
+    
+    # Increase indent after opening braces
+    when indexOf(trimmed, "{") != -1 {
+        indent = indent + 1
+    }
+}
+
+os.clipboard.write(formatted)
+out "Formatted code written back to clipboard. Paste it!"
+```
+
+---
+
+*Documentation generated from `E:\ezlib\ezos\main.ez` — EZ OS Utilities Library*

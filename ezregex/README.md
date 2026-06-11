@@ -1,316 +1,593 @@
-# ezregex
+# ezregex — Regular Expression Library for EZ
 
-> Comprehensive regular expression library for the [EZ Programming Language](https://github.com/imabd645/EZ-language)
-
-**ezregex** wraps EZ's native `reMatch`, `reSearch`, and `reReplace` primitives into a high-level, batteries-included regex library. It provides an OOP `Regex` model, 30+ built-in validation patterns, extraction helpers, and a full suite of convenience functions — all in pure EZ.
+> **Version:** 1.0.0  
+> **Import:** `use "ezregex"`  
+> **File:** `E:\ezlib\ezregex\main.ez`
 
 ---
 
-## Installation
+## Overview
 
-```
-ez install regex
-```
+`ezregex` is a comprehensive regular expression library for EZ, wrapping the built-in `reMatch`, `reSearch`, and `reReplace` primitives with a high-level OOP API. It includes:
+
+- **`Regex` model** — Compiled pattern object
+- **Global convenience functions** — Quick one-liner operations
+- **Validation functions** — Common validators (email, URL, UUID, etc.)
+- **Extraction functions** — Pull emails, URLs, hashtags, mentions from text
+- **Pattern library** — Pre-built patterns for common use cases
+- **`regex` / `re` dictionaries** — Namespace-style access to all functionality
 
 ---
 
 ## Quick Start
 
 ```ez
-use "regex"
+use "ezregex"
 
 # Test a pattern
-out re.test("[0-9]+", "abc123")     # true
+out reTest("[0-9]+", "hello123")   # → true
 
-# Validate an email
-out re.isEmail("user@example.com")  # true
-
-# Extract all URLs from text
-urls = re.extractUrls("Visit https://example.com and https://ez-lang.dev")
-out urls  # ["https://example.com", "https://ez-lang.dev"]
+# Validate email
+out isEmail("user@example.com")   # → true
+out isEmail("not-an-email")        # → false
 
 # Replace
-out re.replace("[0-9]+", "Price: 100 dollars", "###")
-# "Price: ### dollars"
+out reReplace("Hello World", "World", "EZ")  # → "Hello EZ"
+
+# Extract emails from text
+emails = extractEmails("Contact us at info@company.com or sales@company.com")
+out emails  # → ["info@company.com", "sales@company.com"]
 ```
 
 ---
 
-## The `Regex` Model
+## Model: `Regex`
 
-For full control, compile a pattern into a reusable `Regex` object:
+An object-oriented compiled pattern.
+
+### `Regex(pattern)`
+
+Creates a compiled regex pattern.
 
 ```ez
-use "regex"
+use "ezregex"
 
-r = Regex("[a-z]+@[a-z]+\\.[a-z]+")
-
-out r.match("hello@example.com")   # true
-out r.match("not-an-email")        # false
+r = Regex("[0-9]+")
+r2 = Regex("[a-zA-Z]+@[a-zA-Z]+\\.[a-zA-Z]+")
 ```
 
-### Methods
+---
 
-| Method | Returns | Description |
+### `r.match(text)` → `boolean`
+
+Tests if the entire text matches the pattern. Full-string match.
+
+```ez
+use "ezregex"
+
+r = Regex("[0-9]+")
+out r.match("123")      # → true
+out r.match("12abc")    # → false (not full match)
+```
+
+---
+
+### `r.search(text)` → `dictionary`
+
+Searches for the first occurrence of the pattern anywhere in the text.
+
+**Returns:** Dictionary with:
+- `matched` — `boolean`
+- `groups` — Array of capture group strings
+- `index` — `0` if found, `-1` if not
+- `text` — Matched text string, or `nil`
+
+```ez
+use "ezregex"
+
+r = Regex("[0-9]+")
+result = r.search("price: 42 dollars")
+
+out result["matched"]   # → true
+out result["text"]      # → "42"
+out result["groups"]    # → ["42"]
+
+noResult = r.search("no numbers here")
+out noResult["matched"]  # → false
+out noResult["text"]     # → nil
+```
+
+---
+
+### `r.replace(text, replacement)` → `string`
+
+Replaces the **first** occurrence of the pattern.
+
+```ez
+use "ezregex"
+
+r = Regex("[0-9]+")
+out r.replace("I have 3 cats and 5 dogs", "X")
+# → "I have X cats and 5 dogs"
+```
+
+---
+
+### `r.replaceAll(text, replacement)` → `string`
+
+Replaces **all** occurrences of the pattern (up to 1000 replacements).
+
+```ez
+use "ezregex"
+
+r = Regex("[0-9]+")
+out r.replaceAll("I have 3 cats and 5 dogs", "N")
+# → "I have N cats and N dogs"
+
+r2 = Regex("\\s+")
+out r2.replaceAll("too  many   spaces", " ")
+# → "too many spaces"
+```
+
+---
+
+### `r.findAll(text)` → `array`
+
+Finds all non-overlapping matches in text.
+
+**Returns:** Array of match objects, each with:
+- `text` — Matched string
+- `groups` — Capture groups array
+- `index` — Position in original string
+
+```ez
+use "ezregex"
+
+r = Regex("[0-9]+")
+matches = r.findAll("1 cat, 22 dogs, 333 birds")
+
+out len(matches)          # → 3
+out matches[0]["text"]    # → "1"
+out matches[1]["text"]    # → "22"
+out matches[2]["text"]    # → "333"
+out matches[0]["index"]   # → 0
+```
+
+---
+
+### `r.split(text)` → `array`
+
+Splits text by the pattern (up to 1000 parts).
+
+```ez
+use "ezregex"
+
+r = Regex(",\\s*")
+parts = r.split("apple, banana, cherry")
+out parts   # → ["apple", "banana", "cherry"]
+
+r2 = Regex("\\s+")
+words = r2.split("The quick  brown   fox")
+out words   # → ["The", "quick", "brown", "fox"]
+```
+
+---
+
+### `r.getPattern()` → `string`
+
+Returns the pattern string.
+
+```ez
+use "ezregex"
+
+r = Regex("[a-z]+")
+out r.getPattern()  # → "[a-z]+"
+```
+
+---
+
+## Global Convenience Functions
+
+### `reTest(pattern, text)` → `boolean`
+Quick test: does `text` match `pattern`?
+
+```ez
+use "ezregex"
+
+out reTest("[0-9]+", "42")       # → true
+out reTest("[0-9]+", "abc")      # → false
+out reTest("^[A-Z]", "Hello")    # → true
+out reTest("^[A-Z]", "hello")    # → false
+```
+
+---
+
+### `reExec(pattern, text)` → `dictionary`
+Execute search and return structured result.
+
+```ez
+use "ezregex"
+
+r = reExec("\\d+", "room 404")
+out r["matched"]   # → true
+out r["text"]      # → "404"
+```
+
+---
+
+### `reSplit(pattern, text)` → `array`
+Global split function.
+
+```ez
+use "ezregex"
+
+parts = reSplit("[,;]\\s*", "a, b; c, d")
+out parts  # → ["a", "b", "c", "d"]
+```
+
+---
+
+### `reEscape(text)` → `string`
+Escapes special regex characters in a literal string.
+
+Special chars escaped: `\ ^ $ . | ? * + ( ) [ ] { }`
+
+```ez
+use "ezregex"
+
+out reEscape("hello.world")   # → "hello\\.world"
+out reEscape("(a+b)")         # → "\\(a\\+b\\)"
+```
+
+---
+
+### `reAny(strings)` → `string`
+Creates an alternation pattern matching any of the given strings.
+
+```ez
+use "ezregex"
+
+pattern = reAny(["cat", "dog", "bird"])
+out pattern   # → "(cat|dog|bird)"
+
+r = Regex(pattern)
+out r.match("cat")    # → true
+out r.match("fish")   # → false
+```
+
+---
+
+### `reWord(text)` → `string`
+Wraps text in word-boundary anchors `\b...\b`.
+
+```ez
+use "ezregex"
+
+pattern = reWord("cat")
+r = Regex(pattern)
+out r.search("I have a cat here")["matched"]   # → true
+out r.search("concatenation")["matched"]        # → false (no word boundary)
+```
+
+---
+
+### `reIgnoreCase(pattern)` → `string`
+Converts a pattern to case-insensitive by expanding each letter into `[aA]` character classes.
+
+```ez
+use "ezregex"
+
+p = reIgnoreCase("hello")
+out p  # → "[hH][eE][lL][lL][oO]"
+
+r = Regex(p)
+out r.match("Hello")   # → true
+out r.match("HELLO")   # → true
+out r.match("hello")   # → true
+```
+
+---
+
+### `reStartsWith(pattern, text)` → `boolean`
+Tests if text starts with pattern.
+
+```ez
+use "ezregex"
+
+out reStartsWith("[A-Z]", "Hello")  # → true
+out reStartsWith("[A-Z]", "hello")  # → false
+```
+
+---
+
+### `reEndsWith(pattern, text)` → `boolean`
+Tests if text ends with pattern.
+
+```ez
+use "ezregex"
+
+out reEndsWith("\\.ez$", "script.ez")  # → true
+out reEndsWith("\\.py$", "script.ez")  # → false
+```
+
+---
+
+### `reCount(pattern, text)` → `number`
+Counts occurrences of pattern in text.
+
+```ez
+use "ezregex"
+
+out reCount("[0-9]+", "1 cat, 22 dogs, 333 birds")  # → 3
+out reCount("\\.", "a.b.c.d")                        # → 3
+```
+
+---
+
+## Validation Functions
+
+All return `boolean`. They use `reMatch` with full-string anchors.
+
+| Function | Pattern | Example |
 |---|---|---|
-| `.match(text)` | bool | Returns `true` if the entire text matches the pattern |
-| `.search(text)` | dict | Finds the first match — returns `{ matched, groups, index, text }` |
-| `.replace(text, replacement)` | string | Replaces the first occurrence |
-| `.replaceAll(text, replacement)` | string | Replaces all occurrences |
-| `.findAll(text)` | array | Returns all non-overlapping matches as `{ text, groups, index }` objects |
-| `.split(text)` | array | Splits text by the pattern |
-| `.getPattern()` | string | Returns the raw pattern string |
-
-### Examples
+| `isEmail(text)` | RFC-ish email | `"user@example.com"` |
+| `isPhone(text)` | US phone | `"(555) 123-4567"` |
+| `isPhoneIntl(text)` | International phone | `"+1 555 1234567"` |
+| `isUrl(text)` | HTTP/HTTPS URL | `"https://example.com"` |
+| `isIpv4(text)` | IPv4 address | `"192.168.1.1"` |
+| `isDigit(text)` | Digits only | `"123"` |
+| `isAlpha(text)` | Letters only | `"hello"` |
+| `isAlphanumeric(text)` | Letters + digits | `"abc123"` |
+| `isWhitespace(text)` | Whitespace only | `"   "` |
+| `isDateIso(text)` | ISO date | `"2025-06-11"` |
+| `isUuid(text)` | UUID v4 | `"550e8400-..."`|
+| `isHexColor(text)` | Hex color | `"#ff5733"` |
+| `isCreditCard(text)` | Credit card | `"4111 1111 1111 1111"` |
 
 ```ez
-r = Regex("\\d+")
+use "ezregex"
 
-# Search — find first match
-m = r.search("Order 42 placed on day 7")
-out m["matched"]   # true
-out m["text"]      # "42"
-out m["index"]     # 6
-
-# Find all matches
-all = r.findAll("Order 42 placed on day 7")
-get match in all {
-    out match["text"]   # "42", then "7"
-}
-
-# Split
-parts = Regex(",\\s*").split("one, two, three")
-out parts   # ["one", "two", "three"]
-
-# Replace all
-out Regex("\\s+").replaceAll("too   many   spaces", " ")
-# "too many spaces"
+out isEmail("user@example.com")           # → true
+out isEmail("not.valid")                   # → false
+out isUrl("https://google.com/search?q=ez") # → true
+out isIpv4("192.168.1.256")               # → false (invalid octet)
+out isDigit("0042")                        # → true
+out isUuid("550e8400-e29b-41d4-a716-446655440000")  # → true
+out isHexColor("#ff5733")                  # → true
+out isHexColor("#zzzzzz")                  # → false
 ```
 
 ---
 
-## Quick Functions (`re` / `regex` object)
+## Extraction Functions
 
-All functionality is accessible via the `re` shorthand object:
-
-### Core Operations
-
-```ez
-re.test(pattern, text)           # → bool: true if pattern matches anywhere
-re.match(pattern, text)          # → bool: full match
-re.exec(pattern, text)           # → { matched, groups, text }
-re.search(pattern, text)         # → array of match groups
-re.replace(pattern, text, repl)  # → string: first replacement
-re.replaceAll(pattern, text, r)  # → string: all replacements
-re.findAll(pattern, text)        # → array of match objects
-re.split(pattern, text)          # → array of strings
-re.escape(text)                  # → string: special chars escaped
-re.count(pattern, text)          # → int: number of matches
-re.compile(pattern)              # → Regex object
-```
-
-### Pattern Helpers
+### `extractEmails(text)` → `array`
+Extracts all email addresses from text.
 
 ```ez
-# Match any of the given strings (OR)
-p = re.any(["cat", "dog", "bird"])
-out re.test(p, "I have a dog")    # true
+use "ezregex"
 
-# Match exact whole word
-p = re.word("cat")
-out re.test(p, "concatenate")     # false
-out re.test(p, "my cat sat")      # true
-
-# Case-insensitive matching
-p = re.ignoreCase("hello")
-out re.test(p, "HELLO world")     # true
-
-# Anchored checks
-out re.startsWith("https?://", "https://example.com")  # true
-out re.endsWith("\\.json", "config.json")               # true
+text = "Contact info@company.com or support@example.org for help."
+emails = extractEmails(text)
+out emails  # → ["info@company.com", "support@example.org"]
 ```
 
 ---
 
-## Built-in Patterns
-
-Access ready-made patterns from `re.patterns` or use them directly in `Regex()`:
+### `extractUrls(text)` → `array`
+Extracts all HTTP/HTTPS URLs.
 
 ```ez
-use "regex"
+use "ezregex"
 
-r = Regex(re.patterns["EMAIL"])
-out r.match("user@example.com")   # true
-
-r = Regex(re.patterns["UUID"])
-out r.match("550e8400-e29b-41d4-a716-446655440000")  # true
+text = "Visit https://example.com or http://docs.ez-lang.org for more info."
+urls = extractUrls(text)
+out urls   # → ["https://example.com", "http://docs.ez-lang.org"]
 ```
-
-### Available Patterns
-
-| Key | Matches |
-|---|---|
-| `DIGIT` | Single digit `0-9` |
-| `NUMBER` | Integer or decimal, optional negative sign |
-| `WORD` | Identifier (`[a-zA-Z_][a-zA-Z0-9_]*`) |
-| `WHITESPACE` | Spaces, tabs, newlines |
-| `QUOTED_STRING` | Double-quoted string with escape support |
-| `SINGLE_QUOTED` | Single-quoted string with escape support |
-| `EMAIL` | Standard email address |
-| `PHONE_US` | US phone number (with/without formatting) |
-| `PHONE_INTL` | International phone number (`+XX ...`) |
-| `URL` | `http://` or `https://` URL |
-| `IPV4` | IPv4 address |
-| `DOMAIN` | Domain name |
-| `DATE_ISO` | `YYYY-MM-DD` |
-| `TIME_24H` | `HH:MM` or `HH:MM:SS` |
-| `TIME_12H` | `H:MM AM/PM` |
-| `DATETIME_ISO` | `YYYY-MM-DDTHH:MM:SS` |
-| `HEX_COLOR` | `#RRGGBB` or `#RRGGBBAA` |
-| `UUID` | Standard UUID v4 |
-| `CREDIT_CARD` | 16-digit card number (various formats) |
-| `SSN` | US Social Security Number |
-| `HTML_TAG` | Any HTML tag |
-| `HTML_COMMENT` | HTML comment block |
-| `MARKDOWN_LINK` | `[text](url)` |
-| `MENTION` | `@username` |
-| `HASHTAG` | `#hashtag` |
-| `FILENAME` | Filename with extension |
-| `FILEPATH_WIN` | Windows absolute path |
-| `FILEPATH_UNIX` | Unix absolute path |
 
 ---
 
-## Validators
-
-One-liner boolean checks for common data types:
+### `extractPhones(text)` → `array`
+Extracts US and international phone numbers.
 
 ```ez
-use "regex"
+use "ezregex"
 
-out re.isEmail("hello@world.com")          # true
-out re.isUrl("https://example.com/path")   # true
-out re.isIpv4("192.168.1.1")               # true
-out re.isDigit("00420")                    # true
-out re.isAlpha("HelloWorld")               # true
-out re.isAlphanumeric("abc123")            # true
-out re.isWhitespace("   \t\n")             # true
-out re.isDateIso("2024-01-31")             # true
-out re.isUuid("550e8400-e29b-41d4-a716-446655440000")  # true
-out re.isHexColor("#ff5733")               # true
-out re.isCreditCard("4111 1111 1111 1111") # true
-out re.isPhone("(555) 867-5309")           # true
-out re.isPhoneIntl("+44 7911 123456")      # true
+text = "Call us: (555) 123-4567 or +44 7911 123456"
+phones = extractPhones(text)
+out phones  # → ["(555) 123-4567", "+44 7911 123456"]
 ```
-
-### Full Validator Reference
-
-| Function | Validates |
-|---|---|
-| `re.isEmail(text)` | Email address |
-| `re.isUrl(text)` | HTTP/HTTPS URL |
-| `re.isIpv4(text)` | IPv4 address |
-| `re.isPhone(text)` | US phone number |
-| `re.isPhoneIntl(text)` | International phone number |
-| `re.isDigit(text)` | Digits only |
-| `re.isAlpha(text)` | Letters only |
-| `re.isAlphanumeric(text)` | Letters and digits only |
-| `re.isWhitespace(text)` | Whitespace only |
-| `re.isDateIso(text)` | ISO date (`YYYY-MM-DD`) |
-| `re.isUuid(text)` | UUID |
-| `re.isHexColor(text)` | Hex color code |
-| `re.isCreditCard(text)` | Credit card number |
 
 ---
 
-## Extractors
-
-Pull structured data out of unstructured text:
+### `extractHashtags(text)` → `array`
+Extracts hashtags (including the `#`).
 
 ```ez
-use "regex"
+use "ezregex"
 
-text = "Contact alice@example.com or bob@test.org for details."
-out re.extractEmails(text)
-# ["alice@example.com", "bob@test.org"]
-
-text = "Check out https://example.com and http://ez-lang.dev/docs"
-out re.extractUrls(text)
-# ["https://example.com", "http://ez-lang.dev/docs"]
-
-text = "Call +1 800-555-0100 or (212) 555-0198"
-out re.extractPhones(text)
-# ["+1 800-555-0100", "(212) 555-0198"]
-
-text = "Loving #EZLang and #OpenSource today!"
-out re.extractHashtags(text)
-# ["#EZLang", "#OpenSource"]
-
-text = "Thanks to @alice and @bob for the PR!"
-out re.extractMentions(text)
-# ["alice", "bob"]  (@ symbol stripped)
-
-html = "<h1>Hello <b>World</b></h1>"
-out re.stripHtml(html)
-# "Hello World"
+text = "Loving #EZLanguage and #coding today! #tech"
+tags = extractHashtags(text)
+out tags   # → ["#EZLanguage", "#coding", "#tech"]
 ```
-
-### Full Extractor Reference
-
-| Function | Returns |
-|---|---|
-| `re.extractEmails(text)` | Array of email addresses |
-| `re.extractUrls(text)` | Array of URLs |
-| `re.extractPhones(text)` | Array of US and international phone numbers |
-| `re.extractHashtags(text)` | Array of hashtags (with `#`) |
-| `re.extractMentions(text)` | Array of usernames (without `@`) |
-| `re.stripHtml(text)` | Text with all HTML tags removed |
 
 ---
 
-## Complete Example — Form Validation
+### `extractMentions(text)` → `array`
+Extracts mentions (strips the `@`).
 
 ```ez
-use "regex"
+use "ezregex"
 
-task validateForm(data) {
+text = "Thanks @alice and @bob_smith for the help!"
+mentions = extractMentions(text)
+out mentions   # → ["alice", "bob_smith"]
+```
+
+---
+
+### `stripHtml(text)` → `string`
+Removes all HTML tags from text.
+
+```ez
+use "ezregex"
+
+html = "<h1>Hello</h1><p>This is <strong>EZ</strong>.</p>"
+plain = stripHtml(html)
+out plain   # → "HelloThis is EZ."
+```
+
+---
+
+## Built-in Pattern Library
+
+Access via `patterns["KEY"]` or `regex["patterns"]["KEY"]`.
+
+```ez
+use "ezregex"
+
+out patterns["EMAIL"]        # → "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+out patterns["UUID"]         # → "[0-9a-fA-F]{8}-..."
+out patterns["DATE_ISO"]     # → "[0-9]{4}-[0-9]{2}-[0-9]{2}"
+out patterns["HEX_COLOR"]    # → "#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?"
+out patterns["IPV4"]         # → "([0-9]{1,3}\.){3}[0-9]{1,3}"
+out patterns["HTML_TAG"]     # → "<[^>]+>"
+out patterns["URL"]          # → "https?://..."
+out patterns["FILENAME"]     # → file name with extension
+```
+
+---
+
+## `regex` / `re` Dictionary
+
+The `regex` object and its alias `re` expose the entire API in a namespaced style:
+
+```ez
+use "ezregex"
+
+# Pattern compilation
+r = regex.compile("[0-9]+")
+r = re.create("[a-z]+")
+
+# Quick operations
+out regex.test("[0-9]+", "42")           # → true
+out regex.match("[0-9]+", "42")          # → true
+out regex.replace("[0-9]+", "abc123", "N")  # → "abcN"
+out regex.split(",", "a,b,c")           # → ["a", "b", "c"]
+out regex.escape("(a+b)")               # → "\\(a\\+b\\)"
+
+# Advanced
+matches = regex.findAll("[0-9]+", "1 and 22 and 333")
+out len(matches)  # → 3
+
+# Validators (via re namespace)
+out re.isEmail("x@y.com")   # → true
+out re.isUrl("https://x.com")  # → true
+
+# Extractors
+out re.extractEmails("hi@a.com and bye@b.com")
+
+# Patterns
+out re.patterns["DATE_ISO"]
+```
+
+---
+
+## Edge Cases
+
+### findAll Loop Safety
+`findAll()` is capped at 1000 matches by default to prevent infinite loops with zero-length match patterns.
+
+### replaceAll Loop Safety
+`replaceAll()` is capped at 1000 replacements. If the pattern matches the empty string, this could loop infinitely without the cap.
+
+### reEscape Completeness
+`reEscape()` uses `reReplace()` to escape each special character. The pipe `|` character is **not included** in the special chars list and may need manual escaping.
+
+### `reSearch` Return Format
+EZ's built-in `reSearch(text, pattern)` returns an array of strings (all matches/groups). `reExec()` and `Regex.search()` normalize this into the standard `{matched, groups, text, index}` structure.
+
+### Full-String vs Partial Match
+- `reMatch(text, pattern)` — **full string** match (anchored implicitly)
+- `reSearch(text, pattern)` — **partial** match (finds first occurrence anywhere)
+
+Validation functions use `reMatch` with `^pattern$` anchors to enforce exact full-string matching.
+
+---
+
+## Full Example: Form Validator
+
+```ez
+use "ezregex"
+
+task validateForm(name, email, phone, website) {
     errors = []
-
-    when not re.isEmail(data["email"]) {
-        push(errors, "Invalid email address")
+    
+    when len(name) < 2 {
+        push(errors, "Name must be at least 2 characters")
     }
-
-    when not re.isPhone(data["phone"]) and not re.isPhoneIntl(data["phone"]) {
-        push(errors, "Invalid phone number")
+    
+    when not isEmail(email) {
+        push(errors, "Invalid email: " + email)
     }
-
-    when not re.isUrl(data["website"]) {
-        push(errors, "Invalid website URL")
+    
+    when not isPhone(phone) and not isPhoneIntl(phone) {
+        push(errors, "Invalid phone number: " + phone)
     }
-
-    when not re.isDateIso(data["dob"]) {
-        push(errors, "Date must be in YYYY-MM-DD format")
+    
+    when len(website) > 0 and not isUrl(website) {
+        push(errors, "Invalid website URL: " + website)
     }
-
-    when len(errors) > 0 {
-        give { "valid": false, "errors": errors }
+    
+    when len(errors) == 0 {
+        out "✓ Form valid!"
+        give true
     }
-    give { "valid": true, "errors": [] }
+    
+    out "✗ Validation errors:"
+    get e in errors { out "  - " + e }
+    give false
 }
 
-result = validateForm({
-    "email": "user@example.com",
-    "phone": "(555) 867-5309",
-    "website": "https://example.com",
-    "dob": "1990-06-15"
-})
-
-out result["valid"]    # true
-out result["errors"]   # []
+validateForm("Alice", "alice@example.com", "(555) 123-4567", "https://alice.dev")
+validateForm("B", "not-an-email", "12345", "bad-url")
 ```
 
 ---
 
-## License
+## Full Example: Log Parser
 
-MIT — see the [EZ Language repository](https://github.com/imabd645/EZ-language) for details.
+```ez
+use "ezregex"
+
+logLines = [
+    "2025-06-11 08:30:00 [INFO] Server started on port 8080",
+    "2025-06-11 08:30:05 [WARN] Memory at 78%",
+    "2025-06-11 08:30:10 [ERROR] Connection refused to db.prod:5432",
+    "2025-06-11 08:31:00 [INFO] User alice@example.com logged in"
+]
+
+datePattern = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}")
+levelPattern = Regex("\\[(INFO|WARN|ERROR)\\]")
+emailPattern = Regex("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}")
+
+errors = []
+get line in logLines {
+    level = levelPattern.search(line)
+    when level["matched"] and level["text"] == "[ERROR]" {
+        push(errors, line)
+    }
+    
+    emailFound = emailPattern.search(line)
+    when emailFound["matched"] {
+        out "Email activity: " + emailFound["text"]
+    }
+}
+
+out "\nErrors found: " + str(len(errors))
+get e in errors { out "  " + e }
+```
+
+---
+
+*Documentation generated from `E:\ezlib\ezregex\main.ez` — EZ Regex Library v1.0.0*
