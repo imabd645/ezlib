@@ -2,7 +2,6 @@
 
 > **Version:** 1.0  
 > **Import:** `use "thread"`  
-> **File:** `E:\ezlib\thread\main.ez`
 
 ---
 
