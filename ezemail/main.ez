@@ -1,6 +1,6 @@
-# SMTP Email Library (Pure EZ FFI)
-# Wraps libcurl-4.dll and msvcrt.dll for sending mail (e.g. Gmail App Passwords, custom SMTP)
-
+// SMTP Email Library (Pure EZ FFI)
+//Wraps libcurl-4.dll and msvcrt.dll for sending mail (e.g. Gmail App Passwords, custom SMTP)
+use "fs"
 __curl = os_load_lib("libcurl-4.dll")
 when __curl == 0 or type(__curl) == "nil" {
     throw "Error: libcurl-4.dll not found."
@@ -25,7 +25,7 @@ MsvcrtFFI = {
     "fclose": os_get_func(__msv, "fclose")
 }
 
-# libcurl Option Constants
+// libcurl Option Constants
 CURLOPT_URL = 10002
 CURLOPT_USERNAME = 10173
 CURLOPT_PASSWORD = 10174
@@ -48,7 +48,7 @@ model SmtpClient {
         self.verbose = false
         self.isHtml = false
         self.replyTo = ""
-        self.priority = ""  # e.g., "1" (High), "3" (Normal), "5" (Low)
+        self.priority = ""  // e.g., "1" (High), "3" (Normal), "5" (Low)
         self.customHeaders = {}
     }
 
@@ -58,7 +58,7 @@ model SmtpClient {
             throw "Error: Failed to initialize curl handle."
         }
 
-        # Set Server URL 
+        // Set Server URL 
         urlStr = ""
         when self.port == 465 {
             urlStr = "smtps://" + self.server + ":" + str(self.port)
@@ -67,19 +67,22 @@ model SmtpClient {
         }
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_URL, urlStr)
 
-        # Authentication credentials
+        // Authentication credentials
+
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_USERNAME, self.username)
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_PASSWORD, self.password)
 
-        # Set SMTP specific parameters
+        // Set SMTP specific parameters
+
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_MAIL_FROM, "<" + fromEmail + ">")
 
-        # Recipients list
+        // Recipients list
         recipients = 0
         recipients = os_call(CurlFFI.slist_append, "ptr", recipients, toEmail)
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_MAIL_RCPT, recipients)
 
-        # Force SSL/TLS on standard ports if requested
+        // Force SSL/TLS on standard ports if requested
+        
         when self.useSsl {
             os_call(CurlFFI.setopt, "int", curl, CURLOPT_USE_SSL, 3) # CURLUSESSL_ALL
         }
@@ -88,15 +91,15 @@ model SmtpClient {
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYPEER, 0)
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYHOST, 0)
 
-        # Verbose option for debugging connection issues
+        // Verbose option for debugging connection issues
         when self.verbose {
             os_call(CurlFFI.setopt, "int", curl, CURLOPT_VERBOSE, 1)
         }
 
-        # Set upload mode
+        //Set upload mode
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_UPLOAD, 1)
 
-        # Construct the email payload (SMTP Format: Headers -> Empty Line -> Body)
+        // Construct the email payload (SMTP Format: Headers -> Empty Line -> Body)
         payload = "To: " + toEmail + "\r\n"
         payload = payload + "From: " + fromEmail + "\r\n"
         payload = payload + "Subject: " + subject + "\r\n"
@@ -114,7 +117,7 @@ model SmtpClient {
             }
         }
         
-        # Add custom headers
+        // Add custom headers
         chKeys = keys(self.customHeaders)
         i_ch = 0
         while i_ch < len(chKeys) {
@@ -131,11 +134,11 @@ model SmtpClient {
         }
         payload = payload + body + "\r\n"
 
-        # Write payload to a temporary file
+        // Write payload to a temporary file
         tempFileName = "temp_email_payload.txt"
         writeFile(tempFileName, payload)
 
-        # Open temp file using msvcrt fopen
+        // Open temp file using msvcrt fopen
         fileHandle = os_call(MsvcrtFFI.fopen, "ptr", tempFileName, "rb")
         when fileHandle == 0 {
             os_call(CurlFFI.slist_free_all, "ptr", recipients)
@@ -143,13 +146,13 @@ model SmtpClient {
             throw "Error: Failed to open temporary email payload file."
         }
 
-        # Set read data source to file pointer
+        // Set read data source to file pointer
         os_call(CurlFFI.setopt, "int", curl, CURLOPT_READDATA, fileHandle)
 
-        # Perform sending
+        // Perform sending
         res = os_call(CurlFFI.perform, "int", curl)
 
-        # Cleanup
+        // Cleanup
         os_call(MsvcrtFFI.fclose, "int", fileHandle)
         os_call(CurlFFI.slist_free_all, "ptr", recipients)
         os_call(CurlFFI.cleanup, "ptr", curl)
@@ -157,7 +160,7 @@ model SmtpClient {
         when res != 0 {
             throw "Error: SMTP Mail send failed with curl code " + str(res)
         }
-
+        fs.remove("temp_email_payload.txt")
         give true
     }
 }

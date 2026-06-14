@@ -1,0 +1,43 @@
+use "main.ez" as ezorm
+
+# Create ORM instance
+db = ezorm.ORM("test.db")
+
+# Define schema
+users = db.define("users", {
+    "name": "TEXT",
+    "age": "INTEGER",
+    "active": "BOOLEAN"
+})
+
+# Insert rows (parameterized)
+id1 = users.insert({"name": "Alice", "age": 28, "active": 1})
+id2 = users.insert({"name": "Bob", "age": 35, "active": 0})
+id3 = users.insert({"name": "Charlie", "age": 42, "active": 1})
+
+out "Inserted users with IDs: " + str(id1) + ", " + str(id2) + ", " + str(id3)
+
+# Find all
+all_users = users.all()
+out "All users: " + str(all_users)
+
+# Find by condition
+active_users = users.find({"active": 1})
+out "Active users: " + str(active_users)
+
+# Find by ID
+bob = users.findById(id2)
+out "Bob: " + str(bob)
+
+# Update
+users.update(id1, {"age": 29})
+alice = users.findById(id1)
+out "Alice (updated age): " + str(alice)
+
+# Delete
+users.delete(id3)
+count = users.count()
+out "Total users after delete: " + str(count)
+
+# Clean up
+db.close()

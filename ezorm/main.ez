@@ -1,45 +1,44 @@
 # ============================================================================
 # ORM - Object Relational Mapping for EZ Language
-# A lightweight Active-Record style wrapper over SQLite
+# A lightweight Active-Record style wrapper over ezdb (SQLite)
 # ============================================================================
 
-model Database {
+use "ezdb" as ezdb
+
+model ORM {
     init(path) {
-        self.handle = db_open(path)
-        when self.handle == 0 {
-            out "Error: Failed to open database at " + path
-        }
+        self.db = ezdb.Database(path)
     }
 
-    task execute(query) {
-        give db_execute(self.handle, query)
+    task execute(sql, params) {
+        give self.db.execute(sql, params)
     }
 
-    task query(query) {
-        give db_query(self.handle, query)
+    task query(sql, params) {
+        give self.db.query(sql, params)
     }
 
     task close() {
-        db_close(self.handle)
+        self.db.close()
         give self
     }
 
     task lastInsertId() {
-        give db_last_insert_id(self.handle)
+        give self.db.lastRowId()
     }
     
     task begin() {
-        db_begin(self.handle)
+        self.db.begin()
         give self
     }
     
     task commit() {
-        db_commit(self.handle)
+        self.db.commit()
         give self
     }
     
     task rollback() {
-        db_rollback(self.handle)
+        self.db.rollback()
         give self
     }
 
@@ -63,70 +62,66 @@ model Table {
         }
         
         # Always enforce an 'id' primary key if not provided
-        when not ("id" in self.schema) {
+        when not has_key(self.schema, "id") {
             # SQLite specific auto-increment PK
             q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (id INTEGER PRIMARY KEY AUTOINCREMENT, " + join(cols, ", ") + ")"
-            self.db.execute(q)
+            self.db.execute(q, nil)
         } other {
             q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (" + join(cols, ", ") + ")"
-            self.db.execute(q)
+            self.db.execute(q, nil)
         }
     }
 
-    task _escape(val) {
-        t = typeOf(val)
-        when t == "string" {
-            # Basic escape for single quotes
-            # In a production ORM we'd use prepared statements, but EZ db_* currently uses string queries
-            give "'" + val + "'"
-        }
-        when t == "null" { give "NULL" }
-        give str(val)
-    }
-
-    # CRUD Operations
+    # CRUD Operations (Parameterized)
 
     task insert(data) {
         keys = []
         vals = []
+        placeholders = []
+        
         get k in data {
             push(keys, k)
-            push(vals, self._escape(data[k]))
+            push(vals, data[k])
+            push(placeholders, "?")
         }
         
-        q = "INSERT INTO " + self.tableName + " (" + join(keys, ", ") + ") VALUES (" + join(vals, ", ") + ")"
-        self.db.execute(q)
+        q = "INSERT INTO " + self.tableName + " (" + join(keys, ", ") + ") VALUES (" + join(placeholders, ", ") + ")"
+        self.db.execute(q, vals)
         give self.db.lastInsertId()
     }
 
     task find(conditions) {
         q = "SELECT * FROM " + self.tableName
+        vals = []
         when conditions {
             conds = []
             get k in conditions {
-                push(conds, k + " = " + self._escape(conditions[k]))
+                push(conds, k + " = ?")
+                push(vals, conditions[k])
             }
-            when conds.len > 0 {
+            when len(conds) > 0 {
                 q = q + " WHERE " + join(conds, " AND ")
             }
         }
-        give self.db.query(q)
+        give self.db.query(q, vals)
     }
 
     task findOne(conditions) {
         q = "SELECT * FROM " + self.tableName
+        vals = []
         when conditions {
             conds = []
             get k in conditions {
-                push(conds, k + " = " + self._escape(conditions[k]))
+                push(conds, k + " = ?")
+                push(vals, conditions[k])
             }
-            when conds.len > 0 {
+            when len(conds) > 0 {
                 q = q + " WHERE " + join(conds, " AND ")
             }
         }
         q = q + " LIMIT 1"
-        res = self.db.query(q)
-        when res.len > 0 { give res[0] }
+        res = self.db.query(q, vals)
+        when len(res) > 0 { give res[0] }
         give nil
     }
 
@@ -136,44 +131,49 @@ model Table {
 
     task update(id, data) {
         sets = []
+        vals = []
         get k in data {
-            push(sets, k + " = " + self._escape(data[k]))
+            push(sets, k + " = ?")
+            push(vals, data[k])
         }
-        when sets.len > 0 {
-            q = "UPDATE " + self.tableName + " SET " + join(sets, ", ") + " WHERE id = " + str(id)
-            self.db.execute(q)
+        when len(sets) > 0 {
+            q = "UPDATE " + self.tableName + " SET " + join(sets, ", ") + " WHERE id = ?"
+            push(vals, id)
+            self.db.execute(q, vals)
         }
         give self
     }
 
     task delete(id) {
-        q = "DELETE FROM " + self.tableName + " WHERE id = " + str(id)
-        self.db.execute(q)
+        q = "DELETE FROM " + self.tableName + " WHERE id = ?"
+        self.db.execute(q, [id])
         give self
     }
 
     task deleteWhere(conditions) {
         q = "DELETE FROM " + self.tableName
+        vals = []
         when conditions {
             conds = []
             get k in conditions {
-                push(conds, k + " = " + self._escape(conditions[k]))
+                push(conds, k + " = ?")
+                push(vals, conditions[k])
             }
-            when conds.len > 0 {
+            when len(conds) > 0 {
                 q = q + " WHERE " + join(conds, " AND ")
-                self.db.execute(q)
+                self.db.execute(q, vals)
             }
         }
         give self
     }
 
     task all() {
-        give self.db.query("SELECT * FROM " + self.tableName)
+        give self.db.query("SELECT * FROM " + self.tableName, nil)
     }
     
     task count() {
-        res = self.db.query("SELECT COUNT(*) as c FROM " + self.tableName)
-        when res.len > 0 { give res[0]["c"] }
+        res = self.db.query("SELECT COUNT(*) as c FROM " + self.tableName, nil)
+        when len(res) > 0 { give res[0]["c"] }
         give 0
     }
 }
