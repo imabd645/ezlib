@@ -8,7 +8,7 @@ __ws32 = os_load_lib("ws2_32.dll")
 __msv = os_load_lib("msvcrt.dll")
 
 # Safe indexOf wrapper that supports 3 arguments on pre-compiled binaries
-task indexOfSafe(s, search, start) {
+export task indexOfSafe(s, search, start) {
     when type(start) == "nil" {
         give indexOf(s, search)
     }
@@ -24,7 +24,7 @@ Kernel32FFI = {
     "getFileAttributes": os_get_func(__kernel32, "GetFileAttributesA")
 }
 
-model WebFFI {
+export model WebFFI {
     static wsaStartup = os_get_func(__ws32, "WSAStartup")
     static wsaCleanup = os_get_func(__ws32, "WSACleanup")
     static socket = os_get_func(__ws32, "socket")
@@ -39,7 +39,7 @@ model WebFFI {
     static atofFunc = os_get_func(__msv, "atof")
 }
 
-model WebUtils {
+export model WebUtils {
     static HTTP_STATUS = {
         200: "OK", 301: "Moved Permanently", 302: "Found",
         400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
@@ -88,7 +88,7 @@ model WebUtils {
     }
 }
 
-model TemplateEngine {
+export model TemplateEngine {
     # Resolve dot notation like user.name
     static task resolve(ctx, path) {
         parts = split(str(path), ".")
@@ -313,7 +313,7 @@ model TemplateEngine {
     }
 }
 
-task render_template(path, ctx) {
+export task render_template(path, ctx) {
     tmpl = readFile(path)
     
     lastSlash = -1
@@ -331,7 +331,7 @@ task render_template(path, ctx) {
     give TemplateEngine.render(tmpl, ctx)
 }
 
-task redirect(url) {
+export task redirect(url) {
     give {
         "status": 302,
         "headers": {
@@ -341,7 +341,7 @@ task redirect(url) {
     }
 }
 
-model WebApp {
+export model WebApp {
     init() {
         self.routes = {}
         self.middlewares = []
@@ -722,3 +722,4 @@ model WebApp {
         }
     }
 }
+

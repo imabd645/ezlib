@@ -38,7 +38,7 @@ CURLOPT_SSL_VERIFYHOST = 81
 CURLOPT_USE_SSL = 119
 CURLOPT_VERBOSE = 41
 
-model SmtpClient {
+export model SmtpClient {
     init(server, port, username, password) {
         self.server = server
         self.port = port
@@ -164,3 +164,4 @@ model SmtpClient {
         give true
     }
 }
+

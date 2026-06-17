@@ -18,13 +18,13 @@ MS_PER_DAY = 86400000
 # ============================================================================
 
 # Performs floor division of two numbers (a / b)
-task floorDiv(a, b) {
+export task floorDiv(a, b) {
     rem = a % b
     give (a - rem) / b
 }
 
 # Checks if a given year is a leap year
-task isLeap(year) {
+export task isLeap(year) {
     when (year % 4 == 0) and ((year % 100 != 0) or (year % 400 == 0)) {
         give true
     }
@@ -32,7 +32,7 @@ task isLeap(year) {
 }
 
 # Pads a single-digit number with a leading zero for formatting
-task padZero(num) {
+export task padZero(num) {
     s = str(num)
     when len(s) == 1 {
         give "0" + s
@@ -41,7 +41,7 @@ task padZero(num) {
 }
 
 # Returns the number of days in a specific month of a given year
-task daysInMonth(year, month) {
+export task daysInMonth(year, month) {
     when month == 2 {
         when isLeap(year) { give 29 }
         give 28
@@ -59,12 +59,12 @@ task daysInMonth(year, month) {
 # ============================================================================
 
 # Returns the current system time in milliseconds (Unix timestamp)
-task now() {
+export task now() {
     give clock()
 }
 
 # Decomposes a millisecond timestamp into year, month, day, hour, etc.
-task getComponents(ts) {
+export task getComponents(ts) {
     total_ms = ts
     ms = total_ms % 1000
     total_seconds = floorDiv(total_ms, 1000)
@@ -116,7 +116,7 @@ task getComponents(ts) {
 }
 
 # Creates a Unix timestamp from date and time components
-task makeTimestamp(y, m, d, h, mn, s) {
+export task makeTimestamp(y, m, d, h, mn, s) {
     total_days = 0
     curr_y = 1970
     
@@ -145,25 +145,25 @@ task makeTimestamp(y, m, d, h, mn, s) {
 }
 
 # Formats a timestamp into a human-readable YYYY-MM-DD HH:MM:SS string
-task format(ts) {
+export task format(ts) {
     c = getComponents(ts)
     give str(c.year) + "-" + padZero(c.month) + "-" + padZero(c.day) + " " + padZero(c.hour) + ":" + padZero(c.minute) + ":" + padZero(c.second)
 }
 
 # Returns the date portion of a timestamp as a YYYY-MM-DD string
-task dateStr(ts) {
+export task dateStr(ts) {
     c = getComponents(ts)
     give str(c.year) + "-" + padZero(c.month) + "-" + padZero(c.day)
 }
 
 # Returns the time portion of a timestamp as an HH:MM:SS string
-task timeStr(ts) {
+export task timeStr(ts) {
     c = getComponents(ts)
     give padZero(c.hour) + ":" + padZero(c.minute) + ":" + padZero(c.second)
 }
 
 # Adds an arbitrary amount of time to a timestamp
-task addTime(ts, days, hours, mins, secs) {
+export task addTime(ts, days, hours, mins, secs) {
     ms = ts
     ms = ms + (days * MS_PER_DAY)
     ms = ms + (hours * MS_PER_HOUR)
@@ -173,31 +173,32 @@ task addTime(ts, days, hours, mins, secs) {
 }
 
 # Calculates the difference between two timestamps in milliseconds
-task diffMs(ts1, ts2) {
+export task diffMs(ts1, ts2) {
     give ts1 - ts2
 }
 
 # Calculates the difference between two timestamps in full days
-task diffDays(ts1, ts2) {
+export task diffDays(ts1, ts2) {
     diff = ts1 - ts2
     give floorDiv(diff, MS_PER_DAY)
 }
 
 # Returns a formatted date string with an optional hour offset
-task dateTime(x) {
+export task dateTime(x) {
     time = now()
     time = addTime(time, 0, x, 0, 0)
     give format(time)
 }
 
 # Returns the current date as a YYYY-MM-DD string
-task dateNow() {
+export task dateNow() {
     give dateStr(now()) 
 }
 
 # Returns the current time as an HH:MM:SS string with an optional hour offset
-task timeNow(x) {
+export task timeNow(x) {
     time = now()
     time = addTime(time, 0, x, 0, 0)
     give timeStr(time)
 }
+

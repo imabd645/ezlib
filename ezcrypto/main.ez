@@ -2,7 +2,7 @@
 # Features: Base64 Encoder/Decoder, RC4 Stream Cipher, Cipher Encapsulation
 # Fully built utilizing the new EZ Bitwise and Metaprogramming engine layers.
 
-model Base64 {
+export model Base64 {
     static chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     
     static task encode(input) {
@@ -132,7 +132,7 @@ model Base64 {
     }
 }
 
-model RC4 {
+export model RC4 {
     hidden S
     
     init(key) {
@@ -183,7 +183,7 @@ model RC4 {
     }
 }
 
-model Crypto {
+export model Crypto {
     static task base64Encode(text) {
         give Base64.encode(text)
     }
@@ -213,3 +213,4 @@ model Crypto {
         give res
     }
 }
+

@@ -5,50 +5,50 @@
 # ============================================================================
 
 # --- HTTP Status Codes ---
-HTTP_CONTINUE = 100
-HTTP_SWITCHING_PROTOCOLS = 101
-HTTP_OK = 200
-HTTP_CREATED = 201
-HTTP_ACCEPTED = 202
-HTTP_NO_CONTENT = 204
-HTTP_RESET_CONTENT = 205
-HTTP_PARTIAL_CONTENT = 206
-HTTP_MULTIPLE_CHOICES = 300
-HTTP_MOVED_PERMANENTLY = 301
-HTTP_FOUND = 302
-HTTP_SEE_OTHER = 303
-HTTP_NOT_MODIFIED = 304
-HTTP_TEMPORARY_REDIRECT = 307
-HTTP_PERMANENT_REDIRECT = 308
-HTTP_BAD_REQUEST = 400
-HTTP_UNAUTHORIZED = 401
-HTTP_PAYMENT_REQUIRED = 402
-HTTP_FORBIDDEN = 403
-HTTP_NOT_FOUND = 404
-HTTP_METHOD_NOT_ALLOWED = 405
-HTTP_NOT_ACCEPTABLE = 406
-HTTP_PROXY_AUTH_REQUIRED = 407
-HTTP_REQUEST_TIMEOUT = 408
-HTTP_CONFLICT = 409
-HTTP_GONE = 410
-HTTP_LENGTH_REQUIRED = 411
-HTTP_PRECONDITION_FAILED = 412
-HTTP_PAYLOAD_TOO_LARGE = 413
-HTTP_URI_TOO_LONG = 414
-HTTP_UNSUPPORTED_MEDIA_TYPE = 415
-HTTP_RANGE_NOT_SATISFIABLE = 416
-HTTP_EXPECTATION_FAILED = 417
-HTTP_IM_A_TEAPOT = 418
-HTTP_UNPROCESSABLE_ENTITY = 422
-HTTP_TOO_MANY_REQUESTS = 429
-HTTP_INTERNAL_SERVER_ERROR = 500
-HTTP_NOT_IMPLEMENTED = 501
-HTTP_BAD_GATEWAY = 502
-HTTP_SERVICE_UNAVAILABLE = 503
-HTTP_GATEWAY_TIMEOUT = 504
+export HTTP_CONTINUE = 100
+export HTTP_SWITCHING_PROTOCOLS = 101
+export HTTP_OK = 200
+export HTTP_CREATED = 201
+export HTTP_ACCEPTED = 202
+export HTTP_NO_CONTENT = 204
+export HTTP_RESET_CONTENT = 205
+export HTTP_PARTIAL_CONTENT = 206
+export HTTP_MULTIPLE_CHOICES = 300
+export HTTP_MOVED_PERMANENTLY = 301
+export HTTP_FOUND = 302
+export HTTP_SEE_OTHER = 303
+export HTTP_NOT_MODIFIED = 304
+export HTTP_TEMPORARY_REDIRECT = 307
+export HTTP_PERMANENT_REDIRECT = 308
+export HTTP_BAD_REQUEST = 400
+export HTTP_UNAUTHORIZED = 401
+export HTTP_PAYMENT_REQUIRED = 402
+export HTTP_FORBIDDEN = 403
+export HTTP_NOT_FOUND = 404
+export HTTP_METHOD_NOT_ALLOWED = 405
+export HTTP_NOT_ACCEPTABLE = 406
+export HTTP_PROXY_AUTH_REQUIRED = 407
+export HTTP_REQUEST_TIMEOUT = 408
+export HTTP_CONFLICT = 409
+export HTTP_GONE = 410
+export HTTP_LENGTH_REQUIRED = 411
+export HTTP_PRECONDITION_FAILED = 412
+export HTTP_PAYLOAD_TOO_LARGE = 413
+export HTTP_URI_TOO_LONG = 414
+export HTTP_UNSUPPORTED_MEDIA_TYPE = 415
+export HTTP_RANGE_NOT_SATISFIABLE = 416
+export HTTP_EXPECTATION_FAILED = 417
+export HTTP_IM_A_TEAPOT = 418
+export HTTP_UNPROCESSABLE_ENTITY = 422
+export HTTP_TOO_MANY_REQUESTS = 429
+export HTTP_INTERNAL_SERVER_ERROR = 500
+export HTTP_NOT_IMPLEMENTED = 501
+export HTTP_BAD_GATEWAY = 502
+export HTTP_SERVICE_UNAVAILABLE = 503
+export HTTP_GATEWAY_TIMEOUT = 504
 
 # --- Response Model ---
-model HTTPResponse {
+export model HTTPResponse {
     init(statusCode, body, headers, url, duration) {
         self.statusCode = statusCode
         self.body = body
@@ -106,7 +106,7 @@ model HTTPResponse {
 }
 
 # --- Request Builder Model ---
-model HTTPRequest {
+export model HTTPRequest {
     init(method, url) {
         self.method = upper(method)
         self.url = url
@@ -216,7 +216,7 @@ model HTTPRequest {
 }
 
 # --- Internal Request Execution ---
-task __executeRequest(request) {
+export task __executeRequest(request) {
     url = request.buildUrl()
     method = request.method
     body = request.body
@@ -292,7 +292,7 @@ task __executeRequest(request) {
 }
 
 # --- HTTP Client Model ---
-model HTTPClient {
+export model HTTPClient {
     init(baseUrl) {
         self.baseUrl = baseUrl
         self.defaultHeaders = {}
@@ -383,7 +383,7 @@ model HTTPClient {
 # --- Fluent HTTP Functions ---
 
 # Quick GET request
-task httpGet(url, params) {
+export task httpGet(url, params) {
     request = HTTPRequest("GET", url)
     when params {
         request.query(params)
@@ -392,7 +392,7 @@ task httpGet(url, params) {
 }
 
 # Quick POST request
-task httpPost(url, body, headers) {
+export task httpPost(url, body, headers) {
     request = HTTPRequest("POST", url)
     when headers {
         request.headers(headers)
@@ -404,7 +404,7 @@ task httpPost(url, body, headers) {
 }
 
 # Quick PUT request
-task httpPut(url, body, headers) {
+export task httpPut(url, body, headers) {
     request = HTTPRequest("PUT", url)
     when headers {
         request.headers(headers)
@@ -416,7 +416,7 @@ task httpPut(url, body, headers) {
 }
 
 # Quick DELETE request
-task httpDelete(url, headers) {
+export task httpDelete(url, headers) {
     request = HTTPRequest("DELETE", url)
     when headers {
         request.headers(headers)
@@ -425,7 +425,7 @@ task httpDelete(url, headers) {
 }
 
 # Quick PATCH request
-task httpPatch(url, body, headers) {
+export task httpPatch(url, body, headers) {
     request = HTTPRequest("PATCH", url)
     when headers {
         request.headers(headers)
@@ -437,7 +437,7 @@ task httpPatch(url, body, headers) {
 }
 
 # --- URL Utilities ---
-task buildUrl(base, params) {
+export task buildUrl(base, params) {
     when len(params) == 0 {
         give base
     }
@@ -463,7 +463,7 @@ task buildUrl(base, params) {
 }
 
 # Parse query string into dictionary
-task parseQuery(url) {
+export task parseQuery(url) {
     result = {}
     
     # Find query part
@@ -488,7 +488,7 @@ task parseQuery(url) {
 }
 
 # --- Async HTTP with Tasks ---
-task asyncGet(url, callback) {
+export task asyncGet(url, callback) {
     task runner() {
         try {
             response = httpGet(url, nil)
@@ -500,7 +500,7 @@ task asyncGet(url, callback) {
     give spawn(runner)
 }
 
-task asyncPost(url, body, callback) {
+export task asyncPost(url, body, callback) {
     task runner() {
         try {
             response = httpPost(url, body, nil)
@@ -512,47 +512,4 @@ task asyncPost(url, body, callback) {
     give spawn(runner)
 }
 
-# --- Main HTTP Object ---
-http = {}
-http["HTTPResponse"] = HTTPResponse
-http["HTTPRequest"] = HTTPRequest
-http["HTTPClient"] = HTTPClient
-http["get"] = httpGet
-http["post"] = httpPost
-http["put"] = httpPut
-http["delete"] = httpDelete
-http["patch"] = httpPatch
-http["buildUrl"] = buildUrl
-http["parseQuery"] = parseQuery
-http["asyncGet"] = asyncGet
-http["asyncPost"] = asyncPost
 
-# Status code constants
-http["OK"] = HTTP_OK
-http["CREATED"] = HTTP_CREATED
-http["BAD_REQUEST"] = HTTP_BAD_REQUEST
-http["UNAUTHORIZED"] = HTTP_UNAUTHORIZED
-http["FORBIDDEN"] = HTTP_FORBIDDEN
-http["NOT_FOUND"] = HTTP_NOT_FOUND
-http["SERVER_ERROR"] = HTTP_INTERNAL_SERVER_ERROR
-
-# JSON utilities
-json = {}
-json["parse"] = |s| { give parse_json(s) }
-json["stringify"] = |o| { give to_json(o) }
-json["pretty"] = |o| { 
-    # Simple pretty print
-    str = to_json(o)
-    # Basic indentation (can be enhanced)
-    give str
-}
-
-# Global exports for convenience
-hRequest = HTTPRequest
-hResponse = HTTPResponse
-hClient = HTTPClient
-hGet = httpGet
-hPost = httpPost
-hPut = httpPut
-hDelete = httpDelete
-hPatch = httpPatch

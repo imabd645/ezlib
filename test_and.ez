@@ -1,0 +1,5 @@
+out true and true
+out 1 != 2
+k = "id"
+val = nil
+out not (k == "id" and val == nil)

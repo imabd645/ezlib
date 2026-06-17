@@ -1,7 +1,7 @@
 # EZ Professional PDF Library (v1.0)
 # Wrapper for native pdf_ builtins
 
-model PDF {
+export model PDF {
     init(filename) {
         self.filename = filename
         pdf_begin(filename)
@@ -59,3 +59,4 @@ model PDF {
         give self
     }
 }
+

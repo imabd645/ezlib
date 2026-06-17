@@ -5,14 +5,14 @@
 # ============================================================================
 
 # --- Color Constants ---
-COLOR_RESET = 0
-COLOR_GREEN = 10
-COLOR_RED = 12
-COLOR_YELLOW = 14
-COLOR_BLUE = 9
-COLOR_MAGENTA = 13
-COLOR_CYAN = 11
-COLOR_WHITE = 15
+export COLOR_RESET = 0
+export COLOR_GREEN = 10
+export COLOR_RED = 12
+export COLOR_YELLOW = 14
+export COLOR_BLUE = 9
+export COLOR_MAGENTA = 13
+export COLOR_CYAN = 11
+export COLOR_WHITE = 15
 
 # --- Test State ---
 __testState = {
@@ -31,7 +31,7 @@ __testState = {
 # --- Internal Utility Functions ---
 
 # Format a value for display
-task __formatValue(val) {
+export task __formatValue(val) {
     t = typeOf(val)
     when t == "string" { give "'" + val + "'" }
     when t == "nil" { give "nil" }
@@ -45,7 +45,7 @@ task __formatValue(val) {
 }
 
 # Check deep equality
-task __deepEqual(a, b) {
+export task __deepEqual(a, b) {
     when typeOf(a) != typeOf(b) { give false }
     
     t = typeOf(a)
@@ -63,7 +63,7 @@ task __deepEqual(a, b) {
         keysB = keys(b)
         when len(keysA) != len(keysB) { give false }
         get k in keysA {
-            when not (k in b) { give false }
+            when not has_key(b, k) { give false }
             when not __deepEqual(a[k], b[k]) { give false }
         }
         give true
@@ -72,7 +72,7 @@ task __deepEqual(a, b) {
 }
 
 # Print with color
-task __printColor(msg, colorCode) {
+export task __printColor(msg, colorCode) {
     when not __testState["silent"] {
         color(colorCode)
         out msg
@@ -81,7 +81,7 @@ task __printColor(msg, colorCode) {
 }
 
 # Print without color
-task __print(msg) {
+export task __print(msg) {
     when not __testState["silent"] {
         out msg
     }
@@ -90,7 +90,7 @@ task __print(msg) {
 # --- Core Assertion Functions ---
 
 # Assert that value is truthy
-task assert(value, message) {
+export task assert(value, message) {
     when not value {
         msg = message
         when not msg { msg = "Expected truthy value, got: " + __formatValue(value) }
@@ -100,7 +100,7 @@ task assert(value, message) {
 }
 
 # Assert that value is falsy
-task assertFalse(value, message) {
+export task assertFalse(value, message) {
     when value {
         msg = message
         when not msg { msg = "Expected falsy value, got: " + __formatValue(value) }
@@ -110,7 +110,7 @@ task assertFalse(value, message) {
 }
 
 # Assert equality (==)
-task assertEqual(actual, expected, message) {
+export task assertEqual(actual, expected, message) {
     when actual != expected {
         msg = message
         when not msg { 
@@ -122,7 +122,7 @@ task assertEqual(actual, expected, message) {
 }
 
 # Assert deep equality (for arrays/objects)
-task assertDeepEqual(actual, expected, message) {
+export task assertDeepEqual(actual, expected, message) {
     when not __deepEqual(actual, expected) {
         msg = message
         when not msg { 
@@ -134,7 +134,7 @@ task assertDeepEqual(actual, expected, message) {
 }
 
 # Assert inequality (!=)
-task assertNotEqual(actual, notExpected, message) {
+export task assertNotEqual(actual, notExpected, message) {
     when actual == notExpected {
         msg = message
         when not msg { 
@@ -146,7 +146,7 @@ task assertNotEqual(actual, notExpected, message) {
 }
 
 # Assert null
-task assertNull(value, message) {
+export task assertNull(value, message) {
     when value != nil {
         msg = message
         when not msg { msg = "Expected null, got: " + __formatValue(value) }
@@ -156,7 +156,7 @@ task assertNull(value, message) {
 }
 
 # Assert not null
-task assertNotNull(value, message) {
+export task assertNotNull(value, message) {
     when value == nil {
         msg = message
         when not msg { msg = "Expected non-null value" }
@@ -166,7 +166,7 @@ task assertNotNull(value, message) {
 }
 
 # Assert that value is of specific type
-task assertType(value, expectedType, message) {
+export task assertType(value, expectedType, message) {
     actualType = typeOf(value)
     when actualType != expectedType {
         msg = message
@@ -179,7 +179,7 @@ task assertType(value, expectedType, message) {
 }
 
 # Assert that string contains substring
-task assertContains(haystack, needle, message) {
+export task assertContains(haystack, needle, message) {
     when typeOf(haystack) != "string" {
         throw AssertionError("assertContains expects string haystack, got: " + typeOf(haystack))
     }
@@ -194,7 +194,7 @@ task assertContains(haystack, needle, message) {
 }
 
 # Assert that array contains value
-task assertInArray(array, value, message) {
+export task assertInArray(array, value, message) {
     when typeOf(array) != "array" {
         throw "assertInArray expects array, got: " + typeOf(array)
     }
@@ -216,7 +216,7 @@ task assertInArray(array, value, message) {
 }
 
 # Assert throws an error
-task assertThrows(fn, expectedMessage, message) {
+export task assertThrows(fn, expectedMessage, message) {
     threw = false
     errorMsg = ""
     
@@ -247,7 +247,7 @@ task assertThrows(fn, expectedMessage, message) {
 }
 
 # Assert does not throw
-task assertDoesNotThrow(fn, message) {
+export task assertDoesNotThrow(fn, message) {
     try {
         fn()
     } catch e {
@@ -259,7 +259,7 @@ task assertDoesNotThrow(fn, message) {
 }
 
 # Assert approximate equality (for floating point)
-task assertApproxEqual(actual, expected, tolerance, message) {
+export task assertApproxEqual(actual, expected, tolerance, message) {
     when not tolerance { tolerance = 0.0001 }
     diff = abs(actual - expected)
     when diff > tolerance {
@@ -273,7 +273,7 @@ task assertApproxEqual(actual, expected, tolerance, message) {
 }
 
 # Assert greater than
-task assertGreaterThan(value, threshold, message) {
+export task assertGreaterThan(value, threshold, message) {
     when value <= threshold {
         msg = message
         when not msg { 
@@ -285,7 +285,7 @@ task assertGreaterThan(value, threshold, message) {
 }
 
 # Assert less than
-task assertLessThan(value, threshold, message) {
+export task assertLessThan(value, threshold, message) {
     when value >= threshold {
         msg = message
         when not msg { 
@@ -298,7 +298,12 @@ task assertLessThan(value, threshold, message) {
 
 # --- Mock/Spy System ---
 
-model Spy {
+export model Spy {
+    targetFn: any
+    calls: any
+    returnValue: any
+    callThrough: any
+    
     init(targetFn) {
         self.targetFn = targetFn
         self.calls = []
@@ -357,27 +362,27 @@ model Spy {
 }
 
 # Create a spy function
-task spy(targetFn) {
+export task spy(targetFn) {
     s = Spy(targetFn)
     give |args| { give s.call(args) }
 }
 
 # Create a stub function
-task stub(returnValue) {
+export task stub(returnValue) {
     s = Spy(|args| { give nil })
     s.returns(returnValue)
     give |args| { give s.call(args) }
 }
 
 # Create a mock function
-task mock() {
+export task mock() {
     give spy(|args| { give nil })
 }
 
 # --- Test Suite System ---
 
 # Define a test suite
-task describe(suiteName, suiteFn) {
+export task describe(suiteName, suiteFn) {
     suite = {
         "name": suiteName,
         "tests": [],
@@ -407,12 +412,12 @@ task describe(suiteName, suiteFn) {
 }
 
 # Alias for describe
-task suite(name, fn) {
+export task suite(name, fn) {
     describe(name, fn)
 }
 
 # Define a test case
-task it(testName, testFn) {
+export task it(testName, testFn) {
     test = {
         "name": testName,
         "fn": testFn,
@@ -427,12 +432,12 @@ task it(testName, testFn) {
 }
 
 # Alias for it - use testCase to avoid naming conflict with test object
-task testCase(name, fn) {
+export task testCase(name, fn) {
     it(name, fn)
 }
 
 # Define a skipped test
-task skipe(name, fn) {
+export task skipe(name, fn) {
     test = {
         "name": name,
         "fn": fn,
@@ -450,28 +455,28 @@ task skipe(name, fn) {
 # --- Hooks ---
 
 # Run before each test in suite
-task beforeEach(fn) {
+export task beforeEach(fn) {
     when __testState["currentSuite"] {
         __testState["currentSuite"]["beforeEach"] = fn
     }
 }
 
 # Run after each test in suite
-task afterEach(fn) {
+export task afterEach(fn) {
     when __testState["currentSuite"] {
         __testState["currentSuite"]["afterEach"] = fn
     }
 }
 
 # Run before all tests in suite
-task beforeAll(fn) {
+export task beforeAll(fn) {
     when __testState["currentSuite"] {
         __testState["currentSuite"]["beforeAll"] = fn
     }
 }
 
 # Run after all tests in suite
-task afterAll(fn) {
+export task afterAll(fn) {
     when __testState["currentSuite"] {
         __testState["currentSuite"]["afterAll"] = fn
     }
@@ -480,7 +485,7 @@ task afterAll(fn) {
 # --- Test Runner ---
 
 # Run a single test
-task __runTest(test) {
+export task __runTest(test) {
     __testState["totalCount"] = __testState["totalCount"] + 1
     __testState["currentTest"] = test
     
@@ -544,7 +549,7 @@ task __runTest(test) {
 }
 
 # Recursively run all tests in a suite
-task __runSuite(suite, level) {
+export task __runSuite(suite, level) {
     indent = ""
     repeat i = 0 to level {
         indent = indent + "  "
@@ -584,7 +589,7 @@ task __runSuite(suite, level) {
 }
 
 # Run all tests
-task runTests(options) {
+export task runTests(options) {
     when not options { options = {} }
     when has_key(options, "silent") {
         __testState["silent"] = options["silent"]
@@ -647,7 +652,7 @@ task runTests(options) {
 }
 
 # Run and exit with appropriate code
-task run() {
+export task run() {
     results = runTests({})
     when not results["success"] {
         # Exit with error code 1
@@ -657,7 +662,7 @@ task run() {
 }
 
 # Clear all tests (for reloading)
-task clear() {
+export task clear() {
     __testState["suites"] = []
     __testState["currentSuite"] = nil
     __testState["currentTest"] = nil
@@ -667,83 +672,4 @@ task clear() {
     __testState["totalCount"] = 0
 }
 
-# --- Main Test Object ---
-# Exports everything in a namespace
-test = {}
-test["run"] = run
-test["runTests"] = runTests
-test["clear"] = clear
-test["describe"] = describe
-test["suite"] = suite
-test["it"] = it
-test["test"] = testCase
-test["skip"] = skipe
-test["beforeEach"] = beforeEach
-test["afterEach"] = afterEach
-test["beforeAll"] = beforeAll
-test["afterAll"] = afterAll
-test["assert"] = assert
-test["assertFalse"] = assertFalse
-test["assertEqual"] = assertEqual
-test["assertDeepEqual"] = assertDeepEqual
-test["assertNotEqual"] = assertNotEqual
-test["assertNull"] = assertNull
-test["assertNotNull"] = assertNotNull
-test["assertType"] = assertType
-test["assertContains"] = assertContains
-test["assertInArray"] = assertInArray
-test["assertThrows"] = assertThrows
-test["assertDoesNotThrow"] = assertDoesNotThrow
-test["assertApproxEqual"] = assertApproxEqual
-test["assertGreaterThan"] = assertGreaterThan
-test["assertLessThan"] = assertLessThan
-test["spy"] = spy
-test["stub"] = stub
-test["mock"] = mock
-test["Spy"] = Spy
-test["silent"] = |b| { __testState["silent"] = b }
 
-# --- Global Exports ---
-# Allow using without test. prefix
-
-# Assertions
-tAssert = test["assert"]
-tAssertFalse = test["assertFalse"]
-tAssertEqual = test["assertEqual"]
-tAssertDeepEqual = test["assertDeepEqual"]
-tAssertNotEqual = test["assertNotEqual"]
-tAssertNull = test["assertNull"]
-tAssertNotNull = test["assertNotNull"]
-tAssertType = test["assertType"]
-tAssertContains = test["assertContains"]
-tAssertInArray = test["assertInArray"]
-tAssertThrows = test["assertThrows"]
-tAssertDoesNotThrow = test["assertDoesNotThrow"]
-tAssertApproxEqual = test["assertApproxEqual"]
-tAssertGreaterThan = test["assertGreaterThan"]
-tAssertLessThan = test["assertLessThan"]
-
-# Suite definition
-tDescribe = test["describe"]
-tSuite = test["suite"]
-tIt = test["it"]
-tTestCase = test["test"]
-tSkip = test["skip"]
-
-# Hooks
-tBeforeEach = test["beforeEach"]
-tAfterEach = test["afterEach"]
-tBeforeAll = test["beforeAll"]
-tAfterAll = test["afterAll"]
-
-# Runner
-tRun = test["run"]
-tRunTests = test["runTests"]
-tClear = test["clear"]
-
-# Mocks
-tSpy = test["spy"]
-tStub = test["stub"]
-tMock = test["mock"]
-
-# tAssertionError removed - EZ uses string throws, not error objects

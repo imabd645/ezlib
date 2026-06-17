@@ -5,9 +5,10 @@
 
 use "ezdb" as ezdb
 
-model ORM {
+export model ORM {
     init(path) {
         self.db = ezdb.Database(path)
+        self.tables = {}
     }
 
     task execute(sql, params) {
@@ -42,52 +43,91 @@ model ORM {
         give self
     }
 
-    task define(tableName, schema) {
-        give Table(self, tableName, schema)
+    task register(modelClass) {
+        table = Table(self.db, modelClass)
+        self.tables[modelClass.__name__] = table
+        give table
     }
 }
 
-model Table {
-    init(db, tableName, schema) {
+export model Table {
+    init(db, modelClass) {
         self.db = db
-        self.tableName = tableName
-        self.schema = schema
+        self.modelClass = modelClass
+        self.tableName = modelClass.__name__
+        self.schema = modelClass.__properties__
         self._createTable()
+    }
+
+    task _mapType(ezType) {
+        when ezType == "int" { give "INTEGER" }
+        when ezType == "string" { give "TEXT" }
+        when ezType == "bool" { give "BOOLEAN" }
+        when ezType == "float" { give "REAL" }
+        give "TEXT"
     }
 
     task _createTable() {
         cols = []
         get k in self.schema {
-            push(cols, k + " " + self.schema[k])
+            sqlType = self._mapType(self.schema[k])
+            
+            # id is always PRIMARY KEY AUTOINCREMENT
+            when k == "id" {
+                push(cols, "id INTEGER PRIMARY KEY AUTOINCREMENT")
+            } other {
+                push(cols, k + " " + sqlType)
+            }
         }
         
-        # Always enforce an 'id' primary key if not provided
-        when not has_key(self.schema, "id") {
-            # SQLite specific auto-increment PK
-            q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (id INTEGER PRIMARY KEY AUTOINCREMENT, " + join(cols, ", ") + ")"
-            self.db.execute(q, nil)
-        } other {
-            q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (" + join(cols, ", ") + ")"
-            self.db.execute(q, nil)
+        q = "CREATE TABLE IF NOT EXISTS " + self.tableName + " (" + join(cols, ", ") + ")"
+        self.db.execute(q, nil)
+    }
+    
+    task _toInstance(rowDict) {
+        inst = self.modelClass()
+        get k in rowDict {
+            setattr(inst, k, rowDict[k])
         }
+        give inst
     }
 
-    # CRUD Operations (Parameterized)
+    # CRUD Operations
 
-    task insert(data) {
+    task insert(instance) {
         keys = []
         vals = []
         placeholders = []
         
-        get k in data {
-            push(keys, k)
-            push(vals, data[k])
-            push(placeholders, "?")
+        get k in self.schema {
+            when hasattr(instance, k) {
+                val = getattr(instance, k)
+                when not (k == "id" and val == nil) {
+                    push(keys, k)
+                    push(vals, val)
+                    push(placeholders, "?")
+                }
+            }
         }
         
         q = "INSERT INTO " + self.tableName + " (" + join(keys, ", ") + ") VALUES (" + join(placeholders, ", ") + ")"
         self.db.execute(q, vals)
-        give self.db.lastInsertId()
+        give self.db.lastRowId()
+    }
+
+    task save(instance) {
+        id = nil
+        when hasattr(instance, "id") {
+            id = getattr(instance, "id")
+        }
+        
+        when id != nil {
+            self.update(id, instance)
+        } other {
+            newId = self.insert(instance)
+            setattr(instance, "id", newId)
+        }
+        give instance
     }
 
     task find(conditions) {
@@ -103,7 +143,12 @@ model Table {
                 q = q + " WHERE " + join(conds, " AND ")
             }
         }
-        give self.db.query(q, vals)
+        rows = self.db.query(q, vals)
+        instances = []
+        get row in rows {
+            push(instances, self._toInstance(row))
+        }
+        give instances
     }
 
     task findOne(conditions) {
@@ -121,7 +166,7 @@ model Table {
         }
         q = q + " LIMIT 1"
         res = self.db.query(q, vals)
-        when len(res) > 0 { give res[0] }
+        when len(res) > 0 { give self._toInstance(res[0]) }
         give nil
     }
 
@@ -129,19 +174,21 @@ model Table {
         give self.findOne({"id": id})
     }
 
-    task update(id, data) {
+    task update(id, instance) {
         sets = []
         vals = []
-        get k in data {
-            push(sets, k + " = ?")
-            push(vals, data[k])
+        get k in self.schema {
+            when k != "id" and hasattr(instance, k) {
+                push(sets, k + " = ?")
+                push(vals, getattr(instance, k))
+            }
         }
         when len(sets) > 0 {
             q = "UPDATE " + self.tableName + " SET " + join(sets, ", ") + " WHERE id = ?"
             push(vals, id)
             self.db.execute(q, vals)
         }
-        give self
+        give instance
     }
 
     task delete(id) {
@@ -168,7 +215,12 @@ model Table {
     }
 
     task all() {
-        give self.db.query("SELECT * FROM " + self.tableName, nil)
+        rows = self.db.query("SELECT * FROM " + self.tableName, nil)
+        instances = []
+        get row in rows {
+            push(instances, self._toInstance(row))
+        }
+        give instances
     }
     
     task count() {
@@ -177,3 +229,4 @@ model Table {
         give 0
     }
 }
+

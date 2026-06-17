@@ -6,7 +6,7 @@
 
 # --- Regex Model ---
 # Provides an object-oriented interface for compiled patterns
-model Regex {
+export model Regex {
     # Initialize with a pattern string
     init(pattern) {
         self.pattern = pattern
@@ -134,13 +134,13 @@ model Regex {
 
 # Quick test if pattern matches text
 # Returns: boolean
-task reTest(pattern, text) {
+export task reTest(pattern, text) {
     give reMatch(text, pattern)
 }
 
 # Execute search and return match info
 # Returns: { matched: bool, groups: [], text: string }
-task reExec(pattern, text) {
+export task reExec(pattern, text) {
     matches = reSearch(text, pattern)
     when len(matches) > 0 {
         give {
@@ -153,13 +153,13 @@ task reExec(pattern, text) {
 }
 
 # Split text by pattern (global function)
-task reSplit(pattern, text) {
+export task reSplit(pattern, text) {
     r = Regex(pattern)
     give r.split(text)
 }
 
 # Escape special regex characters in text
-task reEscape(text) {
+export task reEscape(text) {
     special = ["\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"]
     result = text
     get char in special {
@@ -172,7 +172,7 @@ task reEscape(text) {
 
 # --- Common Validation Patterns ---
 
-patterns = {
+export patterns = {
     # Basic patterns
     "DIGIT": "[0-9]",
     "NUMBER": "-?[0-9]+(\\.[0-9]+)?",
@@ -221,67 +221,67 @@ patterns = {
 # --- Validation Functions ---
 
 # Check if text is a valid email
-task isEmail(text) {
+export task isEmail(text) {
     give reMatch(text, "^" + patterns["EMAIL"] + "$")
 }
 
 # Check if text is a valid US phone number
-task isPhone(text) {
+export task isPhone(text) {
     give reMatch(text, "^" + patterns["PHONE_US"] + "$")
 }
 
 # Check if text is a valid international phone
-task isPhoneIntl(text) {
+export task isPhoneIntl(text) {
     give reMatch(text, "^" + patterns["PHONE_INTL"] + "$")
 }
 
 # Check if text is a valid URL
-task isUrl(text) {
+export task isUrl(text) {
     give reMatch(text, "^" + patterns["URL"] + "$")
 }
 
 # Check if text is a valid IPv4 address
-task isIpv4(text) {
+export task isIpv4(text) {
     give reMatch(text, "^" + patterns["IPV4"] + "$")
 }
 
 # Check if text is only digits
-task isDigit(text) {
+export task isDigit(text) {
     give reMatch(text, "^[0-9]+$")
 }
 
 # Check if text is alphabetic only
-task isAlpha(text) {
+export task isAlpha(text) {
     give reMatch(text, "^[a-zA-Z]+$")
 }
 
 # Check if text is alphanumeric
-task isAlphanumeric(text) {
+export task isAlphanumeric(text) {
     give reMatch(text, "^[a-zA-Z0-9]+$")
 }
 
 # Check if text is whitespace only
-task isWhitespace(text) {
+export task isWhitespace(text) {
     give reMatch(text, "^[ \\t\\n\\r]+$")
 }
 
 # Check if text is a valid date (ISO format)
-task isDateIso(text) {
+export task isDateIso(text) {
     give reMatch(text, "^" + patterns["DATE_ISO"] + "$")
 }
 
 # Check if text is a valid UUID
-task isUuid(text) {
+export task isUuid(text) {
     give reMatch(text, "^" + patterns["UUID"] + "$")
 }
 
 # Check if text is a valid hex color
-task isHexColor(text) {
+export task isHexColor(text) {
     give reMatch(text, "^" + patterns["HEX_COLOR"] + "$")
 }
 
 # Check if text is a valid credit card number
-task isCreditCard(text) {
+export task isCreditCard(text) {
     give reMatch(text, "^" + patterns["CREDIT_CARD"] + "$")
 }
 
@@ -289,7 +289,7 @@ task isCreditCard(text) {
 
 # Extract all emails from text
 # Returns: array of email strings
-task extractEmails(text) {
+export task extractEmails(text) {
     r = Regex(patterns["EMAIL"])
     matches = r.findAll(text)
     results = []
@@ -300,7 +300,7 @@ task extractEmails(text) {
 }
 
 # Extract all URLs from text
-task extractUrls(text) {
+export task extractUrls(text) {
     r = Regex(patterns["URL"])
     matches = r.findAll(text)
     results = []
@@ -311,7 +311,7 @@ task extractUrls(text) {
 }
 
 # Extract all phone numbers from text
-task extractPhones(text) {
+export task extractPhones(text) {
     results = []
 
     # Try US format
@@ -332,7 +332,7 @@ task extractPhones(text) {
 }
 
 # Extract all hashtags from text
-task extractHashtags(text) {
+export task extractHashtags(text) {
     r = Regex(patterns["HASHTAG"])
     matches = r.findAll(text)
     results = []
@@ -343,7 +343,7 @@ task extractHashtags(text) {
 }
 
 # Extract all mentions from text
-task extractMentions(text) {
+export task extractMentions(text) {
     r = Regex(patterns["MENTION"])
     matches = r.findAll(text)
     results = []
@@ -356,7 +356,7 @@ task extractMentions(text) {
 }
 
 # Remove all HTML tags from text
-task stripHtml(text) {
+export task stripHtml(text) {
     r = Regex(patterns["HTML_TAG"])
     give r.replaceAll(text, "")
 }
@@ -364,7 +364,7 @@ task stripHtml(text) {
 # --- Advanced Utilities ---
 
 # Create a regex that matches any of the given strings (OR pattern)
-task reAny(strings) {
+export task reAny(strings) {
     escaped = []
     get s in strings {
         push(escaped, reEscape(s))
@@ -373,12 +373,12 @@ task reAny(strings) {
 }
 
 # Create a regex that matches a word boundary around a string
-task reWord(text) {
+export task reWord(text) {
     give "\\b" + reEscape(text) + "\\b"
 }
 
 # Create a case-insensitive pattern (by character class expansion)
-task reIgnoreCase(pattern) {
+export task reIgnoreCase(pattern) {
     # Simple approach: wrap with character class variations
     # This is a basic implementation - full case folding is complex
     result = ""
@@ -400,83 +400,20 @@ task reIgnoreCase(pattern) {
 }
 
 # Check if text starts with pattern
-task reStartsWith(pattern, text) {
+export task reStartsWith(pattern, text) {
     give reMatch(text, "^" + pattern + ".*")
 }
 
 # Check if text ends with pattern
-task reEndsWith(pattern, text) {
+export task reEndsWith(pattern, text) {
     give reMatch(text, ".*" + pattern + "$")
 }
 
 # Count occurrences of pattern in text
-task reCount(pattern, text) {
+export task reCount(pattern, text) {
     r = Regex(pattern)
     matches = r.findAll(text)
     give len(matches)
 }
 
-# --- Main regex Object ---
-# Primary entry point for the library
-regex = {
-    # Regex Model reference (for direct instantiation)
-    "Regex": Regex,
 
-    # Pattern compilation
-    "compile": |p| { give Regex(p) },
-    "create": |p| { give Regex(p) },
-
-    # Quick operations
-    "test": |p, t| { give reTest(p, t) },
-    "exec": |p, t| { give reExec(p, t) },
-    "match": |p, t| { give reMatch(t, p) },
-    "search": |p, t| { give reSearch(t, p) },
-    "replace": |p, t, r| { give reReplace(t, p, r) },
-    "split": |p, t| { give reSplit(p, t) },
-    "escape": |t| { give reEscape(t) },
-
-    # Advanced utilities
-    "findAll": |p, t| {
-        r = Regex(p)
-        give r.findAll(t)
-    },
-    "replaceAll": |p, t, r| {
-        re = Regex(p)
-        give re.replaceAll(t, r)
-    },
-    "any": |s| { give reAny(s) },
-    "word": |t| { give reWord(t) },
-    "ignoreCase": |p| { give reIgnoreCase(p) },
-    "startsWith": |p, t| { give reStartsWith(p, t) },
-    "endsWith": |p, t| { give reEndsWith(p, t) },
-    "count": |p, t| { give reCount(p, t) },
-
-    # Patterns library
-    "patterns": patterns,
-
-    # Validators
-    "isEmail": |t| { give isEmail(t) },
-    "isPhone": |t| { give isPhone(t) },
-    "isPhoneIntl": |t| { give isPhoneIntl(t) },
-    "isUrl": |t| { give isUrl(t) },
-    "isIpv4": |t| { give isIpv4(t) },
-    "isDigit": |t| { give isDigit(t) },
-    "isAlpha": |t| { give isAlpha(t) },
-    "isAlphanumeric": |t| { give isAlphanumeric(t) },
-    "isWhitespace": |t| { give isWhitespace(t) },
-    "isDateIso": |t| { give isDateIso(t) },
-    "isUuid": |t| { give isUuid(t) },
-    "isHexColor": |t| { give isHexColor(t) },
-    "isCreditCard": |t| { give isCreditCard(t) },
-
-    # Extractors
-    "extractEmails": |t| { give extractEmails(t) },
-    "extractUrls": |t| { give extractUrls(t) },
-    "extractPhones": |t| { give extractPhones(t) },
-    "extractHashtags": |t| { give extractHashtags(t) },
-    "extractMentions": |t| { give extractMentions(t) },
-    "stripHtml": |t| { give stripHtml(t) }
-}
-
-# Also expose key functions globally for convenience
-re = regex

@@ -8,7 +8,7 @@ __u32 = os_load_lib("User32.dll")
 __msv = os_load_lib("msvcrt.dll")
 __s32 = os_load_lib("shell32.dll")
 
-model OSFFI {
+export model OSFFI {
     # Kernel32
     static getTickCount64 = os_get_func(__k32, "GetTickCount64")
     static globalMemStatus = os_get_func(__k32, "GlobalMemoryStatusEx")
@@ -40,7 +40,7 @@ model OSFFI {
     static shellExec = os_get_func(__s32, "ShellExecuteA")
 }
 
-model OSEnv {
+export model OSEnv {
     task get(key) { give os_call(OSFFI.getEnv, "string", key) }
     task set(key, val) { os_call(OSFFI.putEnv, "int", key, str(val)) }
     
@@ -74,7 +74,7 @@ model OSEnv {
     }
 }
 
-model OSPath {
+export model OSPath {
     task join(p1, p2) { give p1 + "\\" + p2 }
     task isAbsolute(p) {
         when len(p) >= 2 and substr(p, 1, 1) == ":" { give true }
@@ -82,7 +82,7 @@ model OSPath {
     }
 }
 
-model OSProcess {
+export model OSProcess {
     task exec(cmd) { 
         filePtr = os_call(OSFFI.popen, "ptr", cmd, "r")
         when filePtr == 0 { give "" }
@@ -101,7 +101,7 @@ model OSProcess {
     task exit(code) { os_call(OSFFI.exitProc, "int", code) }
 }
 
-model OSClipboard {
+export model OSClipboard {
     task read() { 
         opened = os_call(OSFFI.openClipboard, "int", 0)
         when opened == 0 { give "" }
@@ -144,11 +144,11 @@ model OSClipboard {
     task clear() { give self.write("") }
 }
 
-model OSShell {
+export model OSShell {
     task open(path) { give os_call(OSFFI.shellExec, "int", 0, "open", path, 0, 0, 1) }
 }
 
-model OS {
+export model OS {
     init() {
         self.env = OSEnv()
         self.path = OSPath()
@@ -190,4 +190,5 @@ model OS {
     task chdir(path) { give os_call(OSFFI.setCwd, "int", path) != 0 }
 }
 
-os = OS()
+export os = OS()
+

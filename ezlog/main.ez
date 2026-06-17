@@ -7,12 +7,12 @@ use "fs"
 
 # Level Constants
 DEBUG = 0
-INFO = 1
-WARN = 2
-ERROR = 3
-FATAL = 4
+export INFO = 1
+export WARN = 2
+export ERROR = 3
+export FATAL = 4
 
-model Logger {
+export model Logger {
     init() {
         self.level = INFO
         self.filePath = ""
@@ -98,5 +98,6 @@ model Logger {
 }
 
 # Default Singleton Instance
-log = Logger()
+export log = Logger()
+
 

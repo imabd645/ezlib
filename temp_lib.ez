@@ -3,7 +3,7 @@
 // Modernized using Model system and inclusive loops
 // ============================================================================
 
-export model Set {
+model Set {
     data: any
     init() {
         self.data = {}
@@ -45,7 +45,7 @@ export model Set {
     }
 }
 
-export model Map {
+model Map {
     data: any
     init() {
         self.data = {}
@@ -86,7 +86,7 @@ export model Map {
     }
 }
 
-export model Queue {
+model Queue {
     items: any
     init() {
         self.items = []
@@ -123,7 +123,7 @@ export model Queue {
     }
 }
 
-export model Stack {
+model Stack {
     items: any
     init() {
         self.items = []
@@ -148,7 +148,7 @@ export model Stack {
     task size() { give len(self.items) }
 }
 
-export model List {
+model List {
     items: any
     init() {
         self.items = []
@@ -198,7 +198,7 @@ export model List {
     }
 }
 
-export model Counter {
+model Counter {
     counts: any
     init() {
         self.counts = {}
@@ -228,6 +228,5 @@ export model Counter {
         out "Counter{" + join(entries, ", ") + "}"
     }
 }
-
 
 

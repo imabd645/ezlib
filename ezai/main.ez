@@ -10,12 +10,12 @@
 # Internal Helpers
 # ----------------------------------------------------------
 
-task _ai_post(url, headers, body)
+export task _ai_post(url, headers, body)
 {
     give http_post(url, to_json(body), headers)
 }
 
-task _ai_safe_parse(raw, label)
+export task _ai_safe_parse(raw, label)
 {
     try
     {
@@ -29,13 +29,13 @@ task _ai_safe_parse(raw, label)
     }
 }
 
-task _starts_with(s, prefix)
+export task _starts_with(s, prefix)
 {
     when len(s) < len(prefix) { give false }
     give substr(s, 0, len(prefix)) == prefix
 }
 
-task _has_error(data)
+export task _has_error(data)
 {
     when type(data) != "dictionary" { give false }
     ks = keys(data)
@@ -50,17 +50,17 @@ task _has_error(data)
 # OpenAI  (gpt-4o-mini, gpt-4o, etc.)
 # ----------------------------------------------------------
 
-task openai(prompt, apiKey)
+export task openai(prompt, apiKey)
 {
     give openai_full(prompt, apiKey, "gpt-4o-mini", nil)
 }
 
-task openai_model(prompt, apiKey, mdl)
+export task openai_model(prompt, apiKey, mdl)
 {
     give openai_full(prompt, apiKey, mdl, nil)
 }
 
-task openai_full(prompt, apiKey, mdl, systemPrompt)
+export task openai_full(prompt, apiKey, mdl, systemPrompt)
 {
     url = "https://api.openai.com/v1/chat/completions"
 
@@ -99,7 +99,7 @@ task openai_full(prompt, apiKey, mdl, systemPrompt)
     }
 }
 
-task _openai_chat(messages, apiKey, mdl)
+export task _openai_chat(messages, apiKey, mdl)
 {
     url = "https://api.openai.com/v1/chat/completions"
     headers = {
@@ -120,17 +120,17 @@ task _openai_chat(messages, apiKey, mdl)
 # DeepSeek  (deepseek-chat, deepseek-reasoner, etc.)
 # ----------------------------------------------------------
 
-task deepseek(prompt, apiKey)
+export task deepseek(prompt, apiKey)
 {
     give deepseek_full(prompt, apiKey, "deepseek-chat", nil)
 }
 
-task deepseek_model(prompt, apiKey, mdl)
+export task deepseek_model(prompt, apiKey, mdl)
 {
     give deepseek_full(prompt, apiKey, mdl, nil)
 }
 
-task deepseek_full(prompt, apiKey, mdl, systemPrompt)
+export task deepseek_full(prompt, apiKey, mdl, systemPrompt)
 {
     url = "https://api.deepseek.com/v1/chat/completions"
 
@@ -169,7 +169,7 @@ task deepseek_full(prompt, apiKey, mdl, systemPrompt)
     }
 }
 
-task _deepseek_chat(messages, apiKey, mdl)
+export task _deepseek_chat(messages, apiKey, mdl)
 {
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
@@ -190,17 +190,17 @@ task _deepseek_chat(messages, apiKey, mdl)
 # Anthropic  (claude-3-5-sonnet, haiku, opus, etc.)
 # ----------------------------------------------------------
 
-task anthropic(prompt, apiKey)
+export task anthropic(prompt, apiKey)
 {
     give anthropic_full(prompt, apiKey, "claude-3-5-sonnet-20241022", nil)
 }
 
-task anthropic_model(prompt, apiKey, mdl)
+export task anthropic_model(prompt, apiKey, mdl)
 {
     give anthropic_full(prompt, apiKey, mdl, nil)
 }
 
-task anthropic_full(prompt, apiKey, mdl, systemPrompt)
+export task anthropic_full(prompt, apiKey, mdl, systemPrompt)
 {
     url = "https://api.anthropic.com/v1/messages"
 
@@ -239,7 +239,7 @@ task anthropic_full(prompt, apiKey, mdl, systemPrompt)
     }
 }
 
-task _anthropic_chat(messages, apiKey, mdl, systemPrompt)
+export task _anthropic_chat(messages, apiKey, mdl, systemPrompt)
 {
     url = "https://api.anthropic.com/v1/messages"
     headers = {
@@ -262,17 +262,17 @@ task _anthropic_chat(messages, apiKey, mdl, systemPrompt)
 # Gemini  (gemini-1.5-flash, gemini-1.5-pro, etc.)
 # ----------------------------------------------------------
 
-task gemini(prompt, apiKey)
+export task gemini(prompt, apiKey)
 {
     give gemini_full(prompt, apiKey, "gemini-1.5-flash", nil)
 }
 
-task gemini_model(prompt, apiKey, mdl)
+export task gemini_model(prompt, apiKey, mdl)
 {
     give gemini_full(prompt, apiKey, mdl, nil)
 }
 
-task gemini_full(prompt, apiKey, mdl, systemPrompt)
+export task gemini_full(prompt, apiKey, mdl, systemPrompt)
 {
     url = "https://generativelanguage.googleapis.com/v1beta/models/" + mdl + ":generateContent?key=" + apiKey
 
@@ -306,7 +306,7 @@ task gemini_full(prompt, apiKey, mdl, systemPrompt)
     }
 }
 
-task _gemini_chat(contents, apiKey, mdl)
+export task _gemini_chat(contents, apiKey, mdl)
 {
     url = "https://generativelanguage.googleapis.com/v1beta/models/" + mdl + ":generateContent?key=" + apiKey
     headers = { "Content-Type": "application/json" }
@@ -324,7 +324,7 @@ task _gemini_chat(contents, apiKey, mdl)
 # ask()  —  Universal one-liner (auto-detects provider by key)
 # ----------------------------------------------------------
 
-task ask(prompt, apiKey)
+export task ask(prompt, apiKey)
 {
     # DeepSeek and OpenAI both use "sk-" prefix.
     # DeepSeek keys contain "sk-" but NOT "sk-proj-" (OpenAI new format).
@@ -335,7 +335,7 @@ task ask(prompt, apiKey)
     give anthropic(prompt, apiKey)
 }
 
-task ask_with_system(prompt, apiKey, systemPrompt)
+export task ask_with_system(prompt, apiKey, systemPrompt)
 {
     when _starts_with(apiKey, "AIza")    { give gemini_full(prompt, apiKey, "gemini-1.5-flash", systemPrompt) }
     when _starts_with(apiKey, "sk-ant-") { give anthropic_full(prompt, apiKey, "claude-3-5-sonnet-20241022", systemPrompt) }
@@ -347,7 +347,7 @@ task ask_with_system(prompt, apiKey, systemPrompt)
 # Chat Sessions  —  Multi-turn conversations
 # ----------------------------------------------------------
 
-task new_chat(provider, apiKey)
+export task new_chat(provider, apiKey)
 {
     give {
         "provider":         provider,
@@ -359,7 +359,7 @@ task new_chat(provider, apiKey)
     }
 }
 
-task new_chat_with_system(provider, apiKey, systemPrompt)
+export task new_chat_with_system(provider, apiKey, systemPrompt)
 {
     chat = new_chat(provider, apiKey)
     chat["system"] = systemPrompt
@@ -378,7 +378,7 @@ task new_chat_with_system(provider, apiKey, systemPrompt)
     give chat
 }
 
-task chat_send(chat, userMessage)
+export task chat_send(chat, userMessage)
 {
     provider = chat["provider"]
     apiKey   = chat["apiKey"]
@@ -420,7 +420,7 @@ task chat_send(chat, userMessage)
     give nil
 }
 
-task chat_set_model(chat, mdl)
+export task chat_set_model(chat, mdl)
 {
     chat["mdl"] = mdl
     give chat
@@ -430,7 +430,7 @@ task chat_set_model(chat, mdl)
 # Utility
 # ----------------------------------------------------------
 
-task _default_model(provider)
+export task _default_model(provider)
 {
     when provider == "deepseek"  { give "deepseek-chat" }
     when provider == "openai"    { give "gpt-4o-mini" }
@@ -440,3 +440,4 @@ task _default_model(provider)
 }
 
 out "[ez-ai] AI library loaded (v1.0.1)"
+

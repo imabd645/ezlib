@@ -347,7 +347,7 @@ task scanDirectory(path, depth) {
     get name in entries {
         fullPath = path + "\\" + name
         when fs.isDir(fullPath) {
-            out indent + "[DIR] " + name + " (" + str(fs.listDir(fullPath).len) + " items)"
+            out indent + "[DIR] " + name + " (" + str(len(fs.listDir(fullPath))) + " items)"
             scanDirectory(fullPath, depth + 1)
         } other {
             sizeBytes = fs.size(fullPath)

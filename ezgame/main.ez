@@ -37,7 +37,7 @@ KEYS = {
     "ENTER": 13
 }
 
-model GUIGame {
+export model GUIGame {
     init(title, width, height) {
         self.title = title
         self.width = width
@@ -151,6 +151,7 @@ model GUIGame {
 }
 
 # Factory function
-task createGame(title, w, h) {
+export task createGame(title, w, h) {
     give GUIGame(title, w, h)
 }
+

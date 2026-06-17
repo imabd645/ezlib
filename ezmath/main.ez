@@ -12,30 +12,30 @@ LN2 = 0.6931471805599453
 LN10 = 2.302585092994046
 
 # --- Conversion ---
-task degToRad(d) { give d * (PI / 180.0) }
-task radToDeg(r) { give r * (180.0 / PI) }
+export task degToRad(d) { give d * (PI / 180.0) }
+export task radToDeg(r) { give r * (180.0 / PI) }
 
 # --- Rounding & Precision ---
-task round(x) {
+export task round(x) {
     when x >= 0 { give floor(x + 0.5) }
     give ceil(x - 0.5)
 }
 
-task trunc(x) { give x > 0 ? floor(x) : ceil(x) }
-task sign(x) { give x > 0 ? 1 : (x < 0 ? -1 : 0) }
-task frac(x) { give x - trunc(x) }
+export task trunc(x) { give x > 0 ? floor(x) : ceil(x) }
+export task sign(x) { give x > 0 ? 1 : (x < 0 ? -1 : 0) }
+export task frac(x) { give x - trunc(x) }
 
 # --- Utilities (Leveraging Built-ins) ---
 # Note: sqrt, pow, abs, floor, ceil are built-ins in EZ
 
 # --- Trigonometry ---
-task factorial(n) {
+export task factorial(n) {
     when n <= 1 { give 1 }
     give n * factorial(n - 1)
 }
 
 # Taylor series for cos
-task cos(x) {
+export task cos(x) {
     p2 = 2 * PI
     while x > PI { x = x - p2 }
     while x < -PI { x = x + p2 }
@@ -52,15 +52,15 @@ task cos(x) {
     give res
 }
 
-task sin(x) { give cos(PI / 2.0 - x) }
-task tan(x) {
+export task sin(x) { give cos(PI / 2.0 - x) }
+export task tan(x) {
     c = cos(x)
     when abs(c) < 0.0000001 { throw "Division by zero in tan()" }
     give sin(x) / c
 }
 
 # Inverse trigonometry (using approximations)
-task asin(x) {
+export task asin(x) {
     # Arcsin using Taylor series: x + x^3/6 + 3x^5/40 + ...
     when x < -1 or x > 1 { throw "Domain error in asin()" }
     when abs(x) > 0.9 {
@@ -79,8 +79,8 @@ task asin(x) {
     give res
 }
 
-task acos(x) { give PI / 2 - asin(x) }
-task atan(x) {
+export task acos(x) { give PI / 2 - asin(x) }
+export task atan(x) {
     # Arctan using Taylor series
     when x == 0 { give 0 }
     when x > 1 { give PI / 2 - atan(1 / x) }
@@ -98,7 +98,7 @@ task atan(x) {
     give res
 }
 
-task atan2(y, x) {
+export task atan2(y, x) {
     when x > 0 { give atan(y / x) }
     when x < 0 and y >= 0 { give atan(y / x) + PI }
     when x < 0 and y < 0 { give atan(y / x) - PI }
@@ -108,22 +108,22 @@ task atan2(y, x) {
 }
 
 # Hyperbolic functions
-task sinh(x) { give (pow(E, x) - pow(E, -x)) / 2 }
-task cosh(x) { give (pow(E, x) + pow(E, -x)) / 2 }
-task tanh(x) { give sinh(x) / cosh(x) }
+export task sinh(x) { give (pow(E, x) - pow(E, -x)) / 2 }
+export task cosh(x) { give (pow(E, x) + pow(E, -x)) / 2 }
+export task tanh(x) { give sinh(x) / cosh(x) }
 
 # Degrees versions
-task cosd(d) { give cos(degToRad(d)) }
-task sind(d) { give sin(degToRad(d)) }
-task tand(d) { give tan(degToRad(d)) }
-task asind(x) { give radToDeg(asin(x)) }
-task acosd(x) { give radToDeg(acos(x)) }
-task atand(x) { give radToDeg(atan(x)) }
-task atan2d(y, x) { give radToDeg(atan2(y, x)) }
+export task cosd(d) { give cos(degToRad(d)) }
+export task sind(d) { give sin(degToRad(d)) }
+export task tand(d) { give tan(degToRad(d)) }
+export task asind(x) { give radToDeg(asin(x)) }
+export task acosd(x) { give radToDeg(acos(x)) }
+export task atand(x) { give radToDeg(atan(x)) }
+export task atan2d(y, x) { give radToDeg(atan2(y, x)) }
 
 # --- Logarithms & Exponentials ---
 # Natural log using Taylor series: ln(1+x) = x - x^2/2 + x^3/3 - ...
-task ln(x) {
+export task ln(x) {
     when x <= 0 { throw "Domain error in ln(): x must be > 0" }
     when x == 1 { give 0 }
     
@@ -151,12 +151,12 @@ task ln(x) {
     give res + n * LN2
 }
 
-task log10(x) { give ln(x) / LN10 }
-task log2(x) { give ln(x) / LN2 }
-task log(b, x) { give ln(x) / ln(b) }
+export task log10(x) { give ln(x) / LN10 }
+export task log2(x) { give ln(x) / LN2 }
+export task log(b, x) { give ln(x) / ln(b) }
 
 # Exponential: e^x using Taylor series
-task exp(x) {
+export task exp(x) {
     # Handle large/small values by scaling
     when x == 0 { give 1 }
     when x < 0 { give 1 / exp(-x) }
@@ -183,9 +183,9 @@ task exp(x) {
 # Linear Congruential Generator (LCG)
 __randSeed = num(clock() * 1000000)
 
-task seedRand(s) { __randSeed = s }
+export task seedRand(s) { __randSeed = s }
 
-task randInt(min, max) {
+export task randInt(min, max) {
     # LCG: seed = (a * seed + c) mod m
     a = 1103515245
     c = 12345
@@ -195,7 +195,7 @@ task randInt(min, max) {
     give min + (__randSeed % range)
 }
 
-task randFloat(min, max) {
+export task randFloat(min, max) {
     a = 1103515245
     c = 12345
     m = 2147483647
@@ -204,9 +204,9 @@ task randFloat(min, max) {
     give min + normalized * (max - min)
 }
 
-task randBool() { give randInt(0, 1) == 1 }
-task randChoice(arr) { give arr[randInt(0, len(arr) - 1)] }
-task randNormal(mean, stddev) {
+export task randBool() { give randInt(0, 1) == 1 }
+export task randChoice(arr) { give arr[randInt(0, len(arr) - 1)] }
+export task randNormal(mean, stddev) {
     # Box-Muller transform for normal distribution
     u1 = randFloat(0, 1)
     u2 = randFloat(0, 1)
@@ -215,7 +215,7 @@ task randNormal(mean, stddev) {
 }
 
 # --- Number Theory ---
-task gcd(a, b) {
+export task gcd(a, b) {
     a = abs(a)
     b = abs(b)
     while b != 0 {
@@ -226,12 +226,12 @@ task gcd(a, b) {
     give a
 }
 
-task lcm(a, b) {
+export task lcm(a, b) {
     when a == 0 or b == 0 { give 0 }
     give abs(a * b) / gcd(a, b)
 }
 
-task isPrime(n) {
+export task isPrime(n) {
     when n < 2 { give false }
     when n == 2 { give true }
     when n % 2 == 0 { give false }
@@ -243,7 +243,7 @@ task isPrime(n) {
     give true
 }
 
-task nextPrime(n) {
+export task nextPrime(n) {
     when n < 2 { give 2 }
     candidate = n + 1
     when candidate % 2 == 0 { candidate = candidate + 1 }
@@ -253,7 +253,7 @@ task nextPrime(n) {
     give candidate
 }
 
-task factors(n) {
+export task factors(n) {
     when n < 1 { give [] }
     result = []
     d = 2
@@ -268,7 +268,7 @@ task factors(n) {
     give result
 }
 
-task fibonacci(n) {
+export task fibonacci(n) {
     when n <= 0 { give 0 }
     when n == 1 { give 1 }
     a = 0
@@ -283,38 +283,38 @@ task fibonacci(n) {
     give b
 }
 
-task isEven(n) { give n % 2 == 0 }
-task isOdd(n) { give n % 2 != 0 }
-task isPowerOf2(n) { give n > 0 and (n & (n - 1)) == 0 }
+export task isEven(n) { give n % 2 == 0 }
+export task isOdd(n) { give n % 2 != 0 }
+export task isPowerOf2(n) { give n > 0 and (n & (n - 1)) == 0 }
 
 # --- Array Math Utilities ---
-task sum(arr) {
+export task sum(arr) {
     total = 0
     get v in arr { total = total + v }
     give total
 }
 
-task product(arr) {
+export task product(arr) {
     total = 1
     get v in arr { total = total * v }
     give total
 }
 
-task min(arr) {
+export task min(arr) {
     when len(arr) == 0 { throw "min() on empty array" }
     m = arr[0]
     get v in arr { when v < m { m = v } }
     give m
 }
 
-task max(arr) {
+export task max(arr) {
     when len(arr) == 0 { throw "max() on empty array" }
     m = arr[0]
     get v in arr { when v > m { m = v } }
     give m
 }
 
-task minMax(arr) {
+export task minMax(arr) {
     when len(arr) == 0 { throw "minMax() on empty array" }
     mn = arr[0]
     mx = arr[0]
@@ -325,76 +325,76 @@ task minMax(arr) {
     give {"min": mn, "max": mx}
 }
 
-task average(arr) { give sum(arr) / len(arr) }
-task range(arr) { mm = minMax(arr)
+export task average(arr) { give sum(arr) / len(arr) }
+export task range(arr) { mm = minMax(arr)
  give mm["max"] - mm["min"] }
 
 # --- Interpolation & Easing ---
 # Linear interpolation (already had clamp and lerp)
-task smoothstep(edge0, edge1, x) {
+export task smoothstep(edge0, edge1, x) {
     t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
     give t * t * (3 - 2 * t)
 }
 
-task smootherstep(edge0, edge1, x) {
+export task smootherstep(edge0, edge1, x) {
     t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
     give t * t * t * (t * (t * 6 - 15) + 10)
 }
 
-task step(edge, x) { give x < edge ? 0 : 1 }
+export task step(edge, x) { give x < edge ? 0 : 1 }
 
 # Easing functions
-task easeInQuad(t) { give t * t }
-task easeOutQuad(t) { give 1 - (1 - t) * (1 - t) }
-task easeInOutQuad(t) {
+export task easeInQuad(t) { give t * t }
+export task easeOutQuad(t) { give 1 - (1 - t) * (1 - t) }
+export task easeInOutQuad(t) {
     when t < 0.5 { give 2 * t * t }
     give 1 - pow(-2 * t + 2, 2) / 2
 }
 
-task easeInCubic(t) { give t * t * t }
-task easeOutCubic(t) { give 1 - pow(1 - t, 3) }
-task easeInOutCubic(t) {
+export task easeInCubic(t) { give t * t * t }
+export task easeOutCubic(t) { give 1 - pow(1 - t, 3) }
+export task easeInOutCubic(t) {
     when t < 0.5 { give 4 * t * t * t }
     give 1 - pow(-2 * t + 2, 3) / 2
 }
 
-task easeInSine(t) { give 1 - cos((t * PI) / 2) }
-task easeOutSine(t) { give sin((t * PI) / 2) }
-task easeInOutSine(t) { give -(cos(PI * t) - 1) / 2 }
+export task easeInSine(t) { give 1 - cos((t * PI) / 2) }
+export task easeOutSine(t) { give sin((t * PI) / 2) }
+export task easeInOutSine(t) { give -(cos(PI * t) - 1) / 2 }
 
 # Map value from one range to another
-task map(value, inMin, inMax, outMin, outMax) {
+export task map(value, inMin, inMax, outMin, outMax) {
     give outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin)
 }
 
 # Wrap angle to [-PI, PI]
-task wrapAngle(angle) {
+export task wrapAngle(angle) {
     while angle > PI { angle = angle - 2 * PI }
     while angle < -PI { angle = angle + 2 * PI }
     give angle
 }
 
 # --- Distance Functions ---
-task dist2D(x1, y1, x2, y2) {
+export task dist2D(x1, y1, x2, y2) {
     dx = x2 - x1
     dy = y2 - y1
     give sqrt(dx * dx + dy * dy)
 }
 
-task dist3D(x1, y1, z1, x2, y2, z2) {
+export task dist3D(x1, y1, z1, x2, y2, z2) {
     dx = x2 - x1
     dy = y2 - y1
     dz = z2 - z1
     give sqrt(dx * dx + dy * dy + dz * dz)
 }
 
-task manhattan2D(x1, y1, x2, y2) {
+export task manhattan2D(x1, y1, x2, y2) {
     give abs(x2 - x1) + abs(y2 - y1)
 }
 
 # --- Models ---
 
-model Vector2 {
+export model Vector2 {
     init(x, y) {
         self.x = x
         self.y = y
@@ -435,7 +435,7 @@ model Vector2 {
     }
 }
 
-model Vector3 {
+export model Vector3 {
     init(x, y, z) {
         self.x = x
         self.y = y
@@ -481,7 +481,7 @@ model Vector3 {
     }
 }
 
-model Matrix2x2 {
+export model Matrix2x2 {
     init(m00, m01, m10, m11) {
         self.m00 = m00
          self.m01 = m01
@@ -502,7 +502,7 @@ model Matrix2x2 {
     }
 }
 
-model Statistics {
+export model Statistics {
     init(data) {
         self.data = data
     }
@@ -651,128 +651,42 @@ model Statistics {
 }
 
 # --- Helpers ---
-task clamp(v, minV, maxV) {
+export task clamp(v, minV, maxV) {
     when v < minV { give minV }
     when v > maxV { give maxV }
     give v
 }
 
-task lerp(a, b, t) {
+export task lerp(a, b, t) {
     give a + (b - a) * clamp(t, 0, 1)
 }
 
 # Angle conversions
-task degToGrad(d) { give d * 10 / 9 }
-task gradToDeg(g) { give g * 9 / 10 }
-task radToGrad(r) { give radToDeg(r) * 10 / 9 }
-task gradToRad(g) { give degToRad(g * 9 / 10) }
+export task degToGrad(d) { give d * 10 / 9 }
+export task gradToDeg(g) { give g * 9 / 10 }
+export task radToGrad(r) { give radToDeg(r) * 10 / 9 }
+export task gradToRad(g) { give degToRad(g * 9 / 10) }
 
 # Utility
-task nearlyEqual(a, b, epsilon) {
+export task nearlyEqual(a, b, epsilon) {
     when not epsilon { epsilon = 0.000001 }
     give abs(a - b) < epsilon
 }
 
-task isFinite(x) { give x == x and abs(x) != 1 / 0 }
-task isNaN(x) { give x != x }
+export task isFinite(x) { give x == x and abs(x) != 1 / 0 }
+export task isNaN(x) { give x != x }
 
 # Angle between two points
-task angleBetween(x1, y1, x2, y2) {
+export task angleBetween(x1, y1, x2, y2) {
     give atan2(y2 - y1, x2 - x1)
 }
 
 # Point on circle
-task pointOnCircle(cx, cy, radius, angleRad) {
+export task pointOnCircle(cx, cy, radius, angleRad) {
     give {
         "x": cx + radius * cos(angleRad),
         "y": cy + radius * sin(angleRad)
     }
 }
 
-# --- Main math object ---
-math = {}
-math["PI"] = PI
-math["E"] = E
-math["PHI"] = PHI
-math["SQRT2"] = SQRT2
-math["LN2"] = LN2
-math["LN10"] = LN10
 
-# Trig
-math["sin"] = sin
-math["cos"] = cos
-math["tan"] = tan
-math["asin"] = asin
-math["acos"] = acos
-math["atan"] = atan
-math["atan2"] = atan2
-math["sinh"] = sinh
-math["cosh"] = cosh
-math["tanh"] = tanh
-math["sind"] = sind
-math["cosd"] = cosd
-math["tand"] = tand
-math["asind"] = asind
-math["acosd"] = acosd
-math["atand"] = atand
-math["atan2d"] = atan2d
-
-# Logs
-math["ln"] = ln
-math["log"] = log
-math["log10"] = log10
-math["log2"] = log2
-math["exp"] = exp
-
-# Random
-math["randInt"] = randInt
-math["randFloat"] = randFloat
-math["randBool"] = randBool
-math["randChoice"] = randChoice
-math["randNormal"] = randNormal
-math["seedRand"] = seedRand
-
-# Number theory
-math["gcd"] = gcd
-math["lcm"] = lcm
-math["isPrime"] = isPrime
-math["nextPrime"] = nextPrime
-math["factors"] = factors
-math["fibonacci"] = fibonacci
-math["isEven"] = isEven
-math["isOdd"] = isOdd
-math["isPowerOf2"] = isPowerOf2
-
-# Array utilities
-math["sum"] = sum
-math["product"] = product
-math["min"] = min
-math["max"] = max
-math["minMax"] = minMax
-math["average"] = average
-math["range"] = range
-
-# Helpers
-math["clamp"] = clamp
-math["lerp"] = lerp
-math["smoothstep"] = smoothstep
-math["smootherstep"] = smootherstep
-math["step"] = step
-math["map"] = map
-math["wrapAngle"] = wrapAngle
-math["round"] = round
-math["trunc"] = trunc
-math["sign"] = sign
-math["frac"] = frac
-
-# Models
-math["Vector2"] = Vector2
-math["Vector3"] = Vector3
-math["Matrix2x2"] = Matrix2x2
-math["Statistics"] = Statistics
-
-# Global exports
-vec2 = Vector2
-vec3 = Vector3
-mat2 = Matrix2x2
-stats = |data| { give Statistics(data) }

@@ -1,7 +1,7 @@
 // Database Library (Pure EZ FFI)
 // Wraps libsqlite3-0.dll for production-grade database manipulation
 
-model DbStatement {
+export model DbStatement {
     init(db, handle) {
         self.db = db
         self.handle = handle
@@ -87,7 +87,7 @@ model DbStatement {
     }
 }
 
-model Database {
+export model Database {
     init(path) {
         self.lib = os_load_lib("sqlite3.dll")
         when self.lib == 0 or type(self.lib) == "nil" {
@@ -236,3 +236,4 @@ model Database {
         }
     }
 }
+

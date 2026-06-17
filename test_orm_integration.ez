@@ -1,0 +1,42 @@
+use "ezorm" as ezorm
+
+model User {
+    id: int
+    name: string
+    age: int
+}
+
+# Create db
+db = ezorm.ORM("test_orm.db")
+
+# Register
+users = db.register(User)
+
+# Insert
+u = User()
+u.name = "Alice"
+u.age = 25
+users.save(u)
+out "Inserted user with id: " + str(u.id)
+
+u2 = User()
+u2.name = "Bob"
+u2.age = 30
+users.save(u2)
+
+# Query all
+allUsers = users.all()
+out "All users:"
+get user in allUsers {
+    out " - " + str(user.name) + " (Age: " + str(user.age) + ")"
+}
+
+# Update
+alice = users.findById(1)
+alice.age = 26
+users.save(alice)
+
+out "Updated Alice's age to " + str(users.findById(1).age)
+
+# Cleanup
+db.close()

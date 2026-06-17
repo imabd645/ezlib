@@ -23,7 +23,7 @@ guiColors = {
 # Widget — Base class for all GUI elements
 # ============================================================================
 
-model Widget {
+export model Widget {
     init() {}
 
     task setup(h) {
@@ -142,11 +142,11 @@ model Widget {
 # Leaf Widget Classes
 # ============================================================================
 
-model Label extends Widget {
+export model Label extends Widget {
     init(h) { self.setup(h) }
 }
 
-model Button extends Widget {
+export model Button extends Widget {
     init(h) { self.setup(h) }
     task click(cb) {
         gui_set_callback(self.handle, cb)
@@ -154,17 +154,17 @@ model Button extends Widget {
     }
 }
 
-model Input extends Widget {
+export model Input extends Widget {
     init(h) { self.setup(h) }
     task onTextChange(cb) { give self.on("change", cb) }
 }
 
-model TextArea extends Widget {
+export model TextArea extends Widget {
     init(h) { self.setup(h) }
     task onTextChange(cb) { give self.on("change", cb) }
 }
 
-model Dropdown extends Widget {
+export model Dropdown extends Widget {
     init(h) { self.setup(h) }
     task add(item) {
         gui_add_dropdown_item(self.handle, item)
@@ -179,7 +179,7 @@ model Dropdown extends Widget {
     }
 }
 
-model Checkbox extends Widget {
+export model Checkbox extends Widget {
     init(h) { self.setup(h) }
     task checked() {
         give gui_get_checked(self.handle) == 1
@@ -195,7 +195,7 @@ model Checkbox extends Widget {
     }
 }
 
-model Radio extends Widget {
+export model Radio extends Widget {
     init(h) { self.setup(h) }
     task selected() {
         give gui_get_checked(self.handle) == 1
@@ -210,7 +210,7 @@ model Radio extends Widget {
     }
 }
 
-model Slider extends Widget {
+export model Slider extends Widget {
     init(h) { self.setup(h) }
     task value() {
         give gui_get_slider(self.handle)
@@ -225,7 +225,7 @@ model Slider extends Widget {
     }
 }
 
-model ProgressBar extends Widget {
+export model ProgressBar extends Widget {
     init(h) { self.setup(h) }
     task setValue(v) {
         gui_set_progress(self.handle, v)
@@ -237,7 +237,7 @@ model ProgressBar extends Widget {
     }
 }
 
-model ListView extends Widget {
+export model ListView extends Widget {
     init(h) { self.setup(h) }
     task addColumn(text, width) {
         gui_listview_add_column(self.handle, text, width)
@@ -264,7 +264,7 @@ model ListView extends Widget {
     task onChange(cb) { give self.on("change", cb) }
 }
 
-model TreeView extends Widget {
+export model TreeView extends Widget {
     init(h) { self.setup(h) }
     task add(parentHandle, text) {
         give gui_treeview_add(self.handle, parentHandle, text)
@@ -280,7 +280,7 @@ model TreeView extends Widget {
     task onChange(cb) { give self.on("change", cb) }
 }
 
-model DatePicker extends Widget {
+export model DatePicker extends Widget {
     init(h) { self.setup(h) }
     task value() {
         give gui_datepicker_get(self.handle)
@@ -293,7 +293,7 @@ model DatePicker extends Widget {
     task onChange(cb) { give self.on("change", cb) }
 }
 
-model Spinner extends Widget {
+export model Spinner extends Widget {
     init(h) { self.setup(h) }
     task value() {
         give gui_spinner_get(self.handle)
@@ -304,7 +304,7 @@ model Spinner extends Widget {
     }
 }
 
-model Image extends Widget {
+export model Image extends Widget {
     init(h) { self.setup(h) }
     task load(path) {
         gui_set_image(self.handle, path)
@@ -312,7 +312,7 @@ model Image extends Widget {
     }
 }
 
-model Tabs extends Widget {
+export model Tabs extends Widget {
     init(h) { self.setup(h) }
     task add(name) {
         gui_add_tab(self.handle, name)
@@ -327,15 +327,15 @@ model Tabs extends Widget {
     }
 }
 
-model GroupBox extends Widget {
+export model GroupBox extends Widget {
     init(h) { self.setup(h) }
 }
 
-model Separator extends Widget {
+export model Separator extends Widget {
     init(h) { self.setup(h) }
 }
 
-model Toolbar extends Widget {
+export model Toolbar extends Widget {
     init(h) { self.setup(h) }
     task addButton(text, cb) {
         gui_add_toolbar_button(self.handle, text, cb)
@@ -343,7 +343,7 @@ model Toolbar extends Widget {
     }
 }
 
-model StatusBar extends Widget {
+export model StatusBar extends Widget {
     init(h) { self.setup(h) }
     task setText(text) {
         gui_set_status_text(self.handle, text)
@@ -355,7 +355,7 @@ model StatusBar extends Widget {
 # Menu System
 # ============================================================================
 
-model Menu {
+export model Menu {
     init(h) { self.handle = h }
 
     task item(text, cb) {
@@ -374,7 +374,7 @@ model Menu {
     }
 }
 
-model MenuBar {
+export model MenuBar {
     init(h) { self.handle = h }
 
     task addMenu(text) {
@@ -382,7 +382,7 @@ model MenuBar {
     }
 }
 
-model ContextMenu {
+export model ContextMenu {
     init() { self.handle = gui_create_context_menu() }
 
     task item(text, cb) {
@@ -405,7 +405,7 @@ model ContextMenu {
 # ContainerWidget — Shared factory methods (eliminates Window/Panel duplication)
 # ============================================================================
 
-model ContainerWidget extends Widget {
+export model ContainerWidget extends Widget {
     init() {}
 
     task label(text, x, y, w, h) {
@@ -476,11 +476,11 @@ model ContainerWidget extends Widget {
 # Panel — Child container (inherits all ContainerWidget factories)
 # ============================================================================
 
-model Panel extends ContainerWidget {
+export model Panel extends ContainerWidget {
     init(h) { self.setup(h) }
 }
 
-model ScrollPanel extends Panel {
+export model ScrollPanel extends Panel {
     init(h) { self.setup(h) }
     task contentSize(w, h) {
         gui_set_scroll_range(self.handle, w, h)
@@ -492,7 +492,7 @@ model ScrollPanel extends Panel {
 # Window — Top-level window (inherits all ContainerWidget factories)
 # ============================================================================
 
-model Window extends ContainerWidget {
+export model Window extends ContainerWidget {
     init(title, width, height) {
         self.handle = gui_create_window(title, width, height)
     }
@@ -550,7 +550,7 @@ model Window extends ContainerWidget {
 # VBox — Vertical stack layout manager
 # ============================================================================
 
-model VBox {
+export model VBox {
     init(win, p) {
         self.win = win
         self.p   = p
@@ -651,7 +651,7 @@ model VBox {
 # HBox — Horizontal stack layout manager
 # ============================================================================
 
-model HBox {
+export model HBox {
     init(win, p) {
         self.win = win
         self.p   = p
@@ -704,7 +704,7 @@ model HBox {
 # Grid — Column-based grid layout manager
 # ============================================================================
 
-model Grid {
+export model Grid {
     init(win, cols, padX, padY) {
         self.win       = win
         self.cols      = cols
@@ -760,48 +760,4 @@ model Grid {
 
 # ============================================================================
 # Global gui entry point
-# ============================================================================
 
-gui = {
-    "window": |t, w, h| {
-        give Window(t, w, h)
-    },
-    "alert": |t, m| {
-        when not m { gui_alert("EZ", t) } other { gui_alert(t, m) }
-    },
-    "setTheme": |name| {
-        gui_set_theme(name)
-        when name == "neon" {
-            guiColors["dark"]  = [20,  20,  30 ]
-            guiColors["neon"]  = [0,   255, 255]
-            guiColors["light"] = [180, 255, 255]
-        }
-        when name == "retro" {
-            guiColors["dark"]  = [50,  40,  30 ]
-            guiColors["neon"]  = [255, 100, 0  ]
-            guiColors["light"] = [255, 220, 150]
-        }
-        when name == "ocean" {
-            guiColors["dark"]  = [10,  30,  50 ]
-            guiColors["neon"]  = [0,   150, 255]
-            guiColors["light"] = [200, 240, 255]
-        }
-    },
-    "contextMenu": || {
-        give ContextMenu()
-    },
-    "dialog": {
-        "confirm":    |t, m| { give gui_dialog_confirm(t, m) },
-        "input":      |t, m| { give gui_dialog_input(t, m) },
-        "openFile":   |t, f| {
-            when not f { f = "*.*" }
-            give gui_dialog_open_file(t, f)
-        },
-        "saveFile":   |t, f| {
-            when not f { f = "*.*" }
-            give gui_dialog_save_file(t, f)
-        },
-        "openFolder": ||  { give gui_dialog_open_folder() },
-        "colorPicker":||  { give gui_dialog_color_picker() }
-    }
-}
