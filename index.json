@@ -417,29 +417,6 @@
       ]
     },
     {
-      "name": "serve",
-      "folder": "ezserve",
-      "description": "Flask/Express style web framework for EZ — production-hardened HTTP server via raw Winsock2 FFI with zero C++ networking dependencies. Features: Slowloris protection (5s SO_RCVTIMEO), backpressure limits (1024 connections), 10MB payload cap, RFC-compliant CRLF header parsing, case-insensitive headers, URL decode, form body parsing, static file serving with MIME detection, per-request spawn threading, and full HTTP status map including 418",
-      "author": "EZ Development Team",
-      "license": "MIT",
-      "keywords": ["web", "server", "http", "framework", "rest", "api", "winsock", "ffi", "routing", "ddos"],
-      "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
-      "versions": [
-        {
-          "version": "1.0.0",
-          "main": "main.ez",
-          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
-          "subfolder": "ezserve",
-          "sha256": "",
-          "dependencies": {
-            "fs": "*"
-          },
-          "exports": ["App", "NetFFI", "NetUtils"]
-        }
-      ]
-    },
-    {
       "name": "test",
       "folder": "eztest",
       "description": "Production-ready unit testing framework for EZ — 15 assertion functions (assert, assertEqual, assertDeepEqual, assertThrows, assertDoesNotThrow, assertType, assertApproxEqual, assertGreaterThan, assertLessThan, assertContains, assertInArray, etc.), test suites with before/after hooks, Spy/Mock system, and colored terminal reporting",
