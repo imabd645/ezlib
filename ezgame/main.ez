@@ -96,12 +96,14 @@ export model GUIGame {
         
         # 1. Update Game State
         when self.onUpdateCb != nil {
-            self.onUpdateCb(dt)
+            cbUpdate = self.onUpdateCb
+            cbUpdate(dt)
         }
         
         # 2. Render
         when self.onDrawCb != nil {
-            self.onDrawCb()
+            cbDraw = self.onDrawCb
+            cbDraw()
         }
     }
 
