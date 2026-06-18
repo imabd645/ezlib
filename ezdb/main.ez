@@ -1,5 +1,8 @@
-// Database Library (Pure EZ FFI)
-// Wraps libsqlite3-0.dll for production-grade database manipulation
+// ============================================================================
+// Database Library (Pure EZ FFI) v2.0
+// Wraps libsqlite3-0.dll for production-grade database manipulation.
+// Added: Schema introspection, WAL, batch execution, and backups.
+// ============================================================================
 
 export model DbStatement {
     init(db, handle) {
@@ -131,6 +134,11 @@ export model Database {
         self.lastInsertId  = os_get_func(self.lib, "sqlite3_last_insert_rowid")
         self.changesApi    = os_get_func(self.lib, "sqlite3_changes")
 
+        // --- Backup API ---
+        self.backupInit    = os_get_func(self.lib, "sqlite3_backup_init")
+        self.backupStep    = os_get_func(self.lib, "sqlite3_backup_step")
+        self.backupFinish  = os_get_func(self.lib, "sqlite3_backup_finish")
+
         // Open Database
         outPtr = os_alloc(8)
         rc = os_call(self.openApi, "int", path, outPtr)
@@ -186,6 +194,26 @@ export model Database {
         give true
     }
 
+    task executeBatch(sql, paramsList) {
+        stmt = self.prepareStatement(sql)
+        self.begin()
+        try {
+            get params in paramsList {
+                stmt.bind(params)
+                stmt.step()
+                stmt.reset()
+                stmt.clearBindings()
+            }
+            self.commit()
+        } catch e {
+            self.rollback()
+            stmt.finalize()
+            throw e
+        }
+        stmt.finalize()
+        give true
+    }
+
     task lastRowId() {
         give os_call(self.lastInsertId, "int", self.handle)
     }
@@ -229,6 +257,49 @@ export model Database {
         give nil
     }
 
+    task tableExists(tableName) {
+        sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
+        res = self.fetchScalar(sql, [tableName])
+        give res != nil
+    }
+
+    task getColumns(tableName) {
+        // PRAGMA table_info does not support parameterized binding for the table name
+        res = self.query("PRAGMA table_info(" + tableName + ")", nil)
+        cols = []
+        get row in res {
+            push(cols, row["name"])
+        }
+        give cols
+    }
+
+    task enableWAL() {
+        self.execute("PRAGMA journal_mode=WAL;", nil)
+        give self
+    }
+
+    task backup(destPath) {
+        // Open destination DB
+        outPtr = os_alloc(8)
+        rc = os_call(self.openApi, "int", destPath, outPtr)
+        destHandle = os_read_uint64(outPtr, 0)
+        os_free(outPtr)
+        
+        when rc != 0 { throw "Backup Error: Could not open destination DB" }
+        
+        // Init backup: pDest, zDestName, pSource, zSourceName
+        pBackup = os_call(self.backupInit, "int", destHandle, "main", self.handle, "main")
+        
+        when pBackup != 0 {
+            // Step with -1 copies the whole database
+            os_call(self.backupStep, "int", pBackup, -1)
+            os_call(self.backupFinish, "int", pBackup)
+        }
+        
+        os_call(self.closeApi, "int", destHandle)
+        give pBackup != 0
+    }
+
     task close() {
         when self.handle {
             os_call(self.closeApi, "int", self.handle)
@@ -236,4 +307,3 @@ export model Database {
         }
     }
 }
-

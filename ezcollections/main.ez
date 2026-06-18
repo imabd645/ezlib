@@ -1,7 +1,13 @@
-// ============================================================================
-// COLLECTIONS - Data Structures Library for EZ Language (v2.0)
-// Modernized using Model system and inclusive loops
-// ============================================================================
+# ============================================================================
+# COLLECTIONS - Data Structures Library for EZ Language (v3.0)
+# Features: Set, Map, Queue, Stack, List, Counter, LinkedList, Deque, PriorityQueue
+# Fixes: O(1) Queue/Deque operations, Set key collisions fixed, Set operations
+# ============================================================================
+
+# Helper to generate unique key to prevent 1 vs "1" collisions
+task _key(val) {
+    give type(val) + ":" + str(val)
+}
 
 export model Set {
     data: any
@@ -10,16 +16,16 @@ export model Set {
     }
     
     task add(val) {
-        self.data[str(val)] = val
+        self.data[_key(val)] = val
         give self
     }
     
     task has(val) {
-        give has_key(self.data, str(val))
+        give has_key(self.data, _key(val))
     }
     
     task remove(val) {
-        dictRemove(self.data, str(val))
+        dictRemove(self.data, _key(val))
         give self
     }
     
@@ -40,6 +46,30 @@ export model Set {
         give arr
     }
     
+    # --- Set Operations ---
+    task union(otherSet) {
+        res = Set()
+        get val in self.toArray() { res.add(val) }
+        get val in otherSet.toArray() { res.add(val) }
+        give res
+    }
+    
+    task intersection(otherSet) {
+        res = Set()
+        get val in self.toArray() {
+            when otherSet.has(val) { res.add(val) }
+        }
+        give res
+    }
+    
+    task difference(otherSet) {
+        res = Set()
+        get val in self.toArray() {
+            when not otherSet.has(val) { res.add(val) }
+        }
+        give res
+    }
+    
     task print() {
         out "Set{" + join(self.toArray(), ", ") + "}"
     }
@@ -52,20 +82,24 @@ export model Map {
     }
     
     task set(key, val) {
-        self.data[str(key)] = val
+        self.data[_key(key)] = { "k": key, "v": val }
         give self
     }
     
     task get(key) {
-        give self.data[str(key)]
+        k = _key(key)
+        when has_key(self.data, k) {
+            give self.data[k]["v"]
+        }
+        give nil
     }
     
     task has(key) {
-        give has_key(self.data, str(key))
+        give has_key(self.data, _key(key))
     }
     
     task remove(key) {
-        dictRemove(self.data, str(key))
+        dictRemove(self.data, _key(key))
         give self
     }
     
@@ -75,51 +109,262 @@ export model Map {
     
     task keys() {
         ks = []
-        get k in self.data { push(ks, k) }
+        get entry in self.data { push(ks, self.data[entry]["k"]) }
         give ks
     }
     
     task values() {
         vs = []
-        get k in self.data { push(vs, self.data[k]) }
+        get entry in self.data { push(vs, self.data[entry]["v"]) }
         give vs
+    }
+
+    task merge(otherMap) {
+        res = Map()
+        get k in self.keys() { res.set(k, self.get(k)) }
+        get k in otherMap.keys() { res.set(k, otherMap.get(k)) }
+        give res
     }
 }
 
+# Node for LinkedList
+export model ListNode {
+    val: any
+    next: any
+    prev: any
+    init(val) {
+        self.val = val
+        self.next = nil
+        self.prev = nil
+    }
+}
+
+# Doubly Linked List
+export model LinkedList {
+    head: any
+    tail: any
+    _size: any
+    
+    init() {
+        self.head = nil
+        self.tail = nil
+        self._size = 0
+    }
+    
+    task append(val) {
+        node = ListNode(val)
+        when self._size == 0 {
+            self.head = node
+            self.tail = node
+        } other {
+            self.tail.next = node
+            node.prev = self.tail
+            self.tail = node
+        }
+        self._size = self._size + 1
+        give self
+    }
+    
+    task prepend(val) {
+        node = ListNode(val)
+        when self._size == 0 {
+            self.head = node
+            self.tail = node
+        } other {
+            node.next = self.head
+            self.head.prev = node
+            self.head = node
+        }
+        self._size = self._size + 1
+        give self
+    }
+    
+    task removeFirst() {
+        when self._size == 0 { give nil }
+        val = self.head.val
+        self.head = self.head.next
+        when self.head {
+            self.head.prev = nil
+        } other {
+            self.tail = nil
+        }
+        self._size = self._size - 1
+        give val
+    }
+    
+    task removeLast() {
+        when self._size == 0 { give nil }
+        val = self.tail.val
+        self.tail = self.tail.prev
+        when self.tail {
+            self.tail.next = nil
+        } other {
+            self.head = nil
+        }
+        self._size = self._size - 1
+        give val
+    }
+    
+    task size() { give self._size }
+    task isEmpty() { give self._size == 0 }
+    
+    task toArray() {
+        arr = []
+        curr = self.head
+        while curr {
+            push(arr, curr.val)
+            curr = curr.next
+        }
+        give arr
+    }
+}
+
+# Deque (Double-Ended Queue) based on LinkedList for O(1) operations
+export model Deque {
+    list: any
+    init() {
+        self.list = LinkedList()
+    }
+    
+    task addFront(val) { self.list.prepend(val) give self }
+    task addBack(val)  { self.list.append(val) give self }
+    task removeFront() { give self.list.removeFirst() }
+    task removeBack()  { give self.list.removeLast() }
+    
+    task peekFront() { 
+        when self.list.head { give self.list.head.val }
+        give nil
+    }
+    
+    task peekBack() {
+        when self.list.tail { give self.list.tail.val }
+        give nil
+    }
+    
+    task isEmpty() { give self.list.isEmpty() }
+    task size() { give self.list.size() }
+}
+
+# Queue using dictionary index logic for O(1) operations
 export model Queue {
     items: any
+    headIdx: any
+    tailIdx: any
+    
     init() {
-        self.items = []
+        self.items = {}
+        self.headIdx = 0
+        self.tailIdx = 0
     }
     
     task enqueue(val) {
-        push(self.items, val)
+        self.items[str(self.tailIdx)] = val
+        self.tailIdx = self.tailIdx + 1
         give self
     }
     
     task dequeue() {
-        when len(self.items) == 0 { give nil }
-        val = self.items[0]
-        newItems = []
-        when len(self.items) > 1 {
-            repeat i = 1 to len(self.items) - 1 {
-                push(newItems, self.items[i])
-            }
-        }
-        self.items = newItems
+        when self.headIdx == self.tailIdx { give nil }
+        val = self.items[str(self.headIdx)]
+        dictRemove(self.items, str(self.headIdx))
+        self.headIdx = self.headIdx + 1
         give val
     }
     
     task peek() {
-        when len(self.items) == 0 { give nil }
-        give self.items[0]
+        when self.headIdx == self.tailIdx { give nil }
+        give self.items[str(self.headIdx)]
     }
     
-    task isEmpty() { give len(self.items) == 0 }
-    task size() { give len(self.items) }
+    task isEmpty() { give self.headIdx == self.tailIdx }
+    task size() { give self.tailIdx - self.headIdx }
     
     task print() {
-        out "Queue[" + join(self.items, " <- ") + "]"
+        arr = []
+        repeat i = self.headIdx to self.tailIdx - 1 {
+            push(arr, self.items[str(i)])
+        }
+        out "Queue[" + join(arr, " <- ") + "]"
+    }
+}
+
+# PriorityQueue using a binary heap (Min-Heap by default)
+export model PriorityQueue {
+    heap: any
+    comparator: any
+    
+    # Provide a custom comparator function |a, b| -> a < b (returns true if 'a' has higher priority)
+    init(comparator) {
+        self.heap = []
+        when comparator {
+            self.comparator = comparator
+        } other {
+            self.comparator = |a, b| { give a < b }
+        }
+    }
+    
+    task enqueue(val) {
+        push(self.heap, val)
+        self._siftUp(len(self.heap) - 1)
+        give self
+    }
+    
+    task dequeue() {
+        when len(self.heap) == 0 { give nil }
+        when len(self.heap) == 1 { give pop(self.heap) }
+        
+        root = self.heap[0]
+        self.heap[0] = pop(self.heap)
+        self._siftDown(0)
+        give root
+    }
+    
+    task peek() {
+        when len(self.heap) == 0 { give nil }
+        give self.heap[0]
+    }
+    
+    task isEmpty() { give len(self.heap) == 0 }
+    task size() { give len(self.heap) }
+    
+    task _siftUp(idx) {
+        while idx > 0 {
+            parentIdx = (idx - 1) / 2
+            when self.comparator(self.heap[idx], self.heap[parentIdx]) {
+                # Swap
+                temp = self.heap[idx]
+                self.heap[idx] = self.heap[parentIdx]
+                self.heap[parentIdx] = temp
+                idx = parentIdx
+            } other {
+                escape
+            }
+        }
+    }
+    
+    task _siftDown(idx) {
+        length = len(self.heap)
+        while true {
+            leftIdx = 2 * idx + 1
+            rightIdx = 2 * idx + 2
+            smallest = idx
+            
+            when leftIdx < length and self.comparator(self.heap[leftIdx], self.heap[smallest]) {
+                smallest = leftIdx
+            }
+            when rightIdx < length and self.comparator(self.heap[rightIdx], self.heap[smallest]) {
+                smallest = rightIdx
+            }
+            
+            when smallest != idx {
+                temp = self.heap[idx]
+                self.heap[idx] = self.heap[smallest]
+                self.heap[smallest] = temp
+                idx = smallest
+            } other {
+                escape
+            }
+        }
     }
 }
 
@@ -160,6 +405,7 @@ export model List {
     }
     
     task prepend(val) {
+        # O(n) operation in Array List
         newItems = [val]
         get it in self.items { push(newItems, it) }
         self.items = newItems
@@ -173,11 +419,12 @@ export model List {
     
     task remove(index) {
         when index < 0 or index >= len(self.items) { give self }
-        newPoints = []
+        # O(n) operation in Array List
+        newItems = []
         repeat i = 0 to len(self.items) - 1 {
-            when i != index { push(newPoints, self.items[i]) }
+            when i != index { push(newItems, self.items[i]) }
         }
-        self.items = newPoints
+        self.items = newItems
         give self
     }
     
@@ -205,29 +452,26 @@ export model Counter {
     }
     
     task add(item) {
-        key = str(item)
+        key = _key(item)
         when has_key(self.counts, key) {
-            self.counts[key] = self.counts[key] + 1
+            self.counts[key]["c"] = self.counts[key]["c"] + 1
         } other {
-            self.counts[key] = 1
+            self.counts[key] = { "k": item, "c": 1 }
         }
         give self
     }
     
     task get(item) {
-        key = str(item)
-        when has_key(self.counts, key) { give self.counts[key] }
+        key = _key(item)
+        when has_key(self.counts, key) { give self.counts[key]["c"] }
         give 0
     }
     
     task print() {
         entries = []
         get k in self.counts {
-            push(entries, k + ": " + str(self.counts[k]))
+            push(entries, str(self.counts[k]["k"]) + ": " + str(self.counts[k]["c"]))
         }
         out "Counter{" + join(entries, ", ") + "}"
     }
 }
-
-
-
