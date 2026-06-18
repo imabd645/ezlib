@@ -1,436 +1,370 @@
-# ezcrypto — Cryptography Library for EZ
+# crypto — EZ Cryptography Library (v2.0)
 
-> **Version:** 1.0  
-> **Import:** `use "ezcrypto"`  
-> **File:** `E:\ezlib\ezcrypto\main.ez`
+A comprehensive cryptography library for EZ built on Windows CryptoAPI (Advapi32) and BCrypt. Provides real AES encryption, SHA hashing, HMAC, PBKDF2 key derivation, cryptographically secure random, UUID generation, and Base64 encoding — all through a clean, simple API.
 
 ---
 
-## Overview
+## Installation
 
-`ezcrypto` provides cryptographic primitives implemented in pure EZ using the language's native bitwise operators. It includes:
+```ez
+use "crypto"
+```
 
-- **Base64** encoding and decoding (RFC 4648 compliant)
-- **RC4** stream cipher (symmetric encryption/decryption)
-- **Crypto** facade model (convenient static interface)
-
-All operations are done entirely in EZ — no external DLLs or OS calls are needed.
+Requires Windows with `Advapi32.dll` and `bcrypt.dll` — both ship with every modern Windows installation.
 
 ---
 
 ## Quick Start
 
 ```ez
-use "ezcrypto"
+use "crypto"
 
-# Base64 encode
-encoded = Crypto.base64Encode("Hello, World!")
-out encoded   # → "SGVsbG8sIFdvcmxkIQ=="
+# Hash a password
+hash = Crypto.sha256("hello world")
+out hash  # → 2cf24dba5fb0a30e...
 
-# Base64 decode
-decoded = Crypto.base64Decode("SGVsbG8sIFdvcmxkIQ==")
-out decoded   # → "Hello, World!"
+# Encrypt with AES-256
+key = "12345678901234567890123456789012"  # 32 bytes
+iv  = "1234567890123456"                  # 16 bytes
+encrypted = Crypto.aesEncrypt(key, iv, "secret message")
+decrypted = Crypto.aesDecrypt(key, iv, encrypted)
+out decrypted  # → secret message
 
-# RC4 encrypt
-key = "mySecretKey"
-cipherText = Crypto.rc4Encrypt(key, "Secret message")
-out cipherText  # → Base64-encoded cipher
-
-# RC4 decrypt
-plainText = Crypto.rc4Decrypt(key, cipherText)
-out plainText   # → "Secret message"
+# Generate a UUID
+id = Crypto.uuid()
+out id  # → 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ---
 
-## Model: `Base64`
+## API Reference
 
-The `Base64` model provides static methods for encoding and decoding data using the standard Base64 alphabet (`A-Z`, `a-z`, `0-9`, `+`, `/`).
+### `Crypto` — Unified Facade
 
-### `Base64.encode(input)` → `string`
+The easiest way to use ezcrypto. A single model exposing the most common operations.
 
-Encodes a string or byte array to Base64.
-
-**Parameters:**
-- `input` — A `string` or an array of byte integers (`0–255`).
-
-**Returns:** Base64-encoded string, padded with `=` as required.
-
-**Examples:**
 ```ez
-use "ezcrypto"
+use "crypto"
+```
 
-# String input
-out Base64.encode("Hello")      # → "SGVsbG8="
-out Base64.encode("Hi")         # → "SGk="
-out Base64.encode("A")          # → "QQ=="
-out Base64.encode("")           # → ""
+#### Hashing
 
-# Byte array input
-out Base64.encode([72, 101, 108, 108, 111])  # → "SGVsbG8="
+```ez
+Crypto.sha256(text)   # → lowercase hex string (64 chars)
+Crypto.sha1(text)     # → lowercase hex string (40 chars)
+Crypto.md5(text)      # → lowercase hex string (32 chars)
+```
 
-# Padding cases
-out Base64.encode("Man")        # → "TWFu"    (no padding needed — 3 bytes)
-out Base64.encode("Ma")         # → "TWE="    (1 pad char)
-out Base64.encode("M")          # → "TQ=="    (2 pad chars)
+```ez
+out Crypto.sha256("hello")
+# → 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+```
+
+#### AES Encryption (AES-256-CBC)
+
+```ez
+Crypto.aesEncrypt(key, iv, plaintext)  # → Base64 string
+Crypto.aesDecrypt(key, iv, ciphertext) # → plaintext string
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `key` | string | 16, 24, or 32 characters (AES-128/192/256) |
+| `iv` | string | Exactly 16 characters (AES block size) |
+| `plaintext` | string | Text to encrypt |
+| `ciphertext` | string | Base64 string from `aesEncrypt` |
+
+```ez
+key = "mySecretKey12345"          # 16 bytes → AES-128
+iv  = "myInitialVector!"          # 16 bytes
+encrypted = Crypto.aesEncrypt(key, iv, "Hello EZ!")
+decrypted = Crypto.aesDecrypt(key, iv, encrypted)
+```
+
+#### HMAC
+
+```ez
+Crypto.hmac(key, message)  # → HMAC-SHA256 hex string
+```
+
+```ez
+mac = Crypto.hmac("secret-key", "important message")
+```
+
+#### UUID v4
+
+```ez
+Crypto.uuid()  # → RFC 4122 UUID v4 string
+```
+
+```ez
+id = Crypto.uuid()
+out id  # → 550e8400-e29b-41d4-a716-446655440000
+```
+
+#### Base64
+
+```ez
+Crypto.base64Encode(text)  # → Base64 string
+Crypto.base64Decode(text)  # → original string
 ```
 
 ---
 
-### `Base64.decode(encoded)` → `string`
+### `Hash` — Direct Hashing
 
-Decodes a Base64-encoded string back to a plain text string.
+Lower-level hashing with both hex string and raw byte array output.
 
-**Parameters:**
-- `encoded` — A valid Base64 string (may include `=` padding).
+```ez
+Hash.sha256(text)       # → hex string
+Hash.sha1(text)         # → hex string
+Hash.md5(text)          # → hex string
 
-**Returns:** Decoded string, built by converting each byte back to a character via `chr()`.
+Hash.sha256Bytes(text)  # → array of ints [0..255]
+Hash.sha1Bytes(text)    # → array of ints [0..255]
+Hash.md5Bytes(text)     # → array of ints [0..255]
+```
 
-**Examples:**
 ```ez
 use "ezcrypto"
 
-out Base64.decode("SGVsbG8=")       # → "Hello"
-out Base64.decode("SGk=")           # → "Hi"
-out Base64.decode("QQ==")           # → "A"
-out Base64.decode("")               # → ""
-out Base64.decode("SGVsbG8sIFdvcmxkIQ==")  # → "Hello, World!"
+# Get raw bytes for further processing
+bytes = Hash.sha256Bytes("hello")
+out len(bytes)  # → 32
 ```
-
-> ⚠️ **Note:** `Base64.decode()` assumes the encoded content represents printable ASCII text. For binary data (images, files, etc.), use `Base64.decodeToBytes()` instead.
 
 ---
 
-### `Base64.decodeToBytes(encoded)` → `array`
+### `AES` — AES Encryption (CBC Mode)
 
-Decodes a Base64 string to a raw byte array (array of integers `0–255`).
+AES-128, AES-192, and AES-256 in CBC mode via Windows CryptoAPI. Key length determines the variant automatically.
 
-**Parameters:**
-- `encoded` — A valid Base64 string.
-
-**Returns:** Array of byte integers.
-
-**Examples:**
 ```ez
-use "ezcrypto"
-
-bytes = Base64.decodeToBytes("SGVsbG8=")
-out bytes     # → [72, 101, 108, 108, 111]
-out bytes[0]  # → 72 (ASCII 'H')
+AES.encrypt(key, iv, plaintext)   # → Base64 ciphertext
+AES.decrypt(key, iv, ciphertext)  # → plaintext string
 ```
 
-Use this when you need to work with binary data, BLOB content, or pipe decoded bytes into another operation.
+| Key Length | AES Variant |
+|---|---|
+| 16 bytes | AES-128 |
+| 24 bytes | AES-192 |
+| 32 bytes | AES-256 |
+
+```ez
+use "crypto"
+
+key = "12345678901234567890123456789012"  # 32 bytes = AES-256
+iv  = "1234567890123456"                  # always 16 bytes
+
+cipher = AES.encrypt(key, iv, "classified information")
+plain  = AES.decrypt(key, iv, cipher)
+out plain  # → classified information
+```
+
+> **Security note:** Never reuse the same IV with the same key. Generate a fresh IV with `SecureRandom.bytes(16)` for each encryption operation and store it alongside the ciphertext.
 
 ---
 
-## Model: `RC4`
+### `HMAC` — Hash-Based Message Authentication
 
-RC4 (Rivest Cipher 4) is a symmetric stream cipher. The same operation encrypts and decrypts — just apply with the same key.
-
-> ⚠️ **Security Warning:** RC4 has known cryptographic weaknesses and should **not** be used for high-security applications. It is suitable for obfuscation, lightweight encoding, or educational purposes.
-
-### `RC4.init(key)` → `RC4 instance`
-
-Creates and initializes an RC4 cipher instance with the given key.
-
-- The key is used to initialize a 256-byte S-box via the KSA (Key Scheduling Algorithm).
-- The key can be any non-empty string of any length.
+RFC 2104 compliant HMAC using SHA-256, SHA-1, or MD5. Pure EZ implementation built on top of `Hash`.
 
 ```ez
-use "ezcrypto"
-
-cipher = RC4("my-secret-key-123")
+HMAC.sha256(key, message)  # → hex string
+HMAC.sha1(key, message)    # → hex string
+HMAC.md5(key, message)     # → hex string
 ```
 
-### `RC4.processBytes(input)` → `array`
-
-XORs the input with the RC4 keystream. Can be called with either a string or a byte array.
-
-**Parameters:**
-- `input` — A `string` or array of byte integers.
-
-**Returns:** Array of byte integers (the cipher/plain text bytes).
-
-**Important:** Each `RC4` instance maintains state. After calling `processBytes()`, the internal i/j counters advance. To decrypt the same ciphertext, create a **fresh `RC4` instance** with the same key.
-
-**Examples:**
 ```ez
-use "ezcrypto"
+use "crypto"
 
-key = "password"
-plain = "Attack at dawn"
+mac = HMAC.sha256("my-secret-key", "message to authenticate")
+out mac
+```
+
+---
+
+### `PBKDF2` — Password Key Derivation
+
+RFC 2898 compliant PBKDF2 using HMAC-SHA256. Use this to derive encryption keys from passwords — never use a raw password directly as an AES key.
+
+```ez
+PBKDF2.derive(password, salt, iterations, keyLen)
+# → lowercase hex string of keyLen bytes
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `password` | required | User's password |
+| `salt` | required | Random salt (store alongside hash) |
+| `iterations` | 100000 | Higher = slower = more secure |
+| `keyLen` | 32 | Output key length in bytes |
+
+```ez
+use "crypto"
+
+# Derive a 32-byte AES-256 key from a password
+salt   = "random-salt-value"
+keyHex = PBKDF2.derive("user-password", salt, 100000, 32)
+out keyHex  # → 64 character hex string (32 bytes)
+```
+
+> **Recommendation:** Use at least 100,000 iterations. Generate the salt with `SecureRandom.bytes(16)`.
+
+---
+
+### `SecureRandom` — Cryptographically Secure Randomness
+
+Backed by `BCryptGenRandom` — the Windows cryptographically secure RNG. Suitable for key generation, tokens, nonces, and IVs.
+
+```ez
+SecureRandom.bytes(n)          # → array of n random ints [0..255]
+SecureRandom.randInt(min, max) # → random int in [min, max]
+SecureRandom.randFloat()       # → random float in [0.0, 1.0)
+SecureRandom.uuid4()           # → UUID v4 string
+```
+
+```ez
+use "crypto"
+
+# Generate a random 16-byte IV for AES
+ivBytes = SecureRandom.bytes(16)
+
+# Random number between 1 and 100
+n = SecureRandom.randInt(1, 100)
+
+# UUID
+id = SecureRandom.uuid4()
+```
+
+---
+
+### `Base64` — Base64 Encoding and Decoding
+
+Accepts both strings and byte arrays as input.
+
+```ez
+Base64.encode(input)         # string or byte array → Base64 string
+Base64.decode(encoded)       # Base64 string → original string
+Base64.decodeToBytes(encoded) # Base64 string → byte array [0..255]
+```
+
+```ez
+use "crypto"
+
+encoded = Base64.encode("Hello, EZ!")
+out encoded  # → SGVsbG8sIEVaIQ==
+
+decoded = Base64.decode(encoded)
+out decoded  # → Hello, EZ!
+```
+
+---
+
+### `RC4` — ⚠️ Deprecated
+
+RC4 is a broken stream cipher deprecated since 2015 (RFC 7465). It is kept only for backwards compatibility with existing data. **Do not use RC4 for new code.**
+
+```ez
+# DO NOT USE FOR NEW CODE
+cipher = RC4("key")
+encrypted = cipher.processBytes("plaintext")  # returns byte array
+```
+
+Using `Crypto.rc4Encrypt` or `Crypto.rc4Decrypt` will print a deprecation warning automatically. Migrate to `AES` immediately.
+
+---
+
+## Common Patterns
+
+### Password Hashing
+
+```ez
+use "crypto"
+
+# Store this salt and hash in your database
+salt     = "random-unique-salt"
+password = "user-password"
+
+stored = PBKDF2.derive(password, salt, 100000, 32)
+
+# Verify later
+verify = PBKDF2.derive("user-password", salt, 100000, 32)
+out stored == verify  # → true
+```
+
+### Secure File Encryption
+
+```ez
+use "crypto"
+
+# Derive key from password
+salt   = "my-app-salt"
+keyHex = PBKDF2.derive("password", salt, 100000, 32)
+
+# Use first 32 chars of hex as key (32 ASCII chars = 32 bytes)
+key = substr(keyHex, 0, 32)
+
+# Generate random IV
+ivBytes = SecureRandom.bytes(16)
+iv = ""
+get b in ivBytes { iv = iv + chr(b) }
 
 # Encrypt
-encCipher = RC4(key)
-encBytes = encCipher.processBytes(plain)
-out encBytes   # → array of XOR'd bytes
-
-# Decrypt (must use a NEW RC4 instance)
-decCipher = RC4(key)
-decBytes = decCipher.processBytes(encBytes)
-
-result = ""
-repeat i = 0 to len(decBytes) - 1 {
-    result = result + chr(decBytes[i])
-}
-out result   # → "Attack at dawn"
+content   = readFile("secret.txt")
+encrypted = AES.encrypt(key, iv, content)
+writeFile("secret.enc", encrypted)
 ```
 
----
-
-## Model: `Crypto`
-
-The `Crypto` facade provides convenient static methods combining `Base64` and `RC4`.
-
-### `Crypto.base64Encode(text)` → `string`
-
-Shorthand for `Base64.encode(text)`.
+### API Request Signing
 
 ```ez
-use "ezcrypto"
+use "crypto"
 
-out Crypto.base64Encode("EZ Language!")  # → "RVogTGFuZ3VhZ2Uh"
-```
-
----
-
-### `Crypto.base64Decode(text)` → `string`
-
-Shorthand for `Base64.decode(text)`.
-
-```ez
-use "ezcrypto"
-
-out Crypto.base64Decode("RVogTGFuZ3VhZ2Uh")  # → "EZ Language!"
-```
-
----
-
-### `Crypto.rc4Encrypt(key, text)` → `string`
-
-Encrypts plaintext with RC4 and returns a **Base64-encoded** cipher string (safe for storage and transmission).
-
-**Parameters:**
-- `key` — Encryption key string.
-- `text` — Plaintext to encrypt.
-
-**Returns:** Base64-encoded ciphertext string.
-
-```ez
-use "ezcrypto"
-
-cipher = Crypto.rc4Encrypt("SecretKey", "Hello World")
-out cipher   # → Base64 string, e.g. "GvY3Sl/T8OaG"
-```
-
----
-
-### `Crypto.rc4Decrypt(key, base64Text)` → `string`
-
-Decrypts an RC4-encrypted, Base64-encoded string.
-
-**Parameters:**
-- `key` — The same key used during encryption.
-- `base64Text` — The Base64-encoded ciphertext from `rc4Encrypt()`.
-
-**Returns:** Decrypted plaintext string.
-
-```ez
-use "ezcrypto"
-
-key = "SecretKey"
-cipher = Crypto.rc4Encrypt(key, "My secret data")
-plain = Crypto.rc4Decrypt(key, cipher)
-out plain   # → "My secret data"
-```
-
----
-
-## Edge Cases & Important Notes
-
-### Empty Inputs
-```ez
-use "ezcrypto"
-
-out Base64.encode("")        # → ""
-out Base64.decode("")        # → ""
-out Base64.decodeToBytes("") # → []
-
-# RC4 with empty string
-cipher = RC4("key")
-out cipher.processBytes("")  # → []
-
-# rc4Decrypt with empty cipher
-out Crypto.rc4Decrypt("key", "")  # → ""
-```
-
-### Key Length for RC4
-RC4's KSA uses `key[i % keyLen]`, so any key length from 1 to 256 bytes is valid. Longer keys (40+ chars) provide better security, though RC4 itself has fundamental vulnerabilities regardless.
-
-### RC4 State is Consumed
-After calling `processBytes()`, the cipher state advances. **Never reuse the same RC4 instance** for a second message:
-```ez
-# WRONG — decryption will fail
-cipher = RC4("key")
-enc = cipher.processBytes("message1")
-dec = cipher.processBytes(enc)    # ❌ Wrong! State is already advanced
-out dec  # → garbage
-
-# CORRECT — create fresh instances
-enc = RC4("key").processBytes("message1")
-dec = RC4("key").processBytes(enc)  # ✅ Fresh instance
-```
-
-### Binary Data
-If encoding binary data (non-text), use `Base64.decodeToBytes()` and work with byte arrays directly. `Base64.decode()` calls `chr()` on each byte, which only works correctly for ASCII range (0-127).
-
-### Non-ASCII Characters
-`Base64.encode()` uses `ord()` on each character, which works correctly for ASCII. For multibyte Unicode strings, `ord()` returns the code point of the first byte only — behavior may be unexpected for non-ASCII input.
-
-### Invalid Base64 Input
-If the input to `Base64.decodeToBytes()` or `Base64.decode()` contains characters not in the Base64 alphabet, `indexOf()` returns `-1` which is treated as index `0`. This means corrupted/invalid Base64 data will silently produce wrong output rather than an error.
-
----
-
-## Full Example: Config File Obfuscation
-
-```ez
-use "ezcrypto"
-
-APP_KEY = "MyAppSecretKey2024"
-
-# Obfuscate sensitive config before saving
-task saveConfig(data) {
-    json = to_json(data)
-    encrypted = Crypto.rc4Encrypt(APP_KEY, json)
-    writeFile("config.dat", encrypted)
-    out "Config saved (encrypted)."
+task signRequest(secretKey, method, path, body) {
+    timestamp = str(clock())
+    payload   = method + "\n" + path + "\n" + timestamp + "\n" + body
+    signature = HMAC.sha256(secretKey, payload)
+    give { sig: signature, ts: timestamp }
 }
 
-# Load and decrypt config
-task loadConfig() {
-    raw = readFile("config.dat")
-    json = Crypto.rc4Decrypt(APP_KEY, raw)
-    give parse_json(json)
-}
-
-# Save config
-config = {
-    "db_host": "localhost",
-    "db_pass": "supersecret",
-    "api_key": "key-abc123"
-}
-saveConfig(config)
-
-# Load it back
-loaded = loadConfig()
-out loaded["db_host"]  # → "localhost"
-out loaded["api_key"]  # → "key-abc123"
+result = signRequest("my-secret", "POST", "/api/data", "{}")
+out result["sig"]
 ```
 
 ---
 
-## Full Example: Token System
+## Security Notes
 
-```ez
-use "ezcrypto"
-
-SECRET = "server-signing-key"
-
-# Create a token embedding user ID and expiry
-task createToken(userId, expiryMs) {
-    data = str(userId) + ":" + str(expiryMs)
-    give Crypto.rc4Encrypt(SECRET, data)
-}
-
-# Validate and parse a token
-task validateToken(token) {
-    data = Crypto.rc4Decrypt(SECRET, token)
-    parts = split(data, ":")
-    
-    when len(parts) != 2 {
-        give nil   # Invalid format
-    }
-    
-    userId = num(parts[0])
-    expiry = num(parts[1])
-    
-    when clock() > expiry {
-        give nil   # Token expired
-    }
-    
-    give userId
-}
-
-# Create a token that expires in 1 hour
-expiryTime = clock() + 3600000
-token = createToken(42, expiryTime)
-out "Token: " + token
-
-# Validate
-userId = validateToken(token)
-when userId {
-    out "Valid! User ID: " + str(userId)
-} other {
-    out "Invalid or expired token."
-}
-```
+- **AES key length:** 32 bytes (AES-256) is recommended for new code
+- **IV generation:** Always generate a fresh random IV per encryption — never hardcode or reuse IVs
+- **IV storage:** Store the IV alongside the ciphertext — it is not secret, just must be unique
+- **Password hashing:** Always use `PBKDF2` to derive keys from passwords, never use raw passwords as keys
+- **Iterations:** PBKDF2 with 100,000+ iterations is the minimum recommendation (NIST 2023)
+- **RC4:** Do not use under any circumstances for new code
 
 ---
 
-## Full Example: Password Hashing Simulation
+## Requirements
 
-```ez
-use "ezcrypto"
-
-# Simple (non-cryptographic) password storage simulation
-task hashPassword(password, salt) {
-    combined = salt + password
-    give Crypto.base64Encode(Crypto.rc4Encrypt("static-server-key", combined))
-}
-
-task verifyPassword(password, salt, storedHash) {
-    give hashPassword(password, salt) == storedHash
-}
-
-salt = "random-salt-abc"
-stored = hashPassword("myPassword123", salt)
-out "Stored: " + stored
-
-out verifyPassword("myPassword123", salt, stored)  # → true
-out verifyPassword("wrongPassword", salt, stored)   # → false
-```
+- Windows (uses `Advapi32.dll` and `bcrypt.dll`)
+- EZ runtime with FFI support (`os_load_lib`, `os_call`)
+- Both DLLs ship with Windows Vista and later — no additional installation needed
 
 ---
 
-## Algorithm Details
+## Changelog
 
-### Base64 Encoding
-- Processes input in 3-byte groups
-- Converts each 3 bytes to 4 Base64 characters using 6-bit shifts
-- Pads with `=` if input length is not divisible by 3
-- Padding: `rem == 1` → `==`, `rem == 2` → `=`
+### v2.0
+- Added real **AES-128/192/256-CBC** via Windows CryptoAPI — replaces the false AES claim in v1
+- Added **HMAC-SHA256/SHA1/MD5** (pure EZ, RFC 2104)
+- Added **PBKDF2** key derivation (pure EZ, RFC 2898)
+- Added **SecureRandom** backed by `BCryptGenRandom`
+- Added **UUID v4** generation
+- **RC4 deprecated** — prints runtime warning, kept for compatibility only
+- SHA-256, SHA-1, MD5 moved to real CryptoAPI implementation
 
-### RC4 Key Scheduling Algorithm (KSA)
-```
-Initialize S = [0, 1, 2, ..., 255]
-j = 0
-for i = 0 to 255:
-    j = (j + S[i] + key[i % keyLen]) mod 256
-    swap(S[i], S[j])
-```
-
-### RC4 Pseudo-Random Generation Algorithm (PRGA)
-```
-i = 0, j = 0
-for each byte of input:
-    i = (i + 1) mod 256
-    j = (j + S[i]) mod 256
-    swap(S[i], S[j])
-    K = S[(S[i] + S[j]) mod 256]
-    output = input_byte XOR K
-```
-
----
-
-*Documentation generated from `E:\ezlib\ezcrypto\main.ez` — EZ Crypto Library*
+### v1.0
+- Base64 encode/decode
+- RC4 (now deprecated)
+- SHA-256 labeled incorrectly as AES (fixed in v2.0)
