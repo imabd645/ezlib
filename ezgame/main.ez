@@ -1,9 +1,19 @@
 # ============================================================================
 # EZ Game Library - GUI Game Engine
 # Wraps native GDI drawing and timers for real-time game development
+# Added collision, dt, sprite sheets, FFI primitives
 # ============================================================================
 
 # Virtual Key Codes
+export KEYS = {
+    "LEFT": 37, "UP": 38, "RIGHT": 39, "DOWN": 40,
+    "SPACE": 32, "ESC": 27, "ENTER": 13,
+    "CTRL": 17, "SHIFT": 16, "ALT": 18,
+    "A": 65, "B": 66, "C": 67, "D": 68, "E": 69, "F": 70, "G": 71, "H": 72, "I": 73, "J": 74, "K": 75, "L": 76, "M": 77, "N": 78, "O": 79, "P": 80, "Q": 81, "R": 82, "S": 83, "T": 84, "U": 85, "V": 86, "W": 87, "X": 88, "Y": 89, "Z": 90,
+    "0": 48, "1": 49, "2": 50, "3": 51, "4": 52, "5": 53, "6": 54, "7": 55, "8": 56, "9": 57,
+    "F1": 112, "F2": 113, "F3": 114, "F4": 115, "F5": 116, "F6": 117, "F7": 118, "F8": 119, "F9": 120, "F10": 121, "F11": 122, "F12": 123
+}
+
 # ----------------------------------------------------------------------------
 # FFI Bindings for Audio and Graphics
 winmm = os_load_lib("winmm.dll")
@@ -21,20 +31,23 @@ SelectObject = os_get_func(gdi32, "SelectObject")
 DeleteDC = os_get_func(gdi32, "DeleteDC")
 DeleteObject = os_get_func(gdi32, "DeleteObject")
 TransparentBlt = os_get_func(msimg32, "TransparentBlt")
+MoveToEx = os_get_func(gdi32, "MoveToEx")
+LineTo = os_get_func(gdi32, "LineTo")
+CreatePen = os_get_func(gdi32, "CreatePen")
+CreateSolidBrush = os_get_func(gdi32, "CreateSolidBrush")
+Ellipse = os_get_func(gdi32, "Ellipse")
 # ----------------------------------------------------------------------------
 
-KEYS = {
-    "LEFT": 37,
-    "UP": 38,
-    "RIGHT": 39,
-    "DOWN": 40,
-    "SPACE": 32,
-    "ESC": 27,
-    "W": 87,
-    "A": 65,
-    "S": 83,
-    "D": 68,
-    "ENTER": 13
+export model Collision {
+    static task AABB(x1, y1, w1, h1, x2, y2, w2, h2) {
+        give x1 < x2 + w2 and x1 + w1 > x2 and y1 < y2 + h2 and y1 + h1 > y2
+    }
+    
+    static task CircleVsCircle(x1, y1, r1, x2, y2, r2) {
+        dx = x1 - x2
+        dy = y1 - y2
+        give (dx * dx) + (dy * dy) <= ((r1 + r2) * (r1 + r2))
+    }
 }
 
 export model GUIGame {
@@ -43,10 +56,11 @@ export model GUIGame {
         self.width = width
         self.height = height
         self.win = 0
-        self.fps = 30
-        self.onUpdate = nil
-        self.onDraw = nil
+        self.fps = 60
+        self.onUpdateCb = nil
+        self.onDrawCb = nil
         self.isExiting = false
+        self.lastTime = 0
         
         # Create Main Window
         self.win = gui_create_window(self.title, 100, 100, self.width, self.height)
@@ -57,11 +71,11 @@ export model GUIGame {
     }
 
     task onUpdateCall(callback) {
-        self.onUpdateCb = [callback]
+        self.onUpdateCb = callback
     }
 
     task onDrawCall(callback) {
-        self.onDrawCb = [callback]
+        self.onDrawCb = callback
     }
 
     task stop() {
@@ -73,16 +87,21 @@ export model GUIGame {
     task _loop() {
         when self.isExiting { give false }
         
+        now = clock()
+        dt = 0
+        when self.lastTime != 0 {
+            dt = (now - self.lastTime) / 1000.0
+        }
+        self.lastTime = now
+        
         # 1. Update Game State
         when self.onUpdateCb != nil {
-            cb = self.onUpdateCb[0]
-            cb()
+            self.onUpdateCb(dt)
         }
         
         # 2. Render
         when self.onDrawCb != nil {
-            cb = self.onDrawCb[0]
-            cb()
+            self.onDrawCb()
         }
     }
 
@@ -90,6 +109,7 @@ export model GUIGame {
         interval = 1000 / self.fps
         
         # Set up the loop timer
+        self.lastTime = clock()
         self.timerId = gui_set_timer(self.win, interval, || {
             self._loop()
         })
@@ -108,50 +128,83 @@ export model GUIGame {
     task getCenter() { give [self.width / 2, self.height / 2] }
 
     # ========================================================================
+    # Native FFI Primitives
+    # ========================================================================
+    
+    task drawLine(x1, y1, x2, y2, r, g, b) {
+        hwnd = os_call(FindWindowA, "ptr", 0, self.title)
+        when hwnd == 0 { give false }
+        hdc = os_call(GetDC, "ptr", hwnd)
+        
+        color = r + (g * 256) + (b * 65536)
+        pen = os_call(CreatePen, "ptr", 0, 1, color) # PS_SOLID=0, width=1
+        oldPen = os_call(SelectObject, "ptr", hdc, pen)
+        
+        os_call(MoveToEx, "int", hdc, x1, y1, 0)
+        os_call(LineTo, "int", hdc, x2, y2)
+        
+        os_call(SelectObject, "ptr", hdc, oldPen)
+        os_call(DeleteObject, "int", pen)
+        os_call(ReleaseDC, "int", hwnd, hdc)
+    }
+
+    task fillCircle(x, y, radius, r, g, b) {
+        hwnd = os_call(FindWindowA, "ptr", 0, self.title)
+        when hwnd == 0 { give false }
+        hdc = os_call(GetDC, "ptr", hwnd)
+        
+        color = r + (g * 256) + (b * 65536)
+        brush = os_call(CreateSolidBrush, "ptr", color)
+        pen = os_call(CreatePen, "ptr", 5, 0, 0) # PS_NULL=5
+        
+        oldBrush = os_call(SelectObject, "ptr", hdc, brush)
+        oldPen = os_call(SelectObject, "ptr", hdc, pen)
+        
+        os_call(Ellipse, "int", hdc, x - radius, y - radius, x + radius, y + radius)
+        
+        os_call(SelectObject, "ptr", hdc, oldBrush)
+        os_call(SelectObject, "ptr", hdc, oldPen)
+        os_call(DeleteObject, "int", brush)
+        os_call(DeleteObject, "int", pen)
+        os_call(ReleaseDC, "int", hwnd, hdc)
+    }
+
+    # ========================================================================
     # FFI Methods: Audio and Graphics
     # ========================================================================
-    task playSound(path) {
-        os_call(mciSendStringA, "int", "play " + path + " from 0", 0, 0, 0)
-    }
     
-    task loopSound(path) {
-        os_call(mciSendStringA, "int", "play " + path + " from 0 repeat", 0, 0, 0)
-    }
-    
-    task stopSound(path) {
-        os_call(mciSendStringA, "int", "stop " + path, 0, 0, 0)
-    }
+    task playSound(path) { os_call(mciSendStringA, "int", "play " + path, 0, 0, 0) }
+    task playSoundFromStart(path) { os_call(mciSendStringA, "int", "play " + path + " from 0", 0, 0, 0) }
+    task loopSound(path) { os_call(mciSendStringA, "int", "play " + path + " from 0 repeat", 0, 0, 0) }
+    task pauseSound(path) { os_call(mciSendStringA, "int", "pause " + path, 0, 0, 0) }
+    task resumeSound(path) { os_call(mciSendStringA, "int", "resume " + path, 0, 0, 0) }
+    task stopSound(path) { os_call(mciSendStringA, "int", "stop " + path, 0, 0, 0) }
     
     task loadImage(path) {
-        # LoadImageA(NULL, path, IMAGE_BITMAP(0), 0, 0, LR_LOADFROMFILE(0x10))
         give os_call(LoadImageA, "ptr", 0, path, 0, 0, 0, 16)
     }
     
     task drawImage(imgHandle, x, y, w, h, srcW, srcH, tR, tG, tB) {
-        # 1. Get raw HWND for this window using its title
+        self.drawSprite(imgHandle, x, y, w, h, 0, 0, srcW, srcH, tR, tG, tB)
+    }
+
+    task drawSprite(imgHandle, x, y, w, h, srcX, srcY, srcW, srcH, tR, tG, tB) {
         hwnd = os_call(FindWindowA, "ptr", 0, self.title)
         when hwnd == 0 { give false }
         
-        # 2. Setup Device Contexts
         hdcDest = os_call(GetDC, "ptr", hwnd)
         hdcSrc = os_call(CreateCompatibleDC, "ptr", hdcDest)
-        
-        # 3. Select Bitmap
         oldBmp = os_call(SelectObject, "ptr", hdcSrc, imgHandle)
         
-        # 4. Draw with Transparency (COLORREF = R | (G << 8) | (B << 16))
         crTransparent = tR + (tG * 256) + (tB * 65536)
-        os_call(TransparentBlt, "int", hdcDest, x, y, w, h, hdcSrc, 0, 0, srcW, srcH, crTransparent)
+        os_call(TransparentBlt, "int", hdcDest, x, y, w, h, hdcSrc, srcX, srcY, srcW, srcH, crTransparent)
         
-        # 5. Cleanup Resources
         os_call(SelectObject, "ptr", hdcSrc, oldBmp)
         os_call(DeleteDC, "int", hdcSrc)
         os_call(ReleaseDC, "int", hwnd, hdcDest)
     }
 }
 
-# Factory function
 export task createGame(title, w, h) {
     give GUIGame(title, w, h)
 }
-
