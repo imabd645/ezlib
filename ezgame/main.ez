@@ -136,8 +136,8 @@ export model GUIGame {
         when hwnd == 0 { give false }
         hdc = os_call(GetDC, "ptr", hwnd)
         
-        color = r + (g * 256) + (b * 65536)
-        pen = os_call(CreatePen, "ptr", 0, 1, color) # PS_SOLID=0, width=1
+        rgbColor = r + (g * 256) + (b * 65536)
+        pen = os_call(CreatePen, "ptr", 0, 1, rgbColor) # PS_SOLID=0, width=1
         oldPen = os_call(SelectObject, "ptr", hdc, pen)
         
         os_call(MoveToEx, "int", hdc, x1, y1, 0)
@@ -153,8 +153,8 @@ export model GUIGame {
         when hwnd == 0 { give false }
         hdc = os_call(GetDC, "ptr", hwnd)
         
-        color = r + (g * 256) + (b * 65536)
-        brush = os_call(CreateSolidBrush, "ptr", color)
+        rgbColor = r + (g * 256) + (b * 65536)
+        brush = os_call(CreateSolidBrush, "ptr", rgbColor)
         pen = os_call(CreatePen, "ptr", 5, 0, 0) # PS_NULL=5
         
         oldBrush = os_call(SelectObject, "ptr", hdc, brush)
