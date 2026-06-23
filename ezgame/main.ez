@@ -57,8 +57,7 @@ export model GUIGame {
         self.height = height
         self.win = 0
         self.fps = 60
-        self.onUpdateCb = nil
-        self.onDrawCb = nil
+        self.callbacks = { "update": nil, "draw": nil }
         self.isExiting = false
         self.lastTime = 0
         
@@ -71,11 +70,11 @@ export model GUIGame {
     }
 
     task onUpdateCall(callback) {
-        self.onUpdateCb = callback
+        self.callbacks["update"] = callback
     }
 
     task onDrawCall(callback) {
-        self.onDrawCb = callback
+        self.callbacks["draw"] = callback
     }
 
     task stop() {
@@ -95,14 +94,14 @@ export model GUIGame {
         self.lastTime = now
         
         # 1. Update Game State
-        when self.onUpdateCb != nil {
-            cbUpdate = self.onUpdateCb
+        cbUpdate = self.callbacks["update"]
+        when cbUpdate != nil {
             cbUpdate(dt)
         }
         
         # 2. Render
-        when self.onDrawCb != nil {
-            cbDraw = self.onDrawCb
+        cbDraw = self.callbacks["draw"]
+        when cbDraw != nil {
             cbDraw()
         }
     }
