@@ -1,0 +1,10 @@
+use "audio"
+print("Attempting to play a system sound...")
+# C:\Windows\Media\tada.wav is a classic windows sound
+success = audio.play("C:\\Windows\\Media\\tada.wav", true)
+if success {
+    print("Sound played successfully!")
+} other {
+    print("Could not play sound.")
+}
+

@@ -1,0 +1,60 @@
+# ============================================================================
+# EZ Audio Library
+# Native audio playback for MP3 and WAV files via Win32 WinMM FFI
+# ============================================================================
+
+__winmm = os_load_lib("Winmm.dll")
+
+model AudioFFI {
+    static mciSendString = os_get_func(__winmm, "mciSendStringA")
+}
+
+# Helper to send MCI commands
+task mci_cmd(command) {
+    # mciSendStringA(command, returnBuf, returnLen, hwndCallback)
+    res = os_call(AudioFFI.mciSendString, "int", str(command), 0, 0, 0)
+    give res == 0
+}
+
+# Play an audio file (MP3, WAV, MID).
+# If wait is true, blocks execution until the sound finishes playing.
+export task play(filepath, wait_for_finish = false) {
+    # Close any previously opened instance with this alias just in case
+    mci_cmd("close ez_audio_track")
+    
+    # Open the file and assign it an alias
+    success = mci_cmd("open """ + str(filepath) + """ alias ez_audio_track")
+    when not success {
+        print("Failed to open audio file: " + str(filepath))
+        give false
+    }
+    
+    when wait_for_finish {
+        mci_cmd("play ez_audio_track wait")
+    } other {
+        mci_cmd("play ez_audio_track")
+    }
+    give true
+}
+
+# Stop the currently playing audio
+export task stop() {
+    mci_cmd("stop ez_audio_track")
+    mci_cmd("close ez_audio_track")
+}
+
+# Pause the currently playing audio
+export task pause() {
+    mci_cmd("pause ez_audio_track")
+}
+
+# Resume the currently paused audio
+export task resume() {
+    mci_cmd("resume ez_audio_track")
+}
+
+# Set volume (0 to 1000)
+export task volume(level) {
+    mci_cmd("setaudio ez_audio_track volume to " + str(level))
+}
+
