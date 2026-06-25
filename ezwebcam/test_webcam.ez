@@ -1,0 +1,44 @@
+use "webcam"
+use "auto"
+use "notify"
+
+notify.alert("A webcam window will now open! Press SPACE to take a photo. Press ESCAPE to exit.", "Webcam App")
+
+success = webcam.open("My EZ Webcam", 640, 480)
+when not success {
+    exit(1)
+}
+
+photo_count = 1
+running = true
+
+print("Webcam started! Waiting for input...")
+
+while running {
+    # Keep the camera window updating!
+    webcam.update()
+    
+    # Check if SPACE is pressed
+    when auto.is_down("space") {
+        filename = "photo_" + photo_count + ".bmp"
+        webcam.capture(filename)
+        print("Captured: " + filename)
+        photo_count = photo_count + 1
+        
+        # small delay to prevent multiple triggers
+        wait(500)
+    }
+    
+    # Check if ESCAPE is pressed
+    when auto.is_down("escape") {
+        print("Exiting...")
+        running = false
+    }
+    
+    # small delay to keep CPU usage low
+    wait(16) # ~60fps checking
+}
+
+webcam.close()
+notify.alert("Webcam closed safely. Check your folder for the photos!", "Done")
+

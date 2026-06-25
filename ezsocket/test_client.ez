@@ -1,4 +1,4 @@
-use "socket"
+use "socket" as socket
 
 client = socket.create()
 when client == -1 {
