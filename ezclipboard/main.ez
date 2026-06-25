@@ -1,0 +1,79 @@
+# ============================================================================
+# EZ Clipboard Library
+# Top-level clipboard manager via Win32 FFI
+# ============================================================================
+
+__u32 = os_load_lib("User32.dll")
+__k32 = os_load_lib("Kernel32.dll")
+
+model ClipFFI {
+    static openClipboard = os_get_func(__u32, "OpenClipboard")
+    static closeClipboard = os_get_func(__u32, "CloseClipboard")
+    static emptyClipboard = os_get_func(__u32, "EmptyClipboard")
+    static getClipboardData = os_get_func(__u32, "GetClipboardData")
+    static setClipboardData = os_get_func(__u32, "SetClipboardData")
+    
+    static globalAlloc = os_get_func(__k32, "GlobalAlloc")
+    static globalLock = os_get_func(__k32, "GlobalLock")
+    static globalUnlock = os_get_func(__k32, "GlobalUnlock")
+}
+
+# Reads text from the clipboard
+export task paste() {
+    opened = os_call(ClipFFI.openClipboard, "int", 0)
+    when opened == 0 { give "" }
+    
+    # CF_TEXT = 1
+    hData = os_call(ClipFFI.getClipboardData, "ptr", 1)
+    when hData == 0 {
+        os_call(ClipFFI.closeClipboard, "int")
+        give ""
+    }
+    
+    pText = os_call(ClipFFI.globalLock, "ptr", hData)
+    when pText == 0 {
+        os_call(ClipFFI.closeClipboard, "int")
+        give ""
+    }
+    
+    text = os_read_string_ptr(pText)
+    os_call(ClipFFI.globalUnlock, "int", hData)
+    os_call(ClipFFI.closeClipboard, "int")
+    
+    give text
+}
+
+# Writes text to the clipboard
+export task copy(text) {
+    str_val = str(text)
+    sz = len(str_val) + 1
+    
+    # GMEM_MOVEABLE = 0x0002
+    hMem = os_call(ClipFFI.globalAlloc, "ptr", 0x0002, sz)
+    when hMem == 0 { give false }
+    
+    pMem = os_call(ClipFFI.globalLock, "ptr", hMem)
+    when pMem == 0 { give false }
+    
+    os_write_string(pMem, 0, str_val)
+    os_call(ClipFFI.globalUnlock, "int", hMem)
+    
+    opened = os_call(ClipFFI.openClipboard, "int", 0)
+    when opened == 0 { give false }
+    
+    os_call(ClipFFI.emptyClipboard, "int")
+    os_call(ClipFFI.setClipboardData, "ptr", 1, hMem)
+    os_call(ClipFFI.closeClipboard, "int")
+    
+    give true
+}
+
+# Clears the clipboard
+export task clear() {
+    opened = os_call(ClipFFI.openClipboard, "int", 0)
+    when opened != 0 {
+        os_call(ClipFFI.emptyClipboard, "int")
+        os_call(ClipFFI.closeClipboard, "int")
+    }
+}
+

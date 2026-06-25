@@ -1,0 +1,12 @@
+use "clipboard"
+
+print("Original Clipboard: " + clipboard.paste())
+
+success = clipboard.copy("Hello from the new Clipboard library!")
+when success {
+    print("Successfully copied to clipboard.")
+    print("New Clipboard: " + clipboard.paste())
+} other {
+    print("Failed to copy to clipboard.")
+}
+

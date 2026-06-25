@@ -1,0 +1,6 @@
+{
+    "name": "clipboard",
+    "version": "1.0.0",
+    "description": "System clipboard management via Win32 FFI.",
+    "entry": "main.ez"
+}
