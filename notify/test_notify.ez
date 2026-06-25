@@ -1,0 +1,14 @@
+use "notify"
+
+notify.alert("Welcome to the EZ notification library!")
+
+result = notify.confirm("Do you want to see an error message?", "Choice")
+
+when result {
+    notify.error("This is an error message!", "Uh oh!")
+} other {
+    notify.warn("You chose not to see the error.", "Okay!")
+}
+
+print("Notification test complete!")
+

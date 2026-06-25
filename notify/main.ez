@@ -1,0 +1,49 @@
+# ============================================================================
+# EZ Notify Library
+# Desktop notifications and dialog prompts via Win32 FFI
+# ============================================================================
+
+__u32 = os_load_lib("User32.dll")
+
+model NotifyFFI {
+    static messageBox = os_get_func(__u32, "MessageBoxA")
+}
+
+# uType flags
+MB_OK = 0x00000000
+MB_OKCANCEL = 0x00000001
+MB_YESNO = 0x00000004
+MB_ICONERROR = 0x00000010
+MB_ICONQUESTION = 0x00000020
+MB_ICONWARNING = 0x00000030
+MB_ICONINFORMATION = 0x00000040
+
+# Show a standard informational alert box
+export task alert(message, title = "EZ Notification") {
+    os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_OK + MB_ICONINFORMATION)
+}
+
+# Show an error box
+export task error(message, title = "Error") {
+    os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_OK + MB_ICONERROR)
+}
+
+# Show a warning box
+export task warn(message, title = "Warning") {
+    os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_OK + MB_ICONWARNING)
+}
+
+# Prompt user for Yes/No confirmation
+# Returns true if user clicked Yes, false if No
+export task confirm(message, title = "Confirm") {
+    res = os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_YESNO + MB_ICONQUESTION)
+    give res == 6 # IDYES
+}
+
+# Prompt user for OK/Cancel
+# Returns true if user clicked OK, false if Cancel
+export task prompt(message, title = "Prompt") {
+    res = os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_OKCANCEL + MB_ICONQUESTION)
+    give res == 1 # IDOK
+}
+
