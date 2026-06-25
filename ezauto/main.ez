@@ -12,7 +12,10 @@ model AutoFFI {
     static keybdEvent = os_get_func(__u32, "keybd_event")
     static getSystemMetrics = os_get_func(__u32, "GetSystemMetrics")
     static vkKeyScanA = os_get_func(__u32, "VkKeyScanA")
+    static mapVirtualKeyA = os_get_func(__u32, "MapVirtualKeyA")
 }
+
+KEYEVENTF_EXTENDEDKEY = 0x0001
 
 # Mouse constants
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -89,7 +92,11 @@ export task down(keyStr) {
         }
     }
     when vk != nil {
-        os_call(AutoFFI.keybdEvent, "int", vk, 0, 0, 0)
+        scan = os_call(AutoFFI.mapVirtualKeyA, "int", vk, 0)
+        flags = 0
+        when vk >= 0x21 and vk <= 0x2E { flags = KEYEVENTF_EXTENDEDKEY }
+        when vk == 0x5B or vk == 0x5C { flags = KEYEVENTF_EXTENDEDKEY }
+        os_call(AutoFFI.keybdEvent, "int", vk, scan, flags, 0)
     }
 }
 
@@ -105,7 +112,11 @@ export task up(keyStr) {
         }
     }
     when vk != nil {
-        os_call(AutoFFI.keybdEvent, "int", vk, 0, KEYEVENTF_KEYUP, 0)
+        scan = os_call(AutoFFI.mapVirtualKeyA, "int", vk, 0)
+        flags = KEYEVENTF_KEYUP
+        when vk >= 0x21 and vk <= 0x2E { flags = flags + KEYEVENTF_EXTENDEDKEY }
+        when vk == 0x5B or vk == 0x5C { flags = flags + KEYEVENTF_EXTENDEDKEY }
+        os_call(AutoFFI.keybdEvent, "int", vk, scan, flags, 0)
     }
 }
 
@@ -131,15 +142,19 @@ export task type(text) {
         # shiftState bit 1 is SHIFT
         needsShift = (shiftState % 2) == 1
         
+        scanCode = os_call(AutoFFI.mapVirtualKeyA, "int", vkCode, 0)
+        
         when needsShift {
-            os_call(AutoFFI.keybdEvent, "int", 0x10, 0, 0, 0) # shift down
+            shiftScan = os_call(AutoFFI.mapVirtualKeyA, "int", 0x10, 0)
+            os_call(AutoFFI.keybdEvent, "int", 0x10, shiftScan, 0, 0) # shift down
         }
         
-        os_call(AutoFFI.keybdEvent, "int", vkCode, 0, 0, 0)
-        os_call(AutoFFI.keybdEvent, "int", vkCode, 0, KEYEVENTF_KEYUP, 0)
+        os_call(AutoFFI.keybdEvent, "int", vkCode, scanCode, 0, 0)
+        os_call(AutoFFI.keybdEvent, "int", vkCode, scanCode, KEYEVENTF_KEYUP, 0)
         
         when needsShift {
-            os_call(AutoFFI.keybdEvent, "int", 0x10, 0, KEYEVENTF_KEYUP, 0) # shift up
+            shiftScan = os_call(AutoFFI.mapVirtualKeyA, "int", 0x10, 0)
+            os_call(AutoFFI.keybdEvent, "int", 0x10, shiftScan, KEYEVENTF_KEYUP, 0) # shift up
         }
     }
 }
