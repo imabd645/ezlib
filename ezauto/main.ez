@@ -82,7 +82,8 @@ export task down(keyStr) {
     when vk == nil {
         when len(keyStr) == 1 {
             buf = buffer(keyStr)
-            byte_val = os_read_byte(buf, 0)
+            addr = os_buffer_addr(buf)
+            byte_val = os_read_byte(addr, 0)
             res = os_call(AutoFFI.vkKeyScanA, "int", byte_val)
             vk = res % 256
         }
@@ -97,7 +98,8 @@ export task up(keyStr) {
     when vk == nil {
         when len(keyStr) == 1 {
             buf = buffer(keyStr)
-            byte_val = os_read_byte(buf, 0)
+            addr = os_buffer_addr(buf)
+            byte_val = os_read_byte(addr, 0)
             res = os_call(AutoFFI.vkKeyScanA, "int", byte_val)
             vk = res % 256
         }
@@ -115,9 +117,10 @@ export task press(keyStr) {
 export task type(text) {
     buf = buffer(text)
     sz = buf_size(buf)
+    addr = os_buffer_addr(buf)
     
     repeat i = 0 to sz - 1 {
-        byte_val = os_read_byte(buf, i)
+        byte_val = os_read_byte(addr, i)
         
         # Get Virtual Key Code and Shift State
         res = os_call(AutoFFI.vkKeyScanA, "int", byte_val)
