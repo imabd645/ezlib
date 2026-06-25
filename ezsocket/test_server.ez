@@ -1,0 +1,39 @@
+use "socket"
+
+server = socket.create()
+when server == -1 {
+    print("Failed to create server socket")
+    exit(1)
+}
+
+success = socket.bind(server, "127.0.0.1", 8080)
+when not success {
+    print("Failed to bind socket")
+    exit(1)
+}
+
+success = socket.listen(server, 10)
+when not success {
+    print("Failed to listen on socket")
+    exit(1)
+}
+
+print("TCP Echo Server listening on 127.0.0.1:8080...")
+
+client = socket.accept(server)
+when client != -1 {
+    print("Client connected!")
+    
+    # Receive data from client
+    msg = socket.recv(client, 1024)
+    print("Received: " + msg)
+    
+    # Echo back
+    socket.send(client, "Echo: " + msg)
+    
+    socket.close(client)
+}
+
+socket.close(server)
+print("Server shut down.")
+

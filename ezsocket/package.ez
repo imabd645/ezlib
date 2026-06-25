@@ -1,0 +1,6 @@
+{
+    "name": "socket",
+    "version": "1.0.0",
+    "description": "Full Windows Sockets 2 (ws2_32) networking library.",
+    "entry": "main.ez"
+}

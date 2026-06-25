@@ -1,0 +1,108 @@
+# ============================================================================
+# EZ Socket Library
+# Full WinSock2 (ws2_32.dll) wrapper
+# ============================================================================
+
+__ws2 = os_load_lib("ws2_32.dll")
+
+model SockFFI {
+    static wsaStartup = os_get_func(__ws2, "WSAStartup")
+    static wsaCleanup = os_get_func(__ws2, "WSACleanup")
+    static socket = os_get_func(__ws2, "socket")
+    static bind = os_get_func(__ws2, "bind")
+    static listen = os_get_func(__ws2, "listen")
+    static accept = os_get_func(__ws2, "accept")
+    static connect = os_get_func(__ws2, "connect")
+    static send = os_get_func(__ws2, "send")
+    static recv = os_get_func(__ws2, "recv")
+    static closesocket = os_get_func(__ws2, "closesocket")
+    static htons = os_get_func(__ws2, "htons")
+    static inet_addr = os_get_func(__ws2, "inet_addr")
+}
+
+AF_INET = 2
+SOCK_STREAM = 1
+IPPROTO_TCP = 6
+
+wsaData = os_alloc(512)
+res = os_call(SockFFI.wsaStartup, "int", 0x0202, wsaData) # version 2.2
+when res != 0 {
+    print("WSAStartup failed with error: " + res)
+}
+os_free(wsaData)
+
+task build_sockaddr(ip, port) {
+    addr = os_alloc(16)
+    os_write_uint16(addr, 0, AF_INET)
+    n_port = os_call(SockFFI.htons, "int", port)
+    os_write_uint16(addr, 2, n_port)
+    n_ip = os_call(SockFFI.inet_addr, "int", str(ip))
+    os_write_uint32(addr, 4, n_ip)
+    os_write_uint64(addr, 8, 0)
+    give addr
+}
+
+export task create() {
+    sock = os_call(SockFFI.socket, "int", AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    give sock
+}
+
+export task bind(sock, ip, port) {
+    addr = build_sockaddr(ip, port)
+    res = os_call(SockFFI.bind, "int", sock, addr, 16)
+    os_free(addr)
+    give res == 0
+}
+
+export task listen(sock, backlog = 10) {
+    res = os_call(SockFFI.listen, "int", sock, backlog)
+    give res == 0
+}
+
+export task accept(sock) {
+    addr = os_alloc(16)
+    addrlen = os_alloc(4)
+    os_write_uint32(addrlen, 0, 16)
+    
+    client_sock = os_call(SockFFI.accept, "int", sock, addr, addrlen)
+    
+    os_free(addr)
+    os_free(addrlen)
+    
+    give client_sock
+}
+
+export task connect(sock, ip, port) {
+    addr = build_sockaddr(ip, port)
+    res = os_call(SockFFI.connect, "int", sock, addr, 16)
+    os_free(addr)
+    give res == 0
+}
+
+export task send(sock, text) {
+    str_val = str(text)
+    sz = len(str_val)
+    res = os_call(SockFFI.send, "int", sock, str_val, sz, 0)
+    give res
+}
+
+export task recv(sock, buf_size = 4096) {
+    buf = os_alloc(buf_size + 1)
+    res = os_call(SockFFI.recv, "int", sock, buf, buf_size, 0)
+    
+    when res <= 0 {
+        os_free(buf)
+        give ""
+    }
+    
+    os_write_byte(buf, res, 0)
+    text = os_read_string_ptr(buf)
+    os_free(buf)
+    
+    give text
+}
+
+export task close(sock) {
+    os_call(SockFFI.closesocket, "int", sock)
+}
+

@@ -1,0 +1,24 @@
+use "socket"
+
+client = socket.create()
+when client == -1 {
+    print("Failed to create client socket")
+    exit(1)
+}
+
+print("Connecting to 127.0.0.1:8080...")
+success = socket.connect(client, "127.0.0.1", 8080)
+when not success {
+    print("Failed to connect to server!")
+    exit(1)
+}
+
+print("Connected! Sending message...")
+socket.send(client, "Hello from EZ Sockets!")
+
+# Wait for echo
+msg = socket.recv(client, 1024)
+print("Server replied: " + msg)
+
+socket.close(client)
+
