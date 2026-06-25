@@ -54,7 +54,7 @@ export task bind(sock, ip, port) {
     give res == 0
 }
 
-export task listen(sock, backlog = 10) {
+export task listen(sock, backlog) {
     res = os_call(SockFFI.listen, "int", sock, backlog)
     give res == 0
 }
@@ -86,7 +86,7 @@ export task send(sock, text) {
     give res
 }
 
-export task recv(sock, buf_size = 4096) {
+export task recv(sock, buf_size) {
     buf = os_alloc(buf_size + 1)
     res = os_call(SockFFI.recv, "int", sock, buf, buf_size, 0)
     

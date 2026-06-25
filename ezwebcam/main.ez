@@ -39,7 +39,7 @@ _hwndParent = 0
 _hwndCap = 0
 
 # Open the webcam and show the preview window
-export task open(title = "EZ Webcam", width = 640, height = 480) {
+export task start(title, width, height) {
     
     # 1. Create a generic parent window using the pre-registered STATIC class
     _hwndParent = os_call(WebcamFFI.createWindow, "ptr", 

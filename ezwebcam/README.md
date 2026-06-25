@@ -11,7 +11,7 @@ use "webcam"
 
 ```javascript
 # Open the webcam stream in a new native window
-success = webcam.open("Live Feed", 640, 480)
+success = webcam.start("Live Feed", 640, 480)
 
 # Keep the window refreshing smoothly
 while true {

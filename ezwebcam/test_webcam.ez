@@ -1,10 +1,10 @@
-use "webcam"
-use "auto"
-use "notify"
+use "webcam" as webcam
+use "auto" as auto
+use "notify"  as notify
 
 notify.alert("A webcam window will now open! Press SPACE to take a photo. Press ESCAPE to exit.", "Webcam App")
 
-success = webcam.open("My EZ Webcam", 640, 480)
+success = webcam.start("My EZ Webcam", 640, 480)
 when not success {
     exit(1)
 }
@@ -20,7 +20,7 @@ while running {
     
     # Check if SPACE is pressed
     when auto.is_down("space") {
-        filename = "photo_" + photo_count + ".bmp"
+        filename = "photo_" + str(photo_count) + ".bmp"
         webcam.capture(filename)
         print("Captured: " + filename)
         photo_count = photo_count + 1
