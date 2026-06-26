@@ -7,6 +7,7 @@ __u32 = os_load_lib("User32.dll")
 
 model NotifyFFI {
     static messageBox = os_get_func(__u32, "MessageBoxA")
+    static messageBoxTimeout = os_get_func(__u32, "MessageBoxTimeoutA")
 }
 
 # uType flags
@@ -45,5 +46,24 @@ export task confirm(message, title = "Confirm") {
 export task prompt(message, title = "Prompt") {
     res = os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), MB_OKCANCEL + MB_ICONQUESTION)
     give res == 1 # IDOK
+}
+
+# Show a popup that automatically disappears after timeoutMs
+export task popup(message, title = "EZ Notification", timeoutMs = 3000) {
+    # signature: int MessageBoxTimeoutA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType, WORD wLanguageId, DWORD dwMilliseconds);
+    # 0x00000040 = MB_ICONINFORMATION
+    res = os_call(NotifyFFI.messageBoxTimeout, "int", 0, str(message), str(title), MB_OK + MB_ICONINFORMATION, 0, timeoutMs)
+    give res == 1 # IDOK (or 32000 for timeout on some systems)
+}
+
+# Show a Windows System Tray (Balloon) notification asynchronously using a PowerShell wrapper
+export task tray(message, title = "EZ Notification", timeoutMs = 3000) {
+    kernel32 = os_load_lib("kernel32.dll")
+    winExec = os_get_func(kernel32, "WinExec")
+    
+    psCmd = "powershell -WindowStyle Hidden -Command \"Add-Type -AssemblyName System.Windows.Forms; $b=New-Object System.Windows.Forms.NotifyIcon; $b.Icon=[System.Drawing.SystemIcons]::Information; $b.BalloonTipTitle='" + str(title) + "'; $b.BalloonTipText='" + str(message) + "'; $b.Visible=$true; $b.ShowBalloonTip(" + str(timeoutMs) + "); Start-Sleep -Milliseconds " + str(timeoutMs) + "; $b.Dispose()\""
+    
+    # WinExec(cmd, 0) -> SW_HIDE (0) ensures it runs completely in the background
+    os_call(winExec, "int", psCmd, 0)
 }
 

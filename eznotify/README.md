@@ -2,10 +2,19 @@
 
 A simple library for displaying native Windows dialog boxes and prompts using FFI (`MessageBoxA`).
 
-## Installation
-```javascript
-use "notify"
-```
+## API Reference
+
+### `alert(message, title = "EZ Notification")`
+Shows a standard informational alert box.
+
+### `popup(message, title = "EZ Notification", timeoutMs = 3000)`
+Shows a non-blocking informational popup that automatically disappears after the specified number of milliseconds! Utilizes the undocumented Windows `MessageBoxTimeoutA` API to achieve this seamlessly.
+
+### `tray(message, title = "EZ Notification", timeoutMs = 3000)`
+Shows a standard Windows System Tray (balloon) notification. This is achieved by transparently constructing a background PowerShell command via the `WinExec` FFI API, ensuring your EZ script continues executing instantly without blocking.
+
+### `error(message, title = "Error")`
+Shows a standard error dialog box.
 
 ## Usage
 
