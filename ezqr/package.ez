@@ -1,0 +1,9 @@
+{
+    "name": "ezqr",
+    "version": "1.0.0",
+    "description": "A native QR code generator for EZ utilizing libqrencode via FFI.",
+    "authors": ["EZ Community"],
+    "main": "main.ez",
+    "keywords": ["qr", "qrcode", "ffi"],
+    "dependencies": {}
+}

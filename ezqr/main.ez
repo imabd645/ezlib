@@ -1,0 +1,198 @@
+# ============================================================================
+# ezqr - QR Code Generator for EZ Language
+# Wraps the native libqrencode C library using FFI
+# ============================================================================
+
+export model QRCode {
+    init(text, errorLevel) {
+        # Set Windows console to UTF-8 to render ASCII blocks correctly
+        k32 = os_load_lib("kernel32.dll")
+        when k32 != 0 and type(k32) != "nil" {
+            setCP = os_get_func(k32, "SetConsoleOutputCP")
+            when setCP != 0 and type(setCP) != "nil" {
+                os_call(setCP, "int", 65001)
+            }
+        }
+
+        # errorLevel: 0 (L), 1 (M), 2 (Q), 3 (H)
+        when errorLevel == nil { errorLevel = 0 }
+        
+        self.lib = os_load_lib("C:\\ezlib\\ezqr\\dll\\libqrencode.dll")
+        when self.lib == 0 or type(self.lib) == "nil" {
+            self.lib = os_load_lib("libqrencode.dll")
+        }
+        when self.lib == 0 or type(self.lib) == "nil" {
+            self.lib = os_load_lib("libqrencode-4.dll")
+        }
+        when self.lib == 0 or type(self.lib) == "nil" {
+            self.lib = os_load_lib("C:\\msys64\\mingw64\\bin\\libqrencode.dll")
+        }
+        when self.lib == 0 or type(self.lib) == "nil" {
+            throw "Error: libqrencode not found. Ensure mingw-w64-x86_64-qrencode is installed."
+        }
+
+        self.encodeStrFunc = os_get_func(self.lib, "QRcode_encodeString")
+        self.freeFunc = os_get_func(self.lib, "QRcode_free")
+
+        # QRcode_encodeString(text, 0, errorLevel, 2, 1)
+        self.handle = os_call(self.encodeStrFunc, "ptr", text, 0, errorLevel, 2, 1)
+        
+        when self.handle == 0 {
+            throw "Error generating QR code"
+        }
+        
+        self.version = os_read_uint32(self.handle, 0)
+        self.width = os_read_uint32(self.handle, 4)
+        self.dataPtr = os_read_uint64(self.handle, 8)
+        
+        self.matrix = []
+        size = self.width * self.width
+        rawBuf = os_buffer_from_ptr(self.dataPtr, size)
+        
+        repeat y = 0 to self.width - 1 {
+            row = []
+            repeat x = 0 to self.width - 1 {
+                idx = (y * self.width) + x
+                val = rawBuf[idx]
+                isBlack = (val & 1) == 1
+                push(row, isBlack)
+            }
+            push(self.matrix, row)
+        }
+        
+        os_call(self.freeFunc, "void", self.handle)
+        self.handle = 0
+    }
+    
+    task toMatrix() {
+        give self.matrix
+    }
+    
+    task toAscii() {
+        result = ""
+        border = 2
+        
+        fullWidth = self.width + (border * 2)
+        fullHeight = self.width + (border * 2)
+        
+        y = 0
+        while y < fullHeight {
+            lineStr = ""
+            x = 0
+            while x < fullWidth {
+                mx = x - border
+                my1 = y - border
+                my2 = y + 1 - border
+                
+                top = false
+                when mx >= 0 and mx < self.width and my1 >= 0 and my1 < self.width {
+                    top = self.matrix[my1][mx]
+                }
+                
+                bottom = false
+                when mx >= 0 and mx < self.width and my2 >= 0 and my2 < self.width {
+                    bottom = self.matrix[my2][mx]
+                }
+                
+                when top and bottom { lineStr = lineStr + " " }
+                other when top and not bottom { lineStr = lineStr + "▄" }
+                other when not top and bottom { lineStr = lineStr + "▀" }
+                other { lineStr = lineStr + "█" }
+                
+                x = x + 1
+            }
+            result = result + lineStr + "\n"
+            y = y + 2
+        }
+        give result
+    }
+
+    task saveImage(filepath, scale) {
+        when scale == nil { scale = 10 }
+        
+        border = 4
+        fullWidth = self.width + (border * 2)
+        pxWidth = fullWidth * scale
+        pxHeight = pxWidth 
+        
+        rowBytes = pxWidth * 3
+        padding = (4 - (rowBytes % 4)) % 4
+        paddedRowBytes = rowBytes + padding
+        
+        pixelDataSize = paddedRowBytes * pxHeight
+        fileSize = 54 + pixelDataSize
+        
+        buf = os_alloc(fileSize)
+        
+        os_write_byte(buf, 0, 66)
+        os_write_byte(buf, 1, 77)
+        os_write_uint32(buf, 2, fileSize)
+        os_write_uint32(buf, 6, 0)
+        os_write_uint32(buf, 10, 54)
+        
+        os_write_uint32(buf, 14, 40)
+        os_write_uint32(buf, 18, pxWidth)
+        os_write_uint32(buf, 22, pxHeight)
+        os_write_uint16(buf, 26, 1)
+        os_write_uint16(buf, 28, 24)
+        os_write_uint32(buf, 30, 0)
+        os_write_uint32(buf, 34, pixelDataSize)
+        os_write_uint32(buf, 38, 2835)
+        os_write_uint32(buf, 42, 2835)
+        os_write_uint32(buf, 46, 0)
+        os_write_uint32(buf, 50, 0)
+        
+        offset = 54
+        y = 0
+        while y < pxHeight {
+            visualY = pxHeight - 1 - y
+            moduleY = (visualY / scale) - border
+            
+            x = 0
+            while x < pxWidth {
+                moduleX = (x / scale) - border
+                
+                isBlack = false
+                when moduleY >= 0 and moduleY < self.width and moduleX >= 0 and moduleX < self.width {
+                    isBlack = self.matrix[moduleY][moduleX]
+                }
+                
+                rgbVal = 255
+                when isBlack { rgbVal = 0 }
+                
+                os_write_byte(buf, offset, rgbVal)
+                os_write_byte(buf, offset + 1, rgbVal)
+                os_write_byte(buf, offset + 2, rgbVal)
+                
+                offset = offset + 3
+                x = x + 1
+            }
+            
+            p = 0
+            while p < padding {
+                os_write_byte(buf, offset, 0)
+                offset = offset + 1
+                p = p + 1
+            }
+            
+            y = y + 1
+        }
+        
+        msvcrt = os_load_lib("msvcrt.dll")
+        fopen = os_get_func(msvcrt, "fopen")
+        fwrite = os_get_func(msvcrt, "fwrite")
+        fclose = os_get_func(msvcrt, "fclose")
+        
+        fp = os_call(fopen, "ptr", filepath, "wb")
+        when fp == 0 {
+            os_free(buf)
+            throw "Failed to open file for writing: " + filepath
+        }
+        
+        os_call(fwrite, "int", buf, 1, fileSize, fp)
+        os_call(fclose, "int", fp)
+        os_free(buf)
+        
+        give true
+    }
+}
