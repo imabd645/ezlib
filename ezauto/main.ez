@@ -165,3 +165,16 @@ export task size() {
     give { "width": w, "height": h }
 }
 
+
+
+export task is_down(keyStr) {
+    vk = VK_MAP[lower(keyStr)]
+    when vk == nil { give false }
+    
+    # GetAsyncKeyState
+    state = os_call(os_get_func(__u32, "GetAsyncKeyState"), "int", vk)
+    
+    # The most significant bit is set if the key is down
+    give (state < 0)
+}
+
