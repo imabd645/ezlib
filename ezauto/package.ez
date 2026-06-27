@@ -3,5 +3,5 @@
     "version": "2.0.0",
     "description": "Desktop automation library for keyboard and mouse control via Win32 API.",
     "entry": "main.ez",
-    "author": ""
+    "author": "Abdullah Masood"
 }
