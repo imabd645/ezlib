@@ -1,6 +1,7 @@
 {
     "name": "audio",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Native audio playback for mp3 and wav files via Win32 FFI.",
-    "entry": "main.ez"
+    "entry": "main.ez",
+    "author": "Abdullah Masood"
 }
