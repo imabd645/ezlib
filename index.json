@@ -743,12 +743,19 @@
       "name": "auto",
       "folder": "ezauto",
       "description": "Desktop automation library for keyboard and mouse control via Win32 API.",
-      "author": "Abdullah Masood",
+      "author": "",
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezauto",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",
