@@ -786,26 +786,6 @@
       ]
     },
     {
-      "name": "eznotification",
-      "folder": "eznotification",
-      "description": "",
-      "author": "Abdullah Masood",
-      "license": "MIT",
-      "keywords": [],
-      "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
-      "versions": [
-        {
-          "version": "1.0.0",
-          "main": "main.ez",
-          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
-          "subfolder": "eznotification",
-          "sha256": "",
-          "dependencies": {}
-        }
-      ]
-    },
-    {
       "name": "notify",
       "folder": "eznotify",
       "description": "Desktop notifications and dialog prompts via Win32 API.",
