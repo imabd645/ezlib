@@ -1,0 +1,44 @@
+use "main.ez" as ezffi
+
+print("--- ezffi Test ---")
+
+user32 = ezffi.load("User32.dll")
+kernel32 = ezffi.load("Kernel32.dll")
+
+when user32 == false {
+    print("Failed to load User32.dll")
+    exit(1)
+}
+
+MessageBox = user32.func("MessageBoxA", ezffi.INT, false)
+print("Bound MessageBoxA successfully")
+
+print("Calling MessageBoxA...")
+MessageBox.call([0, "Hello from ezffi, the EZ version of ctypes!", "ezffi Test", 0])
+
+print("\n--- Pointer Memory Test ---")
+ptr = ezffi.alloc(64)
+when ptr == false {
+    print("Failed to allocate memory")
+    exit(1)
+}
+
+print("Allocated 64 bytes at address: " + str(ptr.ptr))
+ptr.writeString(0, "Testing raw memory string!")
+ptr.writeFloat64(32, 1337.42)
+ptr.writeByte(40, 255)
+
+str_val = ptr.readString()
+float_val = ptr.readFloat64(32)
+byte_val = ptr.readByte(40)
+
+print("Read String: " + str_val)
+print("Read Float64: " + str(float_val))
+print("Read Byte: " + str(byte_val))
+
+when byte_val == 255 {
+    print("Memory tests passed successfully!")
+}
+
+ptr.free()
+print("Memory freed.")

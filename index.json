@@ -936,6 +936,22 @@
           "dependencies": {}
         }
       ]
+    },
+    {
+      "name": "ffi",
+      "folder": "ezffi",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezffi",
+          "dependencies": {}
+        }
+      ],
+      "description": "Python ctypes equivalent for EZ. Dynamically call any Windows .dll and interact with raw heap memory.",
+      "author": "Abdullah Masood"
     }
   ]
 }
