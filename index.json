@@ -887,7 +887,7 @@
       "name": "web",
       "folder": "ezweb",
       "description": "Flask/Express style Web App Framework for EZ",
-      "author": "EZ Development Team",
+      "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",

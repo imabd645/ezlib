@@ -2,9 +2,7 @@
     "name": "web",
     "version": "1.0.0",
     "description": "Flask/Express style Web App Framework for EZ",
-    "author": "EZ Development Team",
+    "author": "Abdullah Masood",
     "main": "main.ez",
-    "dependencies": {
-        
-    }
+    "dependencies": {}
 }
