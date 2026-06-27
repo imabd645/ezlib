@@ -39,11 +39,7 @@ export model Set {
     }
     
     task toArray() {
-        arr = []
-        get k in self.data {
-            push(arr, self.data[k])
-        }
-        give arr
+        give values(self.data)
     }
     
     # --- Set Operations ---
@@ -109,13 +105,13 @@ export model Map {
     
     task keys() {
         ks = []
-        get entry in self.data { push(ks, self.data[entry]["k"]) }
+        get entry in values(self.data) { push(ks, entry["k"]) }
         give ks
     }
     
     task values() {
         vs = []
-        get entry in self.data { push(vs, self.data[entry]["v"]) }
+        get entry in values(self.data) { push(vs, entry["v"]) }
         give vs
     }
 
@@ -247,44 +243,30 @@ export model Deque {
 
 # Queue using dictionary index logic for O(1) operations
 export model Queue {
-    items: any
-    headIdx: any
-    tailIdx: any
+    deque: any
     
     init() {
-        self.items = {}
-        self.headIdx = 0
-        self.tailIdx = 0
+        self.deque = Deque()
     }
     
     task enqueue(val) {
-        self.items[str(self.tailIdx)] = val
-        self.tailIdx = self.tailIdx + 1
+        self.deque.addBack(val)
         give self
     }
     
     task dequeue() {
-        when self.headIdx == self.tailIdx { give nil }
-        val = self.items[str(self.headIdx)]
-        dictRemove(self.items, str(self.headIdx))
-        self.headIdx = self.headIdx + 1
-        give val
+        give self.deque.removeFront()
     }
     
     task peek() {
-        when self.headIdx == self.tailIdx { give nil }
-        give self.items[str(self.headIdx)]
+        give self.deque.peekFront()
     }
     
-    task isEmpty() { give self.headIdx == self.tailIdx }
-    task size() { give self.tailIdx - self.headIdx }
+    task isEmpty() { give self.deque.isEmpty() }
+    task size() { give self.deque.size() }
     
     task print() {
-        arr = []
-        repeat i = self.headIdx to self.tailIdx - 1 {
-            push(arr, self.items[str(i)])
-        }
-        out "Queue[" + join(arr, " <- ") + "]"
+        out "Queue(size=" + str(self.size()) + ")"
     }
 }
 
@@ -405,10 +387,7 @@ export model List {
     }
     
     task prepend(val) {
-        # O(n) operation in Array List
-        newItems = [val]
-        get it in self.items { push(newItems, it) }
-        self.items = newItems
+        insert(self.items, 0, val)
         give self
     }
     
@@ -418,24 +397,14 @@ export model List {
     }
     
     task remove(index) {
-        when index < 0 or index >= len(self.items) { give self }
-        # O(n) operation in Array List
-        newItems = []
-        repeat i = 0 to len(self.items) - 1 {
-            when i != index { push(newItems, self.items[i]) }
+        when index >= 0 and index < len(self.items) { 
+            remove(self.items, index)
         }
-        self.items = newItems
         give self
     }
     
     task reverse() {
-        reversed = []
-        when len(self.items) > 0 {
-            repeat i = len(self.items) - 1 to 0 {
-                push(reversed, self.items[i])
-            }
-        }
-        self.items = reversed
+        reverse(self.items)
         give self
     }
     

@@ -66,7 +66,7 @@
     {
       "name": "collections",
       "folder": "ezcollections",
-      "description": "Classical data structures for EZ \u2014 Set, Map, Queue, Stack, List, and Counter with full OOP interface and method chaining",
+      "description": "Data Structures library for EZ Language. Provides Set, Map/Dictionary, Queue, Stack, LinkedList, Deque, and Counter implementations.",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
