@@ -1,6 +1,7 @@
 {
     "name": "webcam",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Live webcam stream and photo capture via Video for Windows FFI.",
-    "entry": "main.ez"
+    "entry": "main.ez",
+    "author": "Abdullah Masood"
 }

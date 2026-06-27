@@ -1,6 +1,6 @@
 # ============================================================================
-# EZ Webcam Library
-# Live webcam stream and photo capture via Video for Windows
+# EZ Webcam Library (v2.0)
+# Live webcam stream, photo capture, and video recording via Video for Windows
 # ============================================================================
 
 __u32 = os_load_lib("User32.dll")
@@ -21,102 +21,139 @@ model WebcamFFI {
 WS_VISIBLE = 0x10000000
 WS_CHILD = 0x40000000
 WS_OVERLAPPEDWINDOW = 0x00CF0000
+PM_REMOVE = 1
 
 # AVICap messages
 WM_CAP_START = 0x0400
 WM_CAP_DRIVER_CONNECT = WM_CAP_START + 10
 WM_CAP_DRIVER_DISCONNECT = WM_CAP_START + 11
+WM_CAP_FILE_SET_CAPTURE_FILE = WM_CAP_START + 20
 WM_CAP_FILE_SAVEDIB = WM_CAP_START + 25
+WM_CAP_EDIT_COPY = WM_CAP_START + 30
+WM_CAP_DLG_VIDEOFORMAT = WM_CAP_START + 41
+WM_CAP_DLG_VIDEOSOURCE = WM_CAP_START + 42
 WM_CAP_SET_PREVIEW = WM_CAP_START + 50
 WM_CAP_SET_PREVIEWRATE = WM_CAP_START + 52
 WM_CAP_SET_SCALE = WM_CAP_START + 53
+WM_CAP_SEQUENCE = WM_CAP_START + 62
+WM_CAP_STOP = WM_CAP_START + 68
 
-# PM_REMOVE
-PM_REMOVE = 1
 
-# Globals to hold state
-_hwndParent = 0
-_hwndCap = 0
+export model Webcam {
+    hwndParent: any
+    hwndCap: any
 
-# Open the webcam and show the preview window
-export task start(title, width, height) {
-    
-    # 1. Create a generic parent window using the pre-registered STATIC class
-    _hwndParent = os_call(WebcamFFI.createWindow, "ptr", 
-        0, 
-        str("STATIC"), 
-        str(title), 
-        WS_VISIBLE + WS_OVERLAPPEDWINDOW, 
-        100, 100, width + 16, height + 39, # add padding for window borders
-        0, 0, 0, 0
-    )
-    
-    when _hwndParent == 0 {
-        print("Failed to create parent window")
+    # Open the webcam and show the preview window
+    init(title, width, height) {
+        # 1. Create a generic parent window using the pre-registered STATIC class
+        self.hwndParent = os_call(WebcamFFI.createWindow, "ptr", 
+            0, str("STATIC"), str(title), WS_VISIBLE + WS_OVERLAPPEDWINDOW, 
+            100, 100, width + 16, height + 39, 0, 0, 0, 0)
+        
+        when self.hwndParent == 0 {
+            print("Failed to create parent window")
+            give self
+        }
+        
+        # 2. Create the capture window embedded inside the parent
+        self.hwndCap = os_call(WebcamFFI.capCreateCaptureWindow, "ptr",
+            str("Capture"), WS_CHILD + WS_VISIBLE, 0, 0, width, height, self.hwndParent, 0)
+        
+        when self.hwndCap == 0 {
+            print("Failed to create capture window")
+            give self
+        }
+        
+        # 3. Connect to driver 0 (Default webcam)
+        res = os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DRIVER_CONNECT, 0, 0)
+        when res == 0 {
+            print("Failed to connect to webcam driver. Make sure your webcam is plugged in and not in use.")
+            give self
+        }
+        
+        # 4. Set preview rate to 30ms (approx 30 FPS)
+        os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_SET_PREVIEWRATE, 30, 0)
+        
+        # 5. Enable scaling to fit window
+        os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_SET_SCALE, 1, 0)
+        
+        # 6. Start preview
+        os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_SET_PREVIEW, 1, 0)
+        
+        give self
+    }
+
+    # Must be called continuously in a while loop to keep the window rendering smoothly!
+    task update() {
+        msgBuf = os_alloc(64) # MSG struct
+        while os_call(WebcamFFI.peekMessage, "int", msgBuf, 0, 0, 0, PM_REMOVE) != 0 {
+            os_call(WebcamFFI.translateMessage, "int", msgBuf)
+            os_call(WebcamFFI.dispatchMessage, "int", msgBuf)
+        }
+        os_free(msgBuf)
+    }
+
+    # Capture the current frame and save to a BMP file
+    task capturePhoto(filepath) {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_FILE_SAVEDIB, 0, str(filepath))
+            give true
+        }
         give false
     }
-    
-    # 2. Create the capture window embedded inside the parent
-    _hwndCap = os_call(WebcamFFI.capCreateCaptureWindow, "ptr",
-        str("Capture"),
-        WS_CHILD + WS_VISIBLE,
-        0, 0, width, height,
-        _hwndParent, 0
-    )
-    
-    when _hwndCap == 0 {
-        print("Failed to create capture window")
+
+    # Start recording a video to an AVI file
+    task startRecording(filepath) {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_FILE_SET_CAPTURE_FILE, 0, str(filepath))
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_SEQUENCE, 0, 0)
+            give true
+        }
         give false
     }
-    
-    # 3. Connect to driver 0 (Default webcam)
-    res = os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_DRIVER_CONNECT, 0, 0)
-    when res == 0 {
-        print("Failed to connect to webcam driver. Make sure your webcam is plugged in and not in use.")
+
+    # Stop recording the video
+    task stopRecording() {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_STOP, 0, 0)
+            give true
+        }
         give false
     }
-    
-    # 4. Set preview rate to 30ms (approx 30 FPS)
-    os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_SET_PREVIEWRATE, 30, 0)
-    
-    # 5. Enable scaling to fit window
-    os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_SET_SCALE, 1, 0)
-    
-    # 6. Start preview
-    os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_SET_PREVIEW, 1, 0)
-    
-    give true
-}
 
-# Must be called continuously in a while loop to keep the window rendering smoothly!
-export task update() {
-    msgBuf = os_alloc(64) # MSG struct
-    while os_call(WebcamFFI.peekMessage, "int", msgBuf, 0, 0, 0, PM_REMOVE) != 0 {
-        os_call(WebcamFFI.translateMessage, "int", msgBuf)
-        os_call(WebcamFFI.dispatchMessage, "int", msgBuf)
+    # Copy the current frame to the Windows clipboard
+    task copyToClipboard() {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_EDIT_COPY, 0, 0)
+            give true
+        }
+        give false
     }
-    os_free(msgBuf)
-}
 
-# Capture the current frame and save to a BMP file
-export task capture(filepath) {
-    when _hwndCap != 0 {
-        os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_FILE_SAVEDIB, 0, str(filepath))
-        give true
+    # Open the hardware-specific video format dialog
+    task showFormatDialog() {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DLG_VIDEOFORMAT, 0, 0)
+        }
     }
-    give false
-}
 
-# Disconnect the webcam and close the window
-export task close() {
-    when _hwndCap != 0 {
-        os_call(WebcamFFI.sendMessage, "int", _hwndCap, WM_CAP_DRIVER_DISCONNECT, 0, 0)
-        os_call(WebcamFFI.destroyWindow, "int", _hwndCap)
-        _hwndCap = 0
+    # Open the hardware-specific video source dialog
+    task showSourceDialog() {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DLG_VIDEOSOURCE, 0, 0)
+        }
     }
-    when _hwndParent != 0 {
-        os_call(WebcamFFI.destroyWindow, "int", _hwndParent)
-        _hwndParent = 0
+
+    # Disconnect the webcam and close the window
+    task close() {
+        when self.hwndCap != 0 {
+            os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DRIVER_DISCONNECT, 0, 0)
+            os_call(WebcamFFI.destroyWindow, "int", self.hwndCap)
+            self.hwndCap = 0
+        }
+        when self.hwndParent != 0 {
+            os_call(WebcamFFI.destroyWindow, "int", self.hwndParent)
+            self.hwndParent = 0
+        }
     }
 }
-

@@ -925,8 +925,15 @@
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "versions": [
+        {
+          "version": "1.0.1",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezwebcam",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",
