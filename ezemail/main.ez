@@ -37,6 +37,11 @@ CURLOPT_SSL_VERIFYPEER = 64
 CURLOPT_SSL_VERIFYHOST = 81
 CURLOPT_USE_SSL = 119
 CURLOPT_VERBOSE = 41
+CURLOPT_CAINFO = 10065
+CURLOPT_SSLVERSION = 32
+CURLOPT_SSL_OPTIONS = 216
+CURLSSLOPT_NATIVE_CA = 16
+CURL_SSLVERSION_TLSv1_2 = 5
 
 model SmtpClient {
     init(server, port, username, password) {
@@ -50,6 +55,12 @@ model SmtpClient {
         self.replyTo = ""
         self.priority = ""  # e.g., "1" (High), "3" (Normal), "5" (Low)
         self.customHeaders = {}
+        
+        # Security & TLS Defaults
+        self.verifyCert = true
+        self.caBundlePath = ""
+        self.useNativeCa = true
+        self.minTlsVersion = CURL_SSLVERSION_TLSv1_2
     }
 
     task send(fromEmail, toEmail, subject, body) {
@@ -84,9 +95,28 @@ model SmtpClient {
             os_call(CurlFFI.setopt, "int", curl, CURLOPT_USE_SSL, 3) # CURLUSESSL_ALL
         }
 
-        # Disable cert validation for compatibility
-        os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYPEER, 0)
-        os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYHOST, 0)
+        # Set Minimum TLS Version
+        os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSLVERSION, self.minTlsVersion)
+
+        # SSL Certificate Validation
+        when self.verifyCert {
+            os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYPEER, 1)
+            os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYHOST, 2)
+            
+            # Use native Windows certificate store if requested
+            when self.useNativeCa {
+                os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA)
+            }
+            
+            # Use custom CA bundle if provided
+            when len(self.caBundlePath) > 0 {
+                os_call(CurlFFI.setopt, "int", curl, CURLOPT_CAINFO, self.caBundlePath)
+            }
+        } other {
+            # Insecure mode: Do not verify certificates (Vulnerable to MITM)
+            os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYPEER, 0)
+            os_call(CurlFFI.setopt, "int", curl, CURLOPT_SSL_VERIFYHOST, 0)
+        }
 
         # Verbose option for debugging connection issues
         when self.verbose {
