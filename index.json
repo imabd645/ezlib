@@ -806,7 +806,7 @@
       ]
     },
     {
-      "name": "ezpm",
+      "name": "pm",
       "folder": "ezpm",
       "description": "Enhanced EZ Package Manager with version resolution, lock files, and SHA verification",
       "author": "Abdullah Masood",
@@ -830,7 +830,7 @@
       ]
     },
     {
-      "name": "ezqr",
+      "name": "qr",
       "folder": "ezqr",
       "description": "A native QR code generator for EZ utilizing libqrencode via FFI.",
       "author": "Abdullah Masood",
