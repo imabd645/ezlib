@@ -102,7 +102,7 @@
     {
       "name": "crypto",
       "folder": "ezcrypto",
-      "description": "Cryptography library for EZ \u2014 Base64 encoder/decoder, RC4 stream cipher, and Crypto facade. Built entirely on native EZ bitwise operations with no external dependencies",
+      "description": "AES-256 Encryption, SHA Hashing, and Base64 bindings for EZ Language",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
@@ -115,8 +115,15 @@
         "bitwise"
       ],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezcrypto",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",

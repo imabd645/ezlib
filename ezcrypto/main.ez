@@ -100,11 +100,12 @@ task _readBuffer(buf, size) {
 # Convert a byte array [0..255] to a lowercase hex string
 task _toHex(bytes) {
     hc = "0123456789abcdef"
-    result = ""
+    parts = []
     get b in bytes {
-        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+        push(parts, substr(hc, (b >> 4) & 15, 1))
+        push(parts, substr(hc, b & 15, 1))
     }
-    give result
+    give join(parts, "")
 }
 
 # Convert a hex string back to a byte array
@@ -216,12 +217,14 @@ export model SecureRandom {
         task bh(b) {
             give substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
         }
-        give bh(bs[0])  + bh(bs[1])  + bh(bs[2])  + bh(bs[3])  + "-" +
-             bh(bs[4])  + bh(bs[5])  + "-" +
-             bh(bs[6])  + bh(bs[7])  + "-" +
-             bh(bs[8])  + bh(bs[9])  + "-" +
-             bh(bs[10]) + bh(bs[11]) + bh(bs[12]) +
-             bh(bs[13]) + bh(bs[14]) + bh(bs[15])
+        give join([
+             bh(bs[0]),  bh(bs[1]),  bh(bs[2]),  bh(bs[3]),  "-",
+             bh(bs[4]),  bh(bs[5]),  "-",
+             bh(bs[6]),  bh(bs[7]),  "-",
+             bh(bs[8]),  bh(bs[9]),  "-",
+             bh(bs[10]), bh(bs[11]), bh(bs[12]),
+             bh(bs[13]), bh(bs[14]), bh(bs[15])
+        ], "")
     }
 }
 
@@ -268,19 +271,20 @@ export model HMAC {
         }
 
         # Build ipad-key and opad-key strings
-        ipadStr = ""
-        opadStr = ""
+        ipadBytes = []
+        opadBytes = []
         repeat i = 0 to blockLen - 1 {
-            ipadStr = ipadStr + chr(keyBytes[i] ^ 54)   # 0x36
-            opadStr = opadStr + chr(keyBytes[i] ^ 92)   # 0x5C
+            push(ipadBytes, keyBytes[i] ^ 54)   # 0x36
+            push(opadBytes, keyBytes[i] ^ 92)   # 0x5C
         }
+        ipadStr = bytesToString(ipadBytes)
+        opadStr = bytesToString(opadBytes)
 
         # Inner: H( ipadKey ‖ message )
         innerBytes = _hashBytes(ipadStr + message, algId, hashLen)
 
         # Convert inner hash bytes → raw string for outer hash input
-        innerStr = ""
-        get b in innerBytes { innerStr = innerStr + chr(b) }
+        innerStr = bytesToString(innerBytes)
 
         # Outer: H( opadKey ‖ inner )
         outerBytes = _hashBytes(opadStr + innerStr, algId, hashLen)
@@ -319,8 +323,7 @@ export model PBKDF2 {
 
             # Iterations 2..c: U_n = HMAC(P, U_{n-1})
             repeat _iter = 2 to iterations {
-                uStr = ""
-                get b in uBytes { uStr = uStr + chr(b) }
+                uStr = bytesToString(uBytes)
                 uHex   = HMAC.sha256(password, uStr)
                 uBytes = _hexToBytes(uHex)
                 repeat k = 0 to len(block) - 1 {
@@ -458,9 +461,7 @@ export model AES {
         when isEncrypt {
             give Base64.encode(outBytes)
         } other {
-            result = ""
-            get b in outBytes { result = result + chr(b) }
-            give result
+            give bytesToString(outBytes)
         }
     }
 }
@@ -473,7 +474,7 @@ export model Base64 {
 
     static task encode(input) {
         isStr = type(input) == "string"
-        res   = ""
+        parts = []
         l     = len(input)
         when l == 0 { give "" }
 
@@ -488,10 +489,10 @@ export model Base64 {
                 b0 = input[i]  b1 = input[i+1]  b2 = input[i+2]
             }
             n  = (b0 << 16) | (b1 << 8) | b2
-            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
-                        substr(Base64.chars, (n >> 12) & 63, 1) +
-                        substr(Base64.chars, (n >> 6)  & 63, 1) +
-                        substr(Base64.chars, n & 63, 1)
+            push(parts, substr(Base64.chars, (n >> 18) & 63, 1))
+            push(parts, substr(Base64.chars, (n >> 12) & 63, 1))
+            push(parts, substr(Base64.chars, (n >> 6)  & 63, 1))
+            push(parts, substr(Base64.chars, n & 63, 1))
             i = i + 3
         }
 
@@ -500,8 +501,9 @@ export model Base64 {
             b0 = 0
             when isStr { b0 = ord(substr(input, i, 1)) } other { b0 = input[i] }
             n  = b0 << 16
-            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
-                        substr(Base64.chars, (n >> 12) & 63, 1) + "=="
+            push(parts, substr(Base64.chars, (n >> 18) & 63, 1))
+            push(parts, substr(Base64.chars, (n >> 12) & 63, 1))
+            push(parts, "==")
         }
         other when rem == 2 {
             b0 = 0  b1 = 0
@@ -510,11 +512,12 @@ export model Base64 {
                 b1 = ord(substr(input, i+1, 1))
             } other { b0 = input[i]  b1 = input[i+1] }
             n  = (b0 << 16) | (b1 << 8)
-            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
-                        substr(Base64.chars, (n >> 12) & 63, 1) +
-                        substr(Base64.chars, (n >> 6)  & 63, 1) + "="
+            push(parts, substr(Base64.chars, (n >> 18) & 63, 1))
+            push(parts, substr(Base64.chars, (n >> 12) & 63, 1))
+            push(parts, substr(Base64.chars, (n >> 6)  & 63, 1))
+            push(parts, "=")
         }
-        give res
+        give join(parts, "")
     }
 
     static task decodeToBytes(encoded) {
@@ -555,9 +558,7 @@ export model Base64 {
 
     static task decode(encoded) {
         bytes = Base64.decodeToBytes(encoded)
-        res = ""
-        get b in bytes { res = res + chr(b) }
-        give res
+        give bytesToString(bytes)
     }
 }
 
@@ -635,8 +636,6 @@ export model Crypto {
         raw    = Base64.decodeToBytes(b64)
         when len(raw) == 0 { give "" }
         decBytes = cipher.processBytes(raw)
-        res = ""
-        get b in decBytes { res = res + chr(b) }
-        give res
+        give bytesToString(decBytes)
     }
 }
