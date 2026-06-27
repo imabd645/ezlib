@@ -151,6 +151,32 @@ export model HTTPRequest {
         give self
     }
     
+    # Set Bearer Token Authentication
+    task bearerAuth(token) {
+        self.headers["Authorization"] = "Bearer " + str(token)
+        give self
+    }
+    
+    # Set Basic Authentication (requires base64 encoding conceptually, but we can set the header)
+    task basicAuth(base64Credentials) {
+        self.headers["Authorization"] = "Basic " + str(base64Credentials)
+        give self
+    }
+    
+    # Set form data (x-www-form-urlencoded)
+    task form(formData) {
+        self.headers["Content-Type"] = "application/x-www-form-urlencoded"
+        bodyStr = ""
+        first = true
+        get key in formData {
+            when not first { bodyStr = bodyStr + "&" }
+            first = false
+            bodyStr = bodyStr + url_encode(str(key)) + "=" + url_encode(str(formData[key]))
+        }
+        self.body = bodyStr
+        give self
+    }
+    
     # Add query parameter
     task param(key, value) {
         self.params[key] = value
@@ -212,6 +238,22 @@ export model HTTPRequest {
     # Execute the request
     task send() {
         give __executeRequest(self)
+    }
+    
+    # Download response directly to a file
+    task download(filepath) {
+        res = self.send()
+        when res.isOk() {
+            # EZ file I/O (assuming write_file or similar built-in exists, or use ezfs)
+            try {
+                write_file(filepath, res.body)
+                give true
+            } catch e {
+                print("Failed to save file: " + str(e))
+                give false
+            }
+        }
+        give false
     }
 }
 
@@ -504,6 +546,42 @@ export task asyncPost(url, body, callback) {
     task runner() {
         try {
             response = httpPost(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncPut(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPut(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncDelete(url, callback) {
+    task runner() {
+        try {
+            response = httpDelete(url, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncPatch(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPatch(url, body, nil)
             callback(nil, response)
         } catch e {
             callback(e, nil)

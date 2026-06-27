@@ -368,7 +368,7 @@
     {
       "name": "http",
       "folder": "ezhttp",
-      "description": "Production-ready HTTP client for EZ \u2014 Request/Response models, all HTTP methods (GET, POST, PUT, DELETE, PATCH), query params, retries, timeouts, interceptors, file upload/download, async variants with callbacks, and URL utilities (buildUrl, parseQuery)",
+      "description": "Production-ready HTTP client with Request/Response models, all HTTP methods, retries, timeouts, and interceptors",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
@@ -382,8 +382,15 @@
         "interceptor"
       ],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "2.0.0",
+      "latest": "2.1.0",
       "versions": [
+        {
+          "version": "2.1.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezhttp",
+          "dependencies": {}
+        },
         {
           "version": "2.0.0",
           "main": "http.ez",
