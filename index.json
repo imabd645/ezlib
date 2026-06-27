@@ -587,7 +587,7 @@
     {
       "name": "pdf",
       "folder": "ezpdf",
-      "description": "PDF generation library for EZ \u2014 fluent OOP API wrapping native pdf_ builtins. Create multi-page A4 PDFs with text, lines, document headers, and table helpers (tableHeader, tableRow)",
+      "description": "Library for making pdf EZ",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [

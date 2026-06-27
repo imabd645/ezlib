@@ -1,51 +1,116 @@
-# EZ Professional PDF Library (v1.0)
-# Wrapper for native pdf_ builtins
+# EZ Professional PDF Library (v2.0 - PDFGen FFI)
+
+__dll = os_load_lib("dll\\ezpdf.dll")
+
+model PDFFFI {
+    static pdf_create = os_get_func(__dll, "pdf_create_ez")
+    static pdf_destroy = os_get_func(__dll, "pdf_destroy")
+    static pdf_save = os_get_func(__dll, "pdf_save")
+    static pdf_append_page = os_get_func(__dll, "pdf_append_page")
+    static pdf_set_font = os_get_func(__dll, "pdf_set_font")
+    static pdf_add_text = os_get_func(__dll, "pdf_add_text_ez")
+    static pdf_add_line = os_get_func(__dll, "pdf_add_line_ez")
+    static pdf_add_rectangle = os_get_func(__dll, "pdf_add_rectangle_ez")
+    static pdf_add_filled_rectangle = os_get_func(__dll, "pdf_add_filled_rectangle_ez")
+    static pdf_add_circle = os_get_func(__dll, "pdf_add_circle_ez")
+    static pdf_add_image_file = os_get_func(__dll, "pdf_add_image_file_ez")
+}
 
 export model PDF {
+    filename: any
+    pdf_ptr: any
+    
     init(filename) {
         self.filename = filename
-        pdf_begin(filename)
+        # A4 size in points (595.0, 842.0)
+        self.pdf_ptr = os_call(PDFFFI.pdf_create, "ptr", 59500, 84200)
         give self
     }
 
+    # Generate a 32-bit packed color (PDFGen format)
+    task rgb(r, g, b) {
+        give (r * 65536) + (g * 256) + b
+    }
+
     task addPage() {
-        pdf_add_page()
+        os_call(PDFFFI.pdf_append_page, "ptr", self.pdf_ptr)
+        give self
+    }
+    
+    task setFont(fontName) {
+        os_call(PDFFFI.pdf_set_font, "int", self.pdf_ptr, fontName)
         give self
     }
 
     # x, y are from bottom-left (Standard PDF coordinates)
     # MediaBox is [0 0 595 842] (A4)
-    task text(x, y, txt, size) {
-        pdf_text(size, x, y, txt)
+    task text(x, y, txt, size, color) {
+        if not color { color = 0 }
+        os_call(PDFFFI.pdf_add_text, "int", self.pdf_ptr, 0, txt, size * 100, x * 100, y * 100, color)
         give self
     }
 
-    task line(x1, y1, x2, y2) {
-        pdf_line(x1, y1, x2, y2)
+    task line(x1, y1, x2, y2, width, color) {
+        if not width { width = 1 }
+        if not color { color = 0 }
+        os_call(PDFFFI.pdf_add_line, "int", self.pdf_ptr, 0, x1 * 100, y1 * 100, x2 * 100, y2 * 100, width * 100, color)
+        give self
+    }
+
+    task rect(x, y, w, h, thickness, color) {
+        if not thickness { thickness = 1 }
+        if not color { color = 0 }
+        os_call(PDFFFI.pdf_add_rectangle, "int", self.pdf_ptr, 0, x * 100, y * 100, w * 100, h * 100, thickness * 100, color)
+        give self
+    }
+
+    task filledRect(x, y, w, h, fillColor, borderColor, borderThickness) {
+        if not borderColor { borderColor = 0 }
+        if not borderThickness { borderThickness = 1 }
+        os_call(PDFFFI.pdf_add_filled_rectangle, "int", self.pdf_ptr, 0, x * 100, y * 100, w * 100, h * 100, borderThickness * 100, fillColor, borderColor)
+        give self
+    }
+
+    task circle(x, y, radius, thickness, color, fillColor) {
+        if not thickness { thickness = 1 }
+        # PDF_TRANSPARENT is 0xff000000 -> 4278190080. We use a transparent default if not provided
+        if not fillColor { fillColor = 4278190080 } 
+        if not color { color = 0 }
+        os_call(PDFFFI.pdf_add_circle, "int", self.pdf_ptr, 0, x * 100, y * 100, radius * 100, thickness * 100, color, fillColor)
+        give self
+    }
+    
+    task image(x, y, w, h, imagePath) {
+        os_call(PDFFFI.pdf_add_image_file, "int", self.pdf_ptr, 0, x * 100, y * 100, w * 100, h * 100, imagePath)
         give self
     }
 
     task save() {
-        pdf_save()
+        os_call(PDFFFI.pdf_save, "int", self.pdf_ptr, self.filename)
+        os_call(PDFFFI.pdf_destroy, "void", self.pdf_ptr)
         out "PDF Saved to: " + self.filename
     }
 
     # -- Professional Helpers --
 
     task header(title) {
-        self.text(50, 800, title, 24)
-        self.line(50, 790, 550, 790)
+        self.setFont("Helvetica-Bold")
+        self.text(50, 800, title, 24, 0)
+        self.setFont("Helvetica")
+        self.line(50, 790, 550, 790, 1, 0)
         give self
     }
 
     task tableHeader(y, columns, xPos) {
+        self.setFont("Helvetica-Bold")
         i = 0
         get col in columns {
             px = xPos[i]
-            self.text(px, y, col, 12)
+            self.text(px, y, col, 12, 0)
             i = i + 1
         }
-        self.line(50, y - 5, 550, y - 5)
+        self.line(50, y - 5, 550, y - 5, 1, 0)
+        self.setFont("Helvetica")
         give self
     }
 
@@ -53,10 +118,9 @@ export model PDF {
         i = 0
         get val in data {
             px = xPos[i]
-            self.text(px, y, str(val), 10)
+            self.text(px, y, str(val), 10, 0)
             i = i + 1
         }
         give self
     }
 }
-
