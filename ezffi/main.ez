@@ -1,0 +1,161 @@
+# ============================================================================
+# ezffi - Python ctypes equivalent for EZ Language
+# ============================================================================
+
+export model Pointer {
+    ptr: any
+
+    init(ptr) {
+        self.ptr = ptr
+        give self
+    }
+
+    # Free the allocated memory
+    task free() {
+        os_free(self.ptr)
+    }
+
+    # Read a null-terminated string starting at this pointer
+    task readString() {
+        give os_read_string_ptr(self.ptr)
+    }
+
+    # Write a string into this pointer's memory at an offset
+    task writeString(offset, text) {
+        os_write_string(self.ptr, offset, str(text))
+    }
+
+    # Read a single byte (0-255) at an offset
+    task readByte(offset) {
+        give os_read_byte(self.ptr, offset)
+    }
+
+    # Write a single byte at an offset
+    task writeByte(offset, val) {
+        os_write_byte(self.ptr, offset, val)
+    }
+
+    # Read a 32-bit floating point number at an offset
+    task readFloat32(offset) {
+        give os_read_float32(self.ptr, offset)
+    }
+
+    # Write a 32-bit floating point number at an offset
+    task writeFloat32(offset, val) {
+        os_write_float32(self.ptr, offset, val)
+    }
+
+    # Read a 64-bit double precision float at an offset
+    task readFloat64(offset) {
+        give os_read_float64(self.ptr, offset)
+    }
+
+    # Write a 64-bit double precision float at an offset
+    task writeFloat64(offset, val) {
+        os_write_float64(self.ptr, offset, val)
+    }
+}
+
+
+export model Function {
+    ptr: any
+    retType: any
+    sigArray: any
+
+    init(ptr, retType, sigArray) {
+        self.ptr = ptr
+        self.retType = retType
+        self.sigArray = sigArray
+        give self
+    }
+
+    # Call the native function dynamically based on argument length
+    task call(args) {
+        argCount = len(args)
+        
+        # If no sigArray provided, use standard os_call (up to 12 args, integer/pointer only)
+        when not self.sigArray {
+            when argCount == 0 { give os_call(self.ptr, self.retType) }
+            when argCount == 1 { give os_call(self.ptr, self.retType, args[0]) }
+            when argCount == 2 { give os_call(self.ptr, self.retType, args[0], args[1]) }
+            when argCount == 3 { give os_call(self.ptr, self.retType, args[0], args[1], args[2]) }
+            when argCount == 4 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3]) }
+            when argCount == 5 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4]) }
+            when argCount == 6 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5]) }
+            when argCount == 7 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6]) }
+            when argCount == 8 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]) }
+            when argCount == 9 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8]) }
+            when argCount == 10 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9]) }
+            when argCount == 11 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]) }
+            when argCount == 12 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11]) }
+            
+            print("ezffi error: maximum 12 arguments supported without sigArray")
+            give false
+        }
+        
+        # If sigArray is provided, use os_call_sig (up to 4 args, full float/double support)
+        when argCount == 0 { give os_call_sig(self.ptr, self.retType, self.sigArray) }
+        when argCount == 1 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0]) }
+        when argCount == 2 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1]) }
+        when argCount == 3 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1], args[2]) }
+        when argCount == 4 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1], args[2], args[3]) }
+        
+        print("ezffi error: os_call_sig maximum 4 arguments supported")
+        give false
+    }
+}
+
+
+export model Library {
+    handle: any
+
+    init(handle) {
+        self.handle = handle
+        give self
+    }
+
+    # Extract a function pointer and wrap it dynamically
+    # name: string (e.g. "MessageBoxA")
+    # retType: string (e.g. "int", "ptr", "float")
+    # sigArray (optional): array of arg types (e.g. ["int", "float"])
+    task func(name, retType, sigArray) {
+        ptr = os_get_func(self.handle, str(name))
+        when ptr == 0 {
+            print("ezffi error: Failed to find function '" + str(name) + "' in DLL.")
+            give false
+        }
+        give Function(ptr, retType, sigArray)
+    }
+}
+
+
+export INT = "int"
+export PTR = "ptr"
+export FLOAT = "float"
+export DOUBLE = "double"
+export STR = "string"
+
+# Load a dynamic library (.dll)
+export task load(dll_name) {
+    handle = os_load_lib(str(dll_name))
+    when handle == 0 {
+        print("ezffi error: Failed to load library '" + str(dll_name) + "'. File might not exist or architecture mismatch.")
+        give false
+    }
+    give Library(handle)
+}
+
+# Allocate a block of raw heap memory
+export task alloc(size) {
+    ptr = os_alloc(size)
+    when ptr == 0 { 
+        print("ezffi error: Out of memory during alloc.")
+        give false 
+    }
+    give Pointer(ptr)
+}
+
+# Wrap an existing raw memory address into a Pointer object
+export task wrap(raw_ptr_address) {
+    give Pointer(raw_ptr_address)
+}

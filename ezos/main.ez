@@ -8,7 +8,7 @@ __u32 = os_load_lib("User32.dll")
 __msv = os_load_lib("msvcrt.dll")
 __s32 = os_load_lib("shell32.dll")
 
-export model OSFFI {
+model OSFFI {
     # Kernel32
     static getTickCount64 = os_get_func(__k32, "GetTickCount64")
     static globalMemStatus = os_get_func(__k32, "GlobalMemoryStatusEx")
@@ -40,10 +40,16 @@ export model OSFFI {
     static shellExec = os_get_func(__s32, "ShellExecuteA")
 }
 
-export model OSEnv {
+# Environment variable manipulation and management.
+model OSEnv {
+    # Gets the value of the environment variable specified by `key`.
+    # Returns the string value, or `nil` if it doesn't exist.
     task get(key) { give os_call(OSFFI.getEnv, "string", key) }
+    # Sets the environment variable `key` to `val`.
     task set(key, val) { os_call(OSFFI.putEnv, "int", key, str(val)) }
     
+    # Loads environment variables from a `.env` file into the current process.
+    # Defaults to `.env` in the current directory if `path` is not provided.
     task load(path) {
         when not path { path = ".env" }
         when not fs_exists(path) { give false }
@@ -74,15 +80,21 @@ export model OSEnv {
     }
 }
 
-export model OSPath {
+# Path manipulation utilities for the operating system.
+model OSPath {
+    # Joins two path segments together securely.
     task join(p1, p2) { give p1 + "\\" + p2 }
+
+    # Returns `true` if the given path is an absolute path (e.g. `C:\`).
     task isAbsolute(p) {
         when len(p) >= 2 and substr(p, 1, 1) == ":" { give true }
         give false
     }
 }
 
-export model OSProcess {
+# Process execution and management.
+model OSProcess {
+    # Executes a shell command and returns its standard output as a string.
     task exec(cmd) { 
         filePtr = os_call(OSFFI.popen, "ptr", cmd, "r")
         when filePtr == 0 { give "" }
@@ -97,11 +109,18 @@ export model OSProcess {
         give res
     }
     
+    # Executes a shell command using the native system terminal.
+    # Returns the exit code of the executed command.
     task system(cmd) { give os_call(OSFFI.system, "int", cmd) }
+
+    # Exits the current EZ process with the specified integer `code`.
     task exit(code) { os_call(OSFFI.exitProc, "int", code) }
 }
 
-export model OSClipboard {
+# Read and write to the Windows system clipboard natively.
+model OSClipboard {
+    # Reads the current text content of the clipboard.
+    # Returns the text as a string, or an empty string if it fails.
     task read() { 
         opened = os_call(OSFFI.openClipboard, "int", 0)
         when opened == 0 { give "" }
@@ -121,6 +140,7 @@ export model OSClipboard {
         give text
     }
     
+    # Writes the provided `text` to the system clipboard.
     task write(text) { 
         textStr = str(text)
         l = len(textStr)
@@ -141,14 +161,18 @@ export model OSClipboard {
         give true
     }
     
+    # Clears the system clipboard.
     task clear() { give self.write("") }
 }
 
-export model OSShell {
+# Shell interaction utilities.
+model OSShell {
+    # Opens a file or URL using the default system handler (e.g. opens a URL in your default browser).
     task open(path) { give os_call(OSFFI.shellExec, "int", 0, "open", path, 0, 0, 1) }
 }
 
-export model OS {
+# The main OS interface containing all system utilities.
+model OS {
     init() {
         self.env = OSEnv()
         self.path = OSPath()
@@ -157,10 +181,13 @@ export model OS {
         self.shell = OSShell()
     }
     
+    # Returns the current operating system platform (e.g. "windows").
     task platform() { give "windows" } # Tied purely to DLL implementations now
     
+    # Returns the system uptime in seconds.
     task uptime() { give os_call(OSFFI.getTickCount64, "int") / 1000.0 }
     
+    # Returns the total physical memory (RAM) installed on the system in bytes.
     task totalMemory() { 
         memInfo = os_alloc(64)
         os_write_uint64(memInfo, 0, 64)
@@ -170,6 +197,7 @@ export model OS {
         give total
     }
     
+    # Returns the available physical memory (RAM) on the system in bytes.
     task freeMemory() { 
         memInfo = os_alloc(64)
         os_write_uint64(memInfo, 0, 64)
@@ -179,6 +207,7 @@ export model OS {
         give avail
     }
     
+    # Returns the current working directory of the EZ process.
     task cwd() { 
         buf = os_alloc(1024)
         os_call(OSFFI.getCwd, "int", 1024, buf)
@@ -187,8 +216,8 @@ export model OS {
         give res
     }
     
+    # Changes the current working directory to `path`.
     task chdir(path) { give os_call(OSFFI.setCwd, "int", path) != 0 }
 }
 
-export os = OS()
-
+os = OS()

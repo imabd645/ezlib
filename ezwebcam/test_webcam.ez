@@ -1,11 +1,11 @@
-use "webcam" as webcam
-use "auto" as auto
-use "notify"  as notify
+use "main.ez" 
+use "auto"  as auto
+use "notify" as notify
 
-notify.alert("A webcam window will now open! Press SPACE to take a photo. Press ESCAPE to exit.", "Webcam App")
+notify.alert("A webcam window will open! SPACE = Photo, R = Record, S = Stop Record, C = Copy, F = Format, ESC = Exit.", "Webcam App")
 
-success = webcam.start("My EZ Webcam", 640, 480)
-when not success {
+cam = Webcam("My EZ Webcam", 640, 480)
+when cam.hwndCap == 0 {
     exit(1)
 }
 
@@ -16,29 +16,52 @@ print("Webcam started! Waiting for input...")
 
 while running {
     # Keep the camera window updating!
-    webcam.update()
+    cam.update()
     
-    # Check if SPACE is pressed
+    # SPACE: Take a photo
     when auto.is_down("space") {
         filename = "photo_" + str(photo_count) + ".bmp"
-        webcam.capture(filename)
+        cam.capturePhoto(filename)
         print("Captured: " + filename)
         photo_count = photo_count + 1
-        
-        # small delay to prevent multiple triggers
         wait(500)
     }
     
-    # Check if ESCAPE is pressed
+    # R: Start recording
+    when auto.is_down("r") {
+        print("Recording started...")
+        cam.startRecording("video.avi")
+        wait(500)
+    }
+
+    # S: Stop recording
+    when auto.is_down("s") {
+        print("Recording stopped.")
+        cam.stopRecording()
+        wait(500)
+    }
+
+    # C: Copy to clipboard
+    when auto.is_down("c") {
+        cam.copyToClipboard()
+        print("Frame copied to clipboard!")
+        wait(500)
+    }
+
+    # F: Show Format Dialog
+    when auto.is_down("f") {
+        cam.showFormatDialog()
+        wait(500)
+    }
+    
+    # ESCAPE: Exit
     when auto.is_down("escape") {
         print("Exiting...")
         running = false
     }
     
-    # small delay to keep CPU usage low
-    wait(16) # ~60fps checking
+    wait(16)
 }
 
-webcam.close()
-notify.alert("Webcam closed safely. Check your folder for the photos!", "Done")
-
+cam.close()
+notify.alert("Webcam closed safely.", "Done")

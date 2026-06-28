@@ -4,12 +4,14 @@
 // Added: Schema introspection, WAL, batch execution, and backups.
 // ============================================================================
 
+# Represents a compiled SQL statement ready for execution or parameter binding.
 export model DbStatement {
     init(db, handle) {
         self.db = db
         self.handle = handle
     }
 
+    # Binds an array of parameters to the parameterized query in the compiled statement.
     task bind(params) {
         when type(params) == "nil" { give self }
         
@@ -36,6 +38,8 @@ export model DbStatement {
         give self
     }
 
+    # Executes the statement by one step.
+    # Returns `true` if a row of data is available to be read via `getRow()`.
     task step() {
         res = os_call(self.db.stepApi, "int", self.handle)
         when res == 100 { give true }  // SQLITE_ROW
@@ -45,6 +49,7 @@ export model DbStatement {
         throw "SQL Step Error (" + str(res) + "): " + msg
     }
 
+    # Reads the current row of data into a dictionary mapping column names to values.
     task getRow() {
         row = {}
         colCount = os_call(self.db.columnCount, "int", self.handle)
@@ -82,6 +87,7 @@ export model DbStatement {
         give self
     }
 
+    # Destroys the compiled statement, freeing memory.
     task finalize() {
         when self.handle {
             os_call(self.db.finalizeApi, "int", self.handle)
@@ -90,7 +96,9 @@ export model DbStatement {
     }
 }
 
+# Represents a live connection to a SQLite database.
 export model Database {
+    # Opens a database connection to the file at `path`. Creates it if it doesn't exist.
     init(path) {
         self.lib = os_load_lib("sqlite3.dll")
         when self.lib == 0 or type(self.lib) == "nil" {
@@ -154,6 +162,7 @@ export model Database {
         }
     }
 
+    # Compiles a raw SQL query string into a `DbStatement` that can be bound and executed.
     task prepareStatement(sql) {
         stmtPtrBuf = os_alloc(8)
         rc = os_call(self.prepare, "int", self.handle, sql, -1, stmtPtrBuf, 0)
@@ -170,6 +179,7 @@ export model Database {
         give DbStatement(self, stmtHandle)
     }
 
+    # Executes a SELECT query with the given `params` array and returns all rows as an array of dictionaries.
     task query(sql, params) {
         stmt = self.prepareStatement(sql)
         stmt.bind(params)
@@ -183,6 +193,7 @@ export model Database {
         give results
     }
 
+    # Executes an INSERT, UPDATE, or DELETE statement with the given `params`.
     task execute(sql, params) {
         stmt = self.prepareStatement(sql)
         stmt.bind(params)
@@ -194,6 +205,8 @@ export model Database {
         give true
     }
 
+    # Efficiently executes the same `sql` statement multiple times with an array of `paramsList`.
+    # Runs entirely inside a single atomic transaction for maximum performance.
     task executeBatch(sql, paramsList) {
         stmt = self.prepareStatement(sql)
         self.begin()
@@ -214,6 +227,7 @@ export model Database {
         give true
     }
 
+    # Returns the primary key row ID of the most recently inserted row.
     task lastRowId() {
         give os_call(self.lastInsertId, "int", self.handle)
     }
@@ -234,6 +248,7 @@ export model Database {
         self.execute("ROLLBACK", nil)
     }
 
+    # Automatically wraps a callback function `actions` inside a transaction block, committing on success or rolling back on error.
     task transaction(actions) {
         self.begin()
         try {
@@ -245,6 +260,7 @@ export model Database {
         }
     }
 
+    # Fetches and returns only the very first scalar value of the first row from the result set.
     task fetchScalar(sql, params) {
         res = self.query(sql, params)
         when len(res) > 0 {
@@ -300,6 +316,7 @@ export model Database {
         give pBackup != 0
     }
 
+    # Closes the database connection.
     task close() {
         when self.handle {
             os_call(self.closeApi, "int", self.handle)

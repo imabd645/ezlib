@@ -3,7 +3,11 @@
 # Wraps the native libqrencode C library using FFI
 # ============================================================================
 
+# Represents a generated QR Code.
+# This model wraps the native libqrencode C library.
 export model QRCode {
+    # Initializes a new QR Code with the given `text`.
+    # `errorLevel` determines the error correction capacity: 0 (Low), 1 (Medium), 2 (Quartile), 3 (High).
     init(text, errorLevel) {
         # Set Windows console to UTF-8 to render ASCII blocks correctly
         k32 = os_load_lib("kernel32.dll")
@@ -64,10 +68,14 @@ export model QRCode {
         self.handle = 0
     }
     
+    # Returns the generated QR code as a 2D boolean array (matrix).
+    # `true` represents a black module, `false` represents a white module.
     task toMatrix() {
         give self.matrix
     }
     
+    # Generates a string representation of the QR code using ASCII block characters.
+    # Ideal for printing directly to the console or a text file.
     task toAscii() {
         result = ""
         border = 2
@@ -107,6 +115,8 @@ export model QRCode {
         give result
     }
 
+    # Saves the generated QR code as a standard BMP image file to the given `filepath`.
+    # `scale` determines the pixel size of each module (default is 10 pixels per module).
     task saveImage(filepath, scale) {
         when scale == nil { scale = 10 }
         

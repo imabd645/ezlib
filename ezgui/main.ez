@@ -23,6 +23,8 @@ guiColors = {
 # Widget — Base class for all GUI elements
 # ============================================================================
 
+# The foundational base class for all GUI elements in the EZ GUI framework.
+# Provides universal methods for event binding, styling, and positioning.
 export model Widget {
     init() {}
 
@@ -31,7 +33,8 @@ export model Widget {
         give self
     }
 
-    # Universal event registration — routes to new multi-event system
+    # Universal event registration. Binds a callback `cb` to a specific `event` string.
+    # Supported events: "focus", "blur", "rclick", "dblclick", "hover".
     task on(event, cb) {
         gui_on(self.handle, event, cb)
         give self
@@ -41,6 +44,8 @@ export model Widget {
     # Formula: perceived luminance = (0.299*R + 0.587*G + 0.114*B) / 255
     # luminance < 0.5 → dark bg → white text
     # luminance >= 0.5 → light bg → dark text
+    # Sets the background color of the widget using a semantic name (e.g., "red", "dark").
+    # Automatically calculates perceptual luminance to set a contrasting text color.
     task color(name) {
         rgb = guiColors[name]
         when not rgb {
@@ -56,16 +61,19 @@ export model Widget {
         give self
     }
 
+    # Sets the font family and point size of the widget's text.
     task font(name, size) {
         gui_set_font(self.handle, name, size)
         give self
     }
 
+    # Sets the text value of the widget.
     task text(v) {
         gui_set_value(self.handle, v)
         give self
     }
 
+    # Gets the current text value of the widget.
     task value() {
         give gui_get_value(self.handle)
     }
@@ -79,11 +87,13 @@ export model Widget {
         give self
     }
 
+    # Makes the widget visible on the screen.
     task show() {
         gui_show(self.handle)
         give self
     }
 
+    # Hides the widget from the screen without destroying it.
     task hide() {
         gui_hide(self.handle)
         give self
@@ -95,6 +105,8 @@ export model Widget {
         give self
     }
 
+    # Sets the position and dimensions of the widget.
+    # Coordinates (x, y) are relative to the parent window.
     task pos(x, y, w, h) {
         gui_set_pos(self.handle, x, y, w, h)
         give self
@@ -142,10 +154,12 @@ export model Widget {
 # Leaf Widget Classes
 # ============================================================================
 
+# A standard text label widget.
 export model Label extends Widget {
     init(h) { self.setup(h) }
 }
 
+# A standard clickable button widget.
 export model Button extends Widget {
     init(h) { self.setup(h) }
     task click(cb) {
@@ -492,7 +506,10 @@ export model ScrollPanel extends Panel {
 # Window — Top-level window (inherits all ContainerWidget factories)
 # ============================================================================
 
+# The primary top-level window container for an EZ application.
+# Acts as the parent surface for all Widgets, Panels, and Layouts.
 export model Window extends ContainerWidget {
+    # Creates a new application window with a `title` and specific `width` and `height`.
     init(title, width, height) {
         self.handle = gui_create_window(title, width, height)
     }
@@ -520,17 +537,28 @@ export model Window extends ContainerWidget {
     }
 
     # Window management
+    # Sets the window title bar text.
     task setTitle(t)       { gui_set_title(self.handle, t)         give self }
+    
+    # Resizes the window to the specified dimensions.
     task resize(w, h)      { gui_resize(self.handle, w, h)         give self }
     task getSize()         { give gui_get_size(self.handle) }
     task getPos()          { give gui_get_pos(self.handle) }
+    # Centers the window perfectly in the middle of the user's primary monitor.
     task center()          { gui_center_window(self.handle)        give self }
+    
+    # If `v` is true, the window will float above all other system windows.
     task setAlwaysOnTop(v) { gui_set_always_on_top(self.handle, v) give self }
     task setOpacity(a)     { gui_set_opacity(self.handle, a)       give self }
     task setIcon(path)     { gui_set_icon(self.handle, path)       give self }
     task setMinSize(w, h)  { gui_set_min_size(self.handle, w, h)   give self }
+    # Minimizes the window to the taskbar.
     task minimize()        { gui_minimize(self.handle) }
+    
+    # Maximizes the window to fill the entire screen.
     task maximize()        { gui_maximize(self.handle) }
+    
+    # Restores a minimized or maximized window to its normal state.
     task restore()         { gui_restore(self.handle) }
 
     # Window-level events
@@ -543,6 +571,8 @@ export model Window extends ContainerWidget {
         give self.on("drop", cb)
     }
 
+    # Enters the main application blocking event loop.
+    # Must be called at the end of your script to keep the window open.
     task run() { gui_run() }
 }
 

@@ -12,29 +12,40 @@ LN2 = 0.6931471805599453
 LN10 = 2.302585092994046
 
 # --- Conversion ---
+# Converts degrees to radians.
 export task degToRad(d) { give d * (PI / 180.0) }
+
+# Converts radians to degrees.
 export task radToDeg(r) { give r * (180.0 / PI) }
 
 # --- Rounding & Precision ---
+# Rounds a number to the nearest integer.
+# Half-way values (x.5) are rounded away from zero.
 export task round(x) {
     when x >= 0 { give floor(x + 0.5) }
     give ceil(x - 0.5)
 }
 
+# Truncates a number, removing its fractional part to return the integer part.
 export task trunc(x) { give x > 0 ? floor(x) : ceil(x) }
+
+# Returns the sign of the number: 1 if positive, -1 if negative, 0 if zero.
 export task sign(x) { give x > 0 ? 1 : (x < 0 ? -1 : 0) }
+
+# Returns only the fractional part of a number (x - trunc(x)).
 export task frac(x) { give x - trunc(x) }
 
 # --- Utilities (Leveraging Built-ins) ---
 # Note: sqrt, pow, abs, floor, ceil are built-ins in EZ
 
 # --- Trigonometry ---
+# Calculates the factorial of an integer n (n!).
 export task factorial(n) {
     when n <= 1 { give 1 }
     give n * factorial(n - 1)
 }
 
-# Taylor series for cos
+# Calculates the cosine of an angle (in radians) using a Taylor series approximation.
 export task cos(x) {
     p2 = 2 * PI
     while x > PI { x = x - p2 }
@@ -52,14 +63,19 @@ export task cos(x) {
     give res
 }
 
+# Calculates the sine of an angle (in radians).
 export task sin(x) { give cos(PI / 2.0 - x) }
+
+# Calculates the tangent of an angle (in radians).
+# Throws an error if division by zero occurs.
 export task tan(x) {
     c = cos(x)
     when abs(c) < 0.0000001 { throw "Division by zero in tan()" }
     give sin(x) / c
 }
 
-# Inverse trigonometry (using approximations)
+# Calculates the inverse sine (arcsine) in radians.
+# Domain: [-1, 1]
 export task asin(x) {
     # Arcsin using Taylor series: x + x^3/6 + 3x^5/40 + ...
     when x < -1 or x > 1 { throw "Domain error in asin()" }
@@ -79,7 +95,10 @@ export task asin(x) {
     give res
 }
 
+# Calculates the inverse cosine (arccosine) in radians.
 export task acos(x) { give PI / 2 - asin(x) }
+
+# Calculates the inverse tangent (arctangent) in radians.
 export task atan(x) {
     # Arctan using Taylor series
     when x == 0 { give 0 }

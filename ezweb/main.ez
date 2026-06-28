@@ -85,6 +85,16 @@ export model WebUtils {
         }
         give res
     }
+
+    static task escapeHtml(strVal) {
+        strVal = str(strVal)
+        strVal = replace(strVal, "&", "&amp;")
+        strVal = replace(strVal, "<", "&lt;")
+        strVal = replace(strVal, ">", "&gt;")
+        strVal = replace(strVal, "\"", "&quot;")
+        strVal = replace(strVal, "'", "&#39;")
+        give strVal
+    }
 }
 
 export model TemplateEngine {
@@ -137,7 +147,7 @@ export model TemplateEngine {
     }
 
     static task render(tmpl, ctx) {
-        res = ""
+        chunks = []
         i = 0
         l = len(tmpl)
         
@@ -146,7 +156,7 @@ export model TemplateEngine {
             sStart = indexOfSafe(tmpl, "{%", i)
             
             when vStart == -1 and sStart == -1 {
-                res = res + substr(tmpl, i, l - i)
+                push(chunks, substr(tmpl, i, l - i))
                 escape
             }
             
@@ -161,17 +171,28 @@ export model TemplateEngine {
                 closest = sStart  isStmt = true
             }
             
-            res = res + substr(tmpl, i, closest - i)
+            push(chunks, substr(tmpl, i, closest - i))
             
             when not isStmt {
                 vEnd = indexOfSafe(tmpl, "}}", closest)
-                when vEnd == -1 { res = res + substr(tmpl, closest, l - closest) escape }
+                when vEnd == -1 { push(chunks, substr(tmpl, closest, l - closest)) escape }
                 varPath = trim(substr(tmpl, closest + 2, vEnd - (closest + 2)))
-                res = res + str(TemplateEngine.resolve(ctx, varPath))
+                
+                isSafe = false
+                safeIdx = indexOf(varPath, "| safe")
+                when safeIdx != -1 {
+                    isSafe = true
+                    varPath = trim(substr(varPath, 0, safeIdx))
+                }
+                
+                rawVal = str(TemplateEngine.resolve(ctx, varPath))
+                when isSafe { push(chunks, rawVal) }
+                other { push(chunks, WebUtils.escapeHtml(rawVal)) }
+                
                 i = vEnd + 2
             } other {
                 sEnd = indexOfSafe(tmpl, "%}", closest)
-                when sEnd == -1 { res = res + substr(tmpl, closest, l - closest) escape }
+                when sEnd == -1 { push(chunks, substr(tmpl, closest, l - closest)) escape }
                 stmtRaw = trim(substr(tmpl, closest + 2, sEnd - (closest + 2)))
                 stmtTokens = TemplateEngine.getTokens(stmtRaw)
                 
@@ -197,12 +218,11 @@ export model TemplateEngine {
                         elseIdx = indexOfSafe(tmpl, "{% else %}", sEnd + 2)
                         
                         when endIfIdx == -1 {
-                            res = res + "[TEMPLATE ERROR: MISSING ENDIF]"
+                            push(chunks, "[TEMPLATE ERROR: MISSING ENDIF]")
                             escape
                         }
                         
                         # Validate else is in the SAME scope (not nested)
-                        # A better parser would be needed for perfect scope checks, but this is a reasonable heuristic.
                         nextInnerIf = indexOfSafe(tmpl, "{% if ", sEnd + 2)
                         when nextInnerIf != -1 and nextInnerIf < elseIdx { elseIdx = -1 }
                         
@@ -216,8 +236,8 @@ export model TemplateEngine {
                             blockContent = substr(tmpl, sEnd + 2, endIfIdx - (sEnd + 2))
                         }
                         
-                        when truthy { res = res + TemplateEngine.render(blockContent, ctx) }
-                        other when len(elseContent) > 0 { res = res + TemplateEngine.render(elseContent, ctx) }
+                        when truthy { push(chunks, TemplateEngine.render(blockContent, ctx)) }
+                        other when len(elseContent) > 0 { push(chunks, TemplateEngine.render(elseContent, ctx)) }
                         
                         i = endIfIdx + 11
                         
@@ -229,20 +249,20 @@ export model TemplateEngine {
                         listVal = TemplateEngine.resolve(ctx, listVar)
                         
                         endForIdx = TemplateEngine.findMatchingTag(tmpl, "{% for ", "{% endfor %}", sEnd + 2)
-                        when endForIdx == -1 { res = res + "[TEMPLATE ERROR: MISSING ENDFOR]" escape }
+                        when endForIdx == -1 { push(chunks, "[TEMPLATE ERROR: MISSING ENDFOR]") escape }
                         
                         blockContent = substr(tmpl, sEnd + 2, endForIdx - (sEnd + 2))
                         
                         when type(listVal) == "array" {
                             get item in listVal {
                                 ctx[iterVar] = item
-                                res = res + TemplateEngine.render(blockContent, ctx)
+                                push(chunks, TemplateEngine.render(blockContent, ctx))
                             }
                         } other when type(listVal) == "dictionary" {
                             kList = keys(listVal)
                             get k in kList {
                                 ctx[iterVar] = listVal[k]
-                                res = res + TemplateEngine.render(blockContent, ctx)
+                                push(chunks, TemplateEngine.render(blockContent, ctx))
                             }
                         }
                         
@@ -279,14 +299,14 @@ export model TemplateEngine {
                         bName = ""
                         when len(stmtTokens) > 1 { bName = stmtTokens[1] }
                         endBlockIdx = TemplateEngine.findMatchingTag(tmpl, "{% block ", "{% endblock %}", sEnd + 2)
-                        when endBlockIdx == -1 { res = res + "[TEMPLATE ERROR: MISSING ENDBLOCK]" escape }
+                        when endBlockIdx == -1 { push(chunks, "[TEMPLATE ERROR: MISSING ENDBLOCK]") escape }
                         
                         defaultContent = substr(tmpl, sEnd + 2, endBlockIdx - (sEnd + 2))
                         
                         when has_key(ctx, "__blocks__") and has_key(ctx["__blocks__"], bName) {
-                            res = res + TemplateEngine.render(ctx["__blocks__"][bName], ctx)
+                            push(chunks, TemplateEngine.render(ctx["__blocks__"][bName], ctx))
                         } other {
-                            res = res + TemplateEngine.render(defaultContent, ctx)
+                            push(chunks, TemplateEngine.render(defaultContent, ctx))
                         }
                         i = endBlockIdx + 14
                         
@@ -296,7 +316,7 @@ export model TemplateEngine {
                         incPath = substr(incPath, 1, len(incPath) - 2)
                         when has_key(ctx, "__base_dir__") { incPath = ctx["__base_dir__"] + incPath }
                         incTmpl = readFile(incPath)
-                        res = res + TemplateEngine.render(incTmpl, ctx)
+                        push(chunks, TemplateEngine.render(incTmpl, ctx))
                         i = sEnd + 2
                     } other {
                         i = sEnd + 2
@@ -304,7 +324,7 @@ export model TemplateEngine {
                 }
             }
         }
-        give res
+        give join(chunks, "")
     }
 }
 
@@ -477,17 +497,21 @@ export model WebApp {
         }
         
         bodyStart = headerEnd + 4
-        body = substr(requestBuilt, bodyStart, len(requestBuilt) - bodyStart)
+        bodyBase = substr(requestBuilt, bodyStart, len(requestBuilt) - bodyStart)
+        bodyLenRead = len(bodyBase)
+        bodyChunks = []
         
         # Fixed Buffer reading for large files
-        while len(body) < contentLen {
-            bytesToRead = contentLen - len(body)
+        while bodyLenRead < contentLen {
+            bytesToRead = contentLen - bodyLenRead
             when bytesToRead > 8192 { bytesToRead = 8192 }
             bytesRead = os_call(WebFFI.recv, "int", clientSocket, buf, bytesToRead, 0)
             when bytesRead <= 0 { escape }
             os_write_byte(buf, bytesRead, 0)
-            body = body + os_read_string_ptr(buf)
+            push(bodyChunks, os_read_string_ptr(buf))
+            bodyLenRead = bodyLenRead + bytesRead
         }
+        body = bodyBase + join(bodyChunks, "")
         
         req = {
             "method": method, "path": "", "fullPath": fullPath, "body": body,
@@ -569,7 +593,7 @@ export model WebApp {
                 pattParts = routeObj["pattern"]
                 
                 when len(pattParts) == len(reqParts) {
-                    match = true
+                    is_match = true
                     tempParams = {}
                     i = 0
                     while i < len(pattParts) {
@@ -578,12 +602,12 @@ export model WebApp {
                         when startsWith(p1, "<") and indexOf(p1, ">") != -1 {
                             tempParams[substr(p1, 1, len(p1) - 2)] = WebUtils.urlDecode(p2)
                         } other when p1 != p2 {
-                            match = false
+                            is_match = false
                             i = len(pattParts)
                         }
-                        when match { i = i + 1 }
+                        when is_match { i = i + 1 }
                     }
-                    when match { req["params"] = tempParams  matchedRoute = routeObj  i_route = len(routeKeys) }
+                    when is_match { req["params"] = tempParams  matchedRoute = routeObj  i_route = len(routeKeys) }
                 }
             }
             i_route = i_route + 1
@@ -650,17 +674,26 @@ export model WebApp {
                 h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/; HttpOnly"
             }
             
-            respStr = "HTTP/1.1 " + str(status) + " " + statusPhrase + "\r\n"
+            respChunks = ["HTTP/1.1 ", str(status), " ", statusPhrase, "\r\n"]
             when not has_key(h, "Server") { h["Server"] = "EZ Web Framework" }
             when not has_key(h, "Connection") { h["Connection"] = "close" }
             
             hKeys = keys(h)
-            get hk in hKeys { respStr = respStr + hk + ": " + str(h[hk]) + "\r\n" }
+            get hk in hKeys { 
+                push(respChunks, hk)
+                push(respChunks, ": ")
+                push(respChunks, str(h[hk]))
+                push(respChunks, "\r\n")
+            }
             
             # Use actual byte length using FFI strlen for accurate UTF-8 transport
             byteLen = os_call(WebFFI.strlenFunc, "int", b)
-            respStr = respStr + "Content-Length: " + str(byteLen) + "\r\n\r\n" + b
+            push(respChunks, "Content-Length: ")
+            push(respChunks, str(byteLen))
+            push(respChunks, "\r\n\r\n")
+            push(respChunks, b)
             
+            respStr = join(respChunks, "")
             os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
         }
         

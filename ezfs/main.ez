@@ -17,21 +17,31 @@ export model FSFFI {
     static findClose = os_get_func(__k32, "FindClose")
 }
 
+# Creates a new directory at the specified path.
+# Returns `true` if successful, `false` otherwise.
+# Example: `fs.mkdir("C:\\temp\\new_folder")`
 export task mkdir(path) { 
     give os_call(FSFFI.createDir, "int", path, 0) != 0 
 }
 
+# Checks if a file or directory exists at the given path.
+# Returns `true` if it exists, `false` if it cannot be found.
 export task exists(path) { 
     attr = os_call(FSFFI.getFileAttr, "int", path)
     give attr != -1
 }
 
+# Determines if the specified path points to a directory.
+# Returns `true` if it is a directory, `false` if it is a file or doesn't exist.
 export task isDir(path) { 
     attr = os_call(FSFFI.getFileAttr, "int", path)
     when attr == -1 { give false }
     give (attr & 16) != 0 # FILE_ATTRIBUTE_DIRECTORY
 }
 
+# Lists all files and directories inside the given path.
+# Returns an array of strings representing the names of the contents.
+# The special `.` and `..` directories are automatically excluded.
 export task listDir(path) {
     query = path + "\\*"
     buf = os_alloc(320) # Extrapolated WIN32_FIND_DATAA structure heap byte offset
@@ -60,15 +70,23 @@ export task listDir(path) {
     give arr
 }
 
+# Copies a file from `src` to `dest`.
+# If `dest` already exists, it will be overwritten.
+# Returns `true` on success, `false` on failure.
 export task copy(src, dest) {
     # copyFile arguments: source, dest, failIfExists (0 = overwrite)
     give os_call(FSFFI.copyFile, "int", src, dest, 0) != 0
 }
 
+# Moves a file or directory from `src` to `dest`.
+# Can also be used to rename files.
+# Returns `true` on success, `false` on failure.
 export task move(src, dest) {
     give os_call(FSFFI.moveFile, "int", src, dest) != 0
 }
 
+# Deletes a file or an empty directory at the given path.
+# Returns `true` if successfully deleted, `false` otherwise.
 export task remove(path) {
     attr = os_call(FSFFI.getFileAttr, "int", path)
     when attr != -1 {
@@ -81,6 +99,8 @@ export task remove(path) {
     give false
 }
 
+# Gets the size of the file in bytes.
+# Returns the file size as an integer, or `-1` if the file doesn't exist.
 export task size(path) {
     buf = os_alloc(320)
     hFind = os_call(FSFFI.findFirstFile, "ptr", path, buf)
@@ -103,6 +123,8 @@ export task size(path) {
     give -1
 }
 
+# Gets the last modified time of the file.
+# Returns the time in milliseconds since the Unix epoch (1970).
 export task modifiedTime(path) {
     buf = os_alloc(320)
     hFind = os_call(FSFFI.findFirstFile, "ptr", path, buf)
@@ -123,7 +145,12 @@ export task modifiedTime(path) {
 }
 
 # Internal text streaming retains standard Built-in parsing handles for AST performance metrics!
+# Reads the entire content of a file into a string.
 export task readFile(path) { give readFile(path) }
+
+# Writes content to a file, replacing existing content.
 export task writeFile(path, content) { give writeFile(path, content) }
+
+# Appends content to the end of a file.
 export task appendFile(path, content) { give appendFile(path, content) }
 

@@ -4,6 +4,8 @@
 # ============================================================================
 
 __u32 = os_load_lib("User32.dll")
+__kernel32 = os_load_lib("Kernel32.dll")
+__gdi32 = os_load_lib("Gdi32.dll")
 
 model AutoFFI {
     static setCursorPos = os_get_func(__u32, "SetCursorPos")
@@ -13,6 +15,10 @@ model AutoFFI {
     static getSystemMetrics = os_get_func(__u32, "GetSystemMetrics")
     static vkKeyScanA = os_get_func(__u32, "VkKeyScanA")
     static mapVirtualKeyA = os_get_func(__u32, "MapVirtualKeyA")
+    static getDC = os_get_func(__u32, "GetDC")
+    static releaseDC = os_get_func(__u32, "ReleaseDC")
+    static getPixel = os_get_func(__gdi32, "GetPixel")
+    static sleep = os_get_func(__kernel32, "Sleep")
 }
 
 KEYEVENTF_EXTENDEDKEY = 0x0001
@@ -176,5 +182,63 @@ export task is_down(keyStr) {
     
     # The most significant bit is set if the key is down
     give (state < 0)
+}
+
+export task delay(ms) {
+    os_call(AutoFFI.sleep, "int", ms)
+}
+
+export task move_rel(dx, dy) {
+    p = pos()
+    move(p["x"] + dx, p["y"] + dy)
+}
+
+export task double_click(btn = "left") {
+    click(btn)
+    delay(50)
+    click(btn)
+}
+
+export task drag(x, y, btn = "left") {
+    down = MOUSEEVENTF_LEFTDOWN
+    up = MOUSEEVENTF_LEFTUP
+    when btn == "right" { down = MOUSEEVENTF_RIGHTDOWN  up = MOUSEEVENTF_RIGHTUP }
+    when btn == "middle" { down = MOUSEEVENTF_MIDDLEDOWN  up = MOUSEEVENTF_MIDDLEUP }
+    
+    os_call(AutoFFI.mouseEvent, "int", down, 0, 0, 0, 0)
+    delay(20)
+    move(x, y)
+    delay(20)
+    os_call(AutoFFI.mouseEvent, "int", up, 0, 0, 0, 0)
+}
+
+export task drag_rel(dx, dy, btn = "left") {
+    p = pos()
+    drag(p["x"] + dx, p["y"] + dy, btn)
+}
+
+export task hotkey(keys_array) {
+    get k in keys_array {
+        down(k)
+        delay(10)
+    }
+    i = len(keys_array) - 1
+    while i >= 0 {
+        up(keys_array[i])
+        delay(10)
+        i = i - 1
+    }
+}
+
+export task get_pixel(x, y) {
+    hdc = os_call(AutoFFI.getDC, "ptr", 0)
+    color = os_call(AutoFFI.getPixel, "int", hdc, x, y)
+    os_call(AutoFFI.releaseDC, "int", 0, hdc)
+    
+    r = color & 0xFF
+    g = (color >> 8) & 0xFF
+    b = (color >> 16) & 0xFF
+    
+    give { "r": r, "g": g, "b": b }
 }
 

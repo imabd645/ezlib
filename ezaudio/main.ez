@@ -1,60 +1,155 @@
 # ============================================================================
-# EZ Audio Library
+# EZ Audio Library v2.0
 # Native audio playback for MP3 and WAV files via Win32 WinMM FFI
+# Features: Multi-track support, Looping, Seeking, Status queries
 # ============================================================================
 
 __winmm = os_load_lib("Winmm.dll")
+__msv = os_load_lib("msvcrt.dll")
 
 model AudioFFI {
     static mciSendString = os_get_func(__winmm, "mciSendStringA")
+    static atoiFunc = os_get_func(__msv, "atoi")
 }
 
-# Helper to send MCI commands
-task mci_cmd(command) {
-    # mciSendStringA(command, returnBuf, returnLen, hwndCallback)
+# Global track counter to ensure unique aliases for multiple tracks
+_ez_audio_counter = 0
+
+# Helper to send basic MCI commands
+task _mci_cmd(command) {
     res = os_call(AudioFFI.mciSendString, "int", str(command), 0, 0, 0)
     give res == 0
 }
 
-// Play an audio file (MP3, WAV, MID).
-// If wait is true, blocks execution until the sound finishes playing.
-export task play(filepath, wait_for_finish = false) {
-    # Close any previously opened instance with this alias just in case
-    mci_cmd("close ez_audio_track")
-    
-    # Open the file and assign it an alias
-    success = mci_cmd("open " + str(filepath) + " alias ez_audio_track")
-    when not success {
-        print("Failed to open audio file: " + str(filepath))
-        give false
+# Helper to send MCI commands and read string responses
+task _mci_query(command) {
+    buf = os_alloc(256)
+    os_call(AudioFFI.mciSendString, "int", str(command), buf, 256, 0)
+    resStr = os_read_string_ptr(buf)
+    os_free(buf)
+    give resStr
+}
+
+# Helper to parse integers from strings
+task _parse_int(s) {
+    give os_call(AudioFFI.atoiFunc, "int", s)
+}
+
+export model AudioTrack {
+    init(filepath) {
+        _ez_audio_counter = _ez_audio_counter + 1
+        self.alias = "ez_track_" + str(_ez_audio_counter)
+        self.filepath = filepath
+        self.isOpen = false
+        
+        success = _mci_cmd("open \"" + str(self.filepath) + "\" alias " + self.alias)
+        when success {
+            self.isOpen = true
+            # Set time format to milliseconds for accurate seeking and duration queries
+            _mci_cmd("set " + self.alias + " time format milliseconds")
+        } other {
+            print("Failed to open audio file: " + str(self.filepath))
+        }
     }
     
+    # Play the audio track. Set loop=true to repeat continuously.
+    task play(loop = false) {
+        when not self.isOpen { give false }
+        cmd = "play " + self.alias
+        when loop { cmd = cmd + " repeat" }
+        give _mci_cmd(cmd)
+    }
+    
+    # Stop the currently playing audio and reset to beginning
+    task stop() {
+        when not self.isOpen { give false }
+        _mci_cmd("stop " + self.alias)
+        _mci_cmd("seek " + self.alias + " to start")
+    }
+    
+    # Pause the audio
+    task pause() {
+        when not self.isOpen { give false }
+        _mci_cmd("pause " + self.alias)
+    }
+    
+    # Resume paused audio
+    task resume() {
+        when not self.isOpen { give false }
+        _mci_cmd("resume " + self.alias)
+    }
+    
+    # Set volume (0 to 1000)
+    task volume(level) {
+        when not self.isOpen { give false }
+        _mci_cmd("setaudio " + self.alias + " volume to " + str(level))
+    }
+    
+    # Seek to a specific millisecond
+    task seek(ms) {
+        when not self.isOpen { give false }
+        wasPlaying = self.isPlaying()
+        _mci_cmd("seek " + self.alias + " to " + str(ms))
+        when wasPlaying { self.play() }
+    }
+    
+    # Get the total duration of the track in milliseconds
+    task getDuration() {
+        when not self.isOpen { give 0 }
+        res = _mci_query("status " + self.alias + " length")
+        give _parse_int(res)
+    }
+    
+    # Get the current playback position in milliseconds
+    task getPosition() {
+        when not self.isOpen { give 0 }
+        res = _mci_query("status " + self.alias + " position")
+        give _parse_int(res)
+    }
+    
+    # Check if the track is actively playing
+    task isPlaying() {
+        when not self.isOpen { give false }
+        res = _mci_query("status " + self.alias + " mode")
+        give res == "playing"
+    }
+    
+    # Close the audio handle. Essential for freeing resources!
+    task close() {
+        when self.isOpen {
+            _mci_cmd("stop " + self.alias)
+            _mci_cmd("close " + self.alias)
+            self.isOpen = false
+        }
+    }
+}
+
+# Legacy functional wrappers for backward compatibility
+export task play(filepath, wait_for_finish = false) {
+    _mci_cmd("close ez_legacy_track")
+    success = _mci_cmd("open \"" + str(filepath) + "\" alias ez_legacy_track")
+    when not success { give false }
+    
     when wait_for_finish {
-        mci_cmd("play ez_audio_track wait")
+        _mci_cmd("play ez_legacy_track wait")
     } other {
-        mci_cmd("play ez_audio_track")
+        _mci_cmd("play ez_legacy_track")
     }
     give true
 }
 
-// Stop the currently playing audio
 export task stop() {
-    mci_cmd("stop ez_audio_track")
-    mci_cmd("close ez_audio_track")
+    _mci_cmd("stop ez_legacy_track")
 }
 
-// Pause the currently playing audio
 export task pause() {
-    mci_cmd("pause ez_audio_track")
+    _mci_cmd("pause ez_legacy_track")
 }
 
-// Resume the currently paused audio
 export task resume() {
-    mci_cmd("resume ez_audio_track")
+    _mci_cmd("resume ez_legacy_track")
 }
 
-// Set volume (0 to 1000)
 export task volume(level) {
-    mci_cmd("setaudio ez_audio_track volume to " + str(level))
+    _mci_cmd("setaudio ez_legacy_track volume to " + str(level))
 }
-

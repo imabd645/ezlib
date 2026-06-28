@@ -42,11 +42,14 @@ task build_sockaddr(ip, port) {
     give addr
 }
 
+# Creates a new TCP socket and returns its integer handle.
 export task create() {
     sock = os_call(SockFFI.socket, "int", AF_INET, SOCK_STREAM, IPPROTO_TCP)
     give sock
 }
 
+# Binds a socket to a specific `ip` address and `port`.
+# Usually used when creating a server to listen on "127.0.0.1" or "0.0.0.0".
 export task bind(sock, ip, port) {
     addr = build_sockaddr(ip, port)
     res = os_call(SockFFI.bind, "int", sock, addr, 16)
@@ -54,11 +57,15 @@ export task bind(sock, ip, port) {
     give res == 0
 }
 
+# Places the bound socket into a listening state, ready to accept incoming connections.
+# `backlog` defines the maximum length of the queue of pending connections.
 export task listen(sock, backlog) {
     res = os_call(SockFFI.listen, "int", sock, backlog)
     give res == 0
 }
 
+# Blocks and waits for an incoming client connection.
+# Returns the new client socket handle.
 export task accept(sock) {
     addr = os_alloc(16)
     addrlen = os_alloc(4)
@@ -72,6 +79,8 @@ export task accept(sock) {
     give client_sock
 }
 
+# Connects a client socket to a remote server at the specified `ip` and `port`.
+# Returns `true` if the connection is successful.
 export task connect(sock, ip, port) {
     addr = build_sockaddr(ip, port)
     res = os_call(SockFFI.connect, "int", sock, addr, 16)
@@ -79,6 +88,8 @@ export task connect(sock, ip, port) {
     give res == 0
 }
 
+# Sends a string `text` over the connected socket.
+# Returns the number of bytes successfully sent.
 export task send(sock, text) {
     str_val = str(text)
     sz = len(str_val)
@@ -86,6 +97,8 @@ export task send(sock, text) {
     give res
 }
 
+# Receives up to `buf_size` bytes of data from the socket.
+# Blocks until data is available, and returns it as a string.
 export task recv(sock, buf_size) {
     buf = os_alloc(buf_size + 1)
     res = os_call(SockFFI.recv, "int", sock, buf, buf_size, 0)
@@ -102,6 +115,7 @@ export task recv(sock, buf_size) {
     give text
 }
 
+# Closes the socket, disconnecting any active sessions and freeing its resources.
 export task close(sock) {
     os_call(SockFFI.closesocket, "int", sock)
 }
