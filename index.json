@@ -968,15 +968,15 @@
       "author": "Abdullah Masood"
     },
     {
-      "name": "odbc",
-      "folder": "ezodbc",
+      "name": "ezodbc",
+      "folder": "ezezodbc",
       "latest": "1.0.0",
       "versions": [
         {
           "version": "1.0.0",
           "main": "main.ez",
           "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
-          "subfolder": "ezodbc",
+          "subfolder": "ezezodbc",
           "dependencies": {}
         }
       ],
