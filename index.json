@@ -966,6 +966,22 @@
       ],
       "description": "Python ctypes equivalent for EZ. Dynamically call any Windows .dll and interact with raw heap memory.",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "ezodbc",
+      "folder": "ezezodbc",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezezodbc",
+          "dependencies": {}
+        }
+      ],
+      "description": "Universal Database Connector for EZ Language. Connects to MySQL, PostgreSQL, Azure SQL, and more via native odbc32.dll",
+      "author": "Abdullah Masood"
     }
   ]
 }
