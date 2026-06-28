@@ -1,0 +1,133 @@
+# ============================================================================
+# EZ Supabase - Native PostgREST API Wrapper
+# Easily interact with Supabase PostgreSQL without ODBC drivers!
+# ============================================================================
+
+use "http" as *
+
+# The main Supabase client class
+export model SupabaseClient {
+    # Initialize with your Supabase Project URL and API Key (Anon or Service_Role)
+    init(projectUrl, apiKey) {
+        self.url = projectUrl
+        self.apiKey = apiKey
+        self.headers = {
+            "apikey": self.apiKey,
+            "Authorization": "Bearer " + self.apiKey,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        }
+    }
+    
+    # Target a specific database table
+    task from(tableName) {
+        give SupabaseQueryBuilder(self, tableName)
+    }
+}
+
+# Handles building and executing queries for a specific table
+export model SupabaseQueryBuilder {
+    init(client, tableName) {
+        self.client = client
+        self.tableName = tableName
+        self.endpoint = self.client.url + "/rest/v1/" + self.tableName
+    }
+    
+    # ------------------------------------------------------------------------
+    # SELECT
+    # ------------------------------------------------------------------------
+    
+    # Fetches all rows from the table. 
+    # Optionally specify columns like "id, name", otherwise uses "*"
+    task select(columns) {
+        when type(columns) == "nil" {
+            columns = "*"
+        }
+        
+        req = HTTPRequest(self.endpoint + "?select=" + columns, "GET")
+        get k in keys(self.client.headers) {
+            req.setHeader(k, self.client.headers[k])
+        }
+        
+        res = req.send()
+        when res.isOk() {
+            give res.json()
+        }
+        throw "Supabase SELECT failed (" + str(res.statusCode) + "): " + res.body
+    }
+
+    # ------------------------------------------------------------------------
+    # INSERT
+    # ------------------------------------------------------------------------
+
+    # Inserts a single dictionary object or an array of objects.
+    # Returns the inserted rows.
+    task insert(data) {
+        jsonStr = to_json(data)
+        req = HTTPRequest(self.endpoint, "POST", jsonStr)
+        
+        get k in keys(self.client.headers) {
+            req.setHeader(k, self.client.headers[k])
+        }
+        
+        res = req.send()
+        when res.isOk() {
+            give res.json()
+        }
+        throw "Supabase INSERT failed (" + str(res.statusCode) + "): " + res.body
+    }
+
+    # ------------------------------------------------------------------------
+    # UPDATE
+    # ------------------------------------------------------------------------
+
+    # Updates rows matching the `matchFilter` dictionary with the new `data` dictionary.
+    # Returns the updated rows.
+    task update(matchFilter, data) {
+        url = self.endpoint + "?"
+        
+        # Build exact match query string
+        get k in keys(matchFilter) {
+            url = url + k + "=eq." + str(matchFilter[k]) + "&"
+        }
+        
+        jsonStr = to_json(data)
+        req = HTTPRequest(url, "PATCH", jsonStr)
+        
+        get k in keys(self.client.headers) {
+            req.setHeader(k, self.client.headers[k])
+        }
+        
+        res = req.send()
+        when res.isOk() {
+            give res.json()
+        }
+        throw "Supabase UPDATE failed (" + str(res.statusCode) + "): " + res.body
+    }
+
+    # ------------------------------------------------------------------------
+    # DELETE
+    # ------------------------------------------------------------------------
+
+    # Deletes rows matching the `matchFilter` dictionary.
+    # Returns the deleted rows.
+    task delete(matchFilter) {
+        url = self.endpoint + "?"
+        
+        get k in keys(matchFilter) {
+            url = url + k + "=eq." + str(matchFilter[k]) + "&"
+        }
+        
+        req = HTTPRequest(url, "DELETE")
+        
+        get k in keys(self.client.headers) {
+            req.setHeader(k, self.client.headers[k])
+        }
+        
+        res = req.send()
+        when res.isOk() {
+            give res.json()
+        }
+        throw "Supabase DELETE failed (" + str(res.statusCode) + "): " + res.body
+    }
+}

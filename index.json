@@ -1000,6 +1000,24 @@
       ],
       "description": "Native Supabase REST API Client for EZ Language. Perform database queries directly over HTTP without ODBC drivers.",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "supabase",
+      "folder": "ezsupabase",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezsupabase",
+          "dependencies": {
+            "http": "2.0.0"
+          }
+        }
+      ],
+      "description": "Native Supabase REST API Client for EZ Language. Perform database queries directly over HTTP without ODBC drivers.",
+      "author": "Abdullah Masood"
     }
   ]
 }
