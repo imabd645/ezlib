@@ -1,0 +1,10 @@
+{
+    "name": "ezsupabase",
+    "version": "1.0.0",
+    "description": "Native Supabase REST API Client for EZ Language. Perform database queries directly over HTTP without ODBC drivers.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {
+        "http": "2.0.0"
+    }
+}

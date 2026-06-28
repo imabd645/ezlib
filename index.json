@@ -982,6 +982,24 @@
       ],
       "description": "Universal Database Connector for EZ Language. Connects to MySQL, PostgreSQL, Azure SQL, and more via native odbc32.dll",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "ezsupabase",
+      "folder": "ezezsupabase",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezezsupabase",
+          "dependencies": {
+            "http": "2.0.0"
+          }
+        }
+      ],
+      "description": "Native Supabase REST API Client for EZ Language. Perform database queries directly over HTTP without ODBC drivers.",
+      "author": "Abdullah Masood"
     }
   ]
 }
