@@ -66,7 +66,7 @@
     {
       "name": "collections",
       "folder": "ezcollections",
-      "description": "Classical data structures for EZ \u2014 Set, Map, Queue, Stack, List, and Counter with full OOP interface and method chaining",
+      "description": "Data Structures library for EZ Language. Provides Set, Map/Dictionary, Queue, Stack, LinkedList, Deque, and Counter implementations.",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
@@ -368,7 +368,7 @@
     {
       "name": "http",
       "folder": "ezhttp",
-      "description": "Production-ready HTTP client for EZ \u2014 Request/Response models, all HTTP methods (GET, POST, PUT, DELETE, PATCH), query params, retries, timeouts, interceptors, file upload/download, async variants with callbacks, and URL utilities (buildUrl, parseQuery)",
+      "description": "Production-ready HTTP client with Request/Response models, all HTTP methods, retries, timeouts, and interceptors",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
@@ -382,8 +382,15 @@
         "interceptor"
       ],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "2.0.0",
+      "latest": "2.1.0",
       "versions": [
+        {
+          "version": "2.1.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezhttp",
+          "dependencies": {}
+        },
         {
           "version": "2.0.0",
           "main": "http.ez",
@@ -587,7 +594,7 @@
     {
       "name": "pdf",
       "folder": "ezpdf",
-      "description": "PDF generation library for EZ \u2014 fluent OOP API wrapping native pdf_ builtins. Create multi-page A4 PDFs with text, lines, document headers, and table helpers (tableHeader, tableRow)",
+      "description": "Library for making pdf EZ",
       "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [
@@ -720,8 +727,15 @@
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezaudio",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",
@@ -740,8 +754,15 @@
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezauto",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",
@@ -887,7 +908,7 @@
       "name": "web",
       "folder": "ezweb",
       "description": "Flask/Express style Web App Framework for EZ",
-      "author": "EZ Development Team",
+      "author": "Abdullah Masood",
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
@@ -911,8 +932,15 @@
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "versions": [
+        {
+          "version": "1.0.1",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezwebcam",
+          "dependencies": {}
+        },
         {
           "version": "1.0.0",
           "main": "main.ez",
@@ -922,6 +950,38 @@
           "dependencies": {}
         }
       ]
+    },
+    {
+      "name": "ffi",
+      "folder": "ezffi",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezffi",
+          "dependencies": {}
+        }
+      ],
+      "description": "Python ctypes equivalent for EZ. Dynamically call any Windows .dll and interact with raw heap memory.",
+      "author": "Abdullah Masood"
+    },
+    {
+      "name": "ezodbc",
+      "folder": "ezezodbc",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezezodbc",
+          "dependencies": {}
+        }
+      ],
+      "description": "Universal Database Connector for EZ Language. Connects to MySQL, PostgreSQL, Azure SQL, and more via native odbc32.dll",
+      "author": "Abdullah Masood"
     }
   ]
 }

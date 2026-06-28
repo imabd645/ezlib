@@ -39,14 +39,11 @@ WM_CAP_SEQUENCE = WM_CAP_START + 62
 WM_CAP_STOP = WM_CAP_START + 68
 
 
-# A wrapper around the native Video for Windows (VFW) API.
-# Allows for live webcam streaming, photo capture, and AVI video recording.
 export model Webcam {
     hwndParent: any
     hwndCap: any
 
-    # Initializes the webcam and spawns a live preview window.
-    # `title` is the window title, and `width`/`height` are the dimensions of the preview window.
+    # Open the webcam and show the preview window
     init(title, width, height) {
         # 1. Create a generic parent window using the pre-registered STATIC class
         self.hwndParent = os_call(WebcamFFI.createWindow, "ptr", 
@@ -86,8 +83,7 @@ export model Webcam {
         give self
     }
 
-    # Pumps the Windows message queue to keep the live preview rendering smoothly.
-    # CRITICAL: You must call this continuously in your main application `while` loop!
+    # Must be called continuously in a while loop to keep the window rendering smoothly!
     task update() {
         msgBuf = os_alloc(64) # MSG struct
         while os_call(WebcamFFI.peekMessage, "int", msgBuf, 0, 0, 0, PM_REMOVE) != 0 {
@@ -97,8 +93,7 @@ export model Webcam {
         os_free(msgBuf)
     }
 
-    # Captures the current webcam frame and saves it to `filepath` as a BMP image.
-    # Returns `true` if successful.
+    # Capture the current frame and save to a BMP file
     task capturePhoto(filepath) {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_FILE_SAVEDIB, 0, str(filepath))
@@ -107,8 +102,7 @@ export model Webcam {
         give false
     }
 
-    # Starts recording a live video stream to the specified `filepath` (must be an .avi file).
-    # Returns `true` if recording successfully started.
+    # Start recording a video to an AVI file
     task startRecording(filepath) {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_FILE_SET_CAPTURE_FILE, 0, str(filepath))
@@ -118,7 +112,7 @@ export model Webcam {
         give false
     }
 
-    # Stops an active video recording and finalizes the AVI file.
+    # Stop recording the video
     task stopRecording() {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_STOP, 0, 0)
@@ -127,7 +121,7 @@ export model Webcam {
         give false
     }
 
-    # Captures the current webcam frame and copies the image data to the Windows Clipboard.
+    # Copy the current frame to the Windows clipboard
     task copyToClipboard() {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_EDIT_COPY, 0, 0)
@@ -136,21 +130,21 @@ export model Webcam {
         give false
     }
 
-    # Opens the native hardware dialog to configure video format (resolution, color space).
+    # Open the hardware-specific video format dialog
     task showFormatDialog() {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DLG_VIDEOFORMAT, 0, 0)
         }
     }
 
-    # Opens the native hardware dialog to select the active video source (e.g., if you have multiple webcams).
+    # Open the hardware-specific video source dialog
     task showSourceDialog() {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DLG_VIDEOSOURCE, 0, 0)
         }
     }
 
-    # Disconnects from the webcam driver and safely destroys the capture window.
+    # Disconnect the webcam and close the window
     task close() {
         when self.hwndCap != 0 {
             os_call(WebcamFFI.sendMessage, "int", self.hwndCap, WM_CAP_DRIVER_DISCONNECT, 0, 0)

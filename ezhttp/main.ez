@@ -48,8 +48,6 @@ export HTTP_SERVICE_UNAVAILABLE = 503
 export HTTP_GATEWAY_TIMEOUT = 504
 
 # --- Response Model ---
-# Represents an HTTP response returned by the HTTPClient.
-# Contains the status code, response body, headers, and request duration.
 export model HTTPResponse {
     init(statusCode, body, headers, url, duration) {
         self.statusCode = statusCode
@@ -60,20 +58,17 @@ export model HTTPResponse {
         self.ok = statusCode >= 200 and statusCode < 300
     }
     
-    # Checks if the HTTP response status code indicates success.
-    # Returns `true` if the status code is between 200 and 299 inclusive, otherwise `false`.
+    # Check if response is successful (2xx)
     task isOk() {
         give self.ok
     }
     
-    # Checks if the HTTP response status code matches a specific integer code.
-    # Returns `true` if the status code exactly matches `statusCode`.
+    # Check specific status codes
     task is(statusCode) {
         give self.statusCode == statusCode
     }
     
-    # Parses the HTTP response body as a JSON string.
-    # Returns the parsed JSON as an EZ dictionary or array, or `nil` if the body is empty.
+    # Parse body as JSON
     task json() {
         when self.body == nil or self.body == "" {
             give nil
@@ -81,8 +76,7 @@ export model HTTPResponse {
         give parse_json(self.body)
     }
     
-    # Retrieves the value of an HTTP header from the response.
-    # The `name` is case-insensitive. Returns `nil` if the header does not exist.
+    # Get header value (case-insensitive)
     task header(name) {
         get key in self.headers {
             when lower(key) == lower(name) {
@@ -92,8 +86,7 @@ export model HTTPResponse {
         give nil
     }
     
-    # Retrieves the Content-Type of the HTTP response.
-    # Strips away any charset parameters, returning only the MIME type (e.g., "application/json").
+    # Get content type
     task contentType() {
         ct = self.header("Content-Type")
         when ct {
@@ -103,8 +96,7 @@ export model HTTPResponse {
         give nil
     }
     
-    # Raises a runtime exception if the HTTP response indicates a failure (status code 4xx or 5xx).
-    # Useful for failing fast on bad requests.
+    # Raise error for bad status
     task raiseForStatus() {
         when not self.ok {
             throw "HTTP " + str(self.statusCode) + ": " + self.body
@@ -254,7 +246,7 @@ export model HTTPRequest {
         when res.isOk() {
             # EZ file I/O (assuming write_file or similar built-in exists, or use ezfs)
             try {
-                writeFile(filepath, res.body)
+                write_file(filepath, res.body)
                 give true
             } catch e {
                 print("Failed to save file: " + str(e))
@@ -432,9 +424,7 @@ export model HTTPClient {
 
 # --- Fluent HTTP Functions ---
 
-# Performs a quick GET request to the specified `url`.
-# Automatically serializes the `params` dictionary into query string format.
-# Returns the `HTTPResponse` object directly.
+# Quick GET request
 export task httpGet(url, params) {
     request = HTTPRequest("GET", url)
     when params {
@@ -443,9 +433,7 @@ export task httpGet(url, params) {
     give request.send()
 }
 
-# Performs a quick POST request to the specified `url`.
-# You can supply an optional `body` (JSON string or dictionary) and `headers`.
-# Returns the `HTTPResponse` object directly.
+# Quick POST request
 export task httpPost(url, body, headers) {
     request = HTTPRequest("POST", url)
     when headers {
