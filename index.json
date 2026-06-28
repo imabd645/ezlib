@@ -968,8 +968,8 @@
       "author": "Abdullah Masood"
     },
     {
-      "name": "ezodbc",
-      "folder": "ezezodbc",
+      "name": "odbc",
+      "folder": "ezodbc",
       "latest": "1.0.0",
       "versions": [
         {
