@@ -42,8 +42,82 @@ export model Database {
     henv: any
     hdbc: any
 
+    # Internal helper to translate standard URIs into ODBC Connection Strings
+    task parseURI(uri) {
+        driverName = ""
+        prefix = ""
+        when indexOf(uri, "postgresql://") == 0 {
+            driverName = "{PostgreSQL Unicode}"
+            prefix = "postgresql://"
+        } other when indexOf(uri, "postgres://") == 0 {
+            driverName = "{PostgreSQL Unicode}"
+            prefix = "postgres://"
+        } other when indexOf(uri, "mysql://") == 0 {
+            driverName = "{MySQL ODBC 8.0 Driver}"
+            prefix = "mysql://"
+        } other {
+            give uri
+        }
+        
+        rest = substr(uri, len(prefix))
+        
+        slashIdx = indexOf(rest, "/")
+        database = ""
+        when slashIdx != -1 {
+            database = substr(rest, slashIdx + 1)
+            # We want up to slashIdx. In EZ, if substr takes length, it's substr(str, 0, slashIdx).
+            # If it's JS-like substring, it's start, end. We'll implement by splitting "@" first.
+        }
+        
+        # Safe extraction
+        give self.buildODBC(driverName, rest)
+    }
+
+    task buildODBC(driver, restString) {
+        # Split by / to get database
+        parts = split(restString, "/")
+        dbName = ""
+        when len(parts) > 1 {
+            dbName = parts[1]
+        }
+        
+        # The first part is user:pass@host:port
+        authHost = parts[0]
+        
+        atParts = split(authHost, "@")
+        creds = ""
+        hostInfo = ""
+        
+        when len(atParts) > 1 {
+            creds = atParts[0]
+            hostInfo = atParts[1]
+        } other {
+            hostInfo = atParts[0]
+        }
+        
+        user = ""
+        pass = ""
+        credParts = split(creds, ":")
+        when len(credParts) > 0 { user = credParts[0] }
+        when len(credParts) > 1 { pass = credParts[1] }
+        
+        host = ""
+        port = ""
+        hostParts = split(hostInfo, ":")
+        when len(hostParts) > 0 { host = hostParts[0] }
+        when len(hostParts) > 1 { port = hostParts[1] }
+        
+        odbcStr = "Driver=" + driver + ";Server=" + host + ";"
+        when port != "" { odbcStr = odbcStr + "Port=" + port + ";" }
+        when dbName != "" { odbcStr = odbcStr + "Database=" + dbName + ";" }
+        when user != "" { odbcStr = odbcStr + "Uid=" + user + ";" }
+        when pass != "" { odbcStr = odbcStr + "Pwd=" + pass + ";" }
+        
+        give odbcStr
+    }
+
     # Initializes a connection using a standard ODBC Connection String
-    # Example: "Driver={MySQL ODBC 8.0 Driver};Server=localhost;Database=mydb;User=root;Password=pass;"
+    # OR a standard connection URL (postgresql://...)
     init(connectionString) {
         when __odbc == 0 or type(__odbc) == "nil" {
             throw "Failed to load system odbc32.dll. Ensure ODBC is installed."
@@ -63,16 +137,18 @@ export model Database {
         self.hdbc = os_read_uint64(ptrBuf, 0)
         
         # 4. Connect using Driver String
+        finalConnStr = self.parseURI(connectionString)
+        
         outConnStr = os_alloc(1024)
         outLen = os_alloc(2)
-        rc = os_call(OdbcFFI.SQLDriverConnect, "int", self.hdbc, 0, connectionString, SQL_NTS, outConnStr, 1024, outLen, SQL_DRIVER_NOPROMPT)
+        rc = os_call(OdbcFFI.SQLDriverConnect, "int", self.hdbc, 0, finalConnStr, SQL_NTS, outConnStr, 1024, outLen, SQL_DRIVER_NOPROMPT)
         
         os_free(outConnStr)
         os_free(outLen)
         os_free(ptrBuf)
 
         when rc != SQL_SUCCESS and rc != SQL_SUCCESS_WITH_INFO {
-            throw "ODBC Connection Failed (Error Code: " + str(rc) + "). Ensure your Driver is installed and connection string is valid."
+            throw "ODBC Connection Failed (Error Code: " + str(rc) + "). Final Connection String: " + finalConnStr
         }
     }
 

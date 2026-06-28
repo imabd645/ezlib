@@ -1,5 +1,5 @@
 {
-    "name": "ezodbc",
+    "name": "odbc",
     "version": "1.0.0",
     "description": "Universal Database Connector for EZ Language. Connects to MySQL, PostgreSQL, Azure SQL, and more via native odbc32.dll",
     "author": "Abdullah Masood",
