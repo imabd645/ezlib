@@ -513,8 +513,8 @@
     {
       "name": "orm",
       "folder": "ezorm",
-      "description": "Active-Record style ORM for EZ \u2014 Database and Table models with auto schema creation (CREATE TABLE IF NOT EXISTS), full CRUD (insert/find/findOne/findById/update/delete/deleteWhere/all/count), and transaction support over SQLite",
-      "author": "Abdullah Masood",
+      "description": "Production-grade SQLAlchemy-style ORM for EZ",
+      "author": "EZ Team",
       "license": "MIT",
       "keywords": [
         "orm",
@@ -526,7 +526,7 @@
         "migration"
       ],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.2.0",
+      "latest": "1.0.0",
       "versions": [
         {
           "version": "1.2.0",

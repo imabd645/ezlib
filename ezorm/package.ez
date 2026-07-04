@@ -1,8 +1,7 @@
-{
+ {
     "name": "orm",
-    "version": "1.2.0",
-    "description": "",
-    "author": "Abdullah Masood",
-    "main": "main.ez",
-    "dependencies": {}
+    "version": "1.0.0",
+    "description": "Production-grade SQLAlchemy-style ORM for EZ",
+    "author": "EZ Team",
+    "entry": "main.ez"
 }
