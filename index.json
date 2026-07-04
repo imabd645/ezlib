@@ -525,7 +525,21 @@
         "schema",
         "migration"
       ],
-      
+      "repository": "https://github.com/imabd645/ezlib",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.2.0",
+          "main": "orm.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezorm",
+          "sha256": "",
+          "dependencies": {},
+          "exports": [
+            "Database",
+            "Table"
+          ]
+        },
         {
           "version": "1.0.0",
           "main": "orm.ez",
