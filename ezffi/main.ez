@@ -1,57 +1,129 @@
-# ============================================================================
-# ezffi - Python ctypes equivalent for EZ Language
-# ============================================================================
+// ============================================================================
+// ezffi - Python ctypes equivalent for EZ Language
+// ============================================================================
+
+export model FFIError extends Exception {}
+export model MemoryError extends Exception {}
 
 export model Pointer {
     ptr: any
+    freed: bool
+    owned: bool
 
-    init(ptr) {
+    init(ptr, owned = true) {
         self.ptr = ptr
+        self.freed = false
+        self.owned = owned
         give self
     }
 
-    # Free the allocated memory
+    // Free the allocated memory
     task free() {
+        when self.freed { throw MemoryError("double free") }
+        when not self.owned { throw MemoryError("cannot free borrowed pointer") }
+        self.freed = true
         os_free(self.ptr)
     }
 
-    # Read a null-terminated string starting at this pointer
+    // Read a null-terminated string starting at this pointer
     task readString() {
+        when self.freed { throw MemoryError("use after free") }
         give os_read_string_ptr(self.ptr)
     }
 
-    # Write a string into this pointer's memory at an offset
+    // Write a string into this pointer's memory at an offset
     task writeString(offset, text) {
+        when self.freed { throw MemoryError("use after free") }
         os_write_string(self.ptr, offset, str(text))
     }
 
-    # Read a single byte (0-255) at an offset
+    // Read a single byte (0-255) at an offset
     task readByte(offset) {
+        when self.freed { throw MemoryError("use after free") }
         give os_read_byte(self.ptr, offset)
     }
 
-    # Write a single byte at an offset
+    // Write a single byte at an offset
     task writeByte(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
         os_write_byte(self.ptr, offset, val)
     }
 
-    # Read a 32-bit floating point number at an offset
+    // 16-bit Integer
+    task readInt16(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int16(self.ptr, offset)
+    }
+    task writeInt16(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int16(self.ptr, offset, val)
+    }
+    task readUInt16(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint16(self.ptr, offset)
+    }
+    task writeUInt16(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint16(self.ptr, offset, val)
+    }
+
+    // 32-bit Integer
+    task readInt32(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int32(self.ptr, offset)
+    }
+    task writeInt32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int32(self.ptr, offset, val)
+    }
+    task readUInt32(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint32(self.ptr, offset)
+    }
+    task writeUInt32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint32(self.ptr, offset, val)
+    }
+
+    // 64-bit Integer
+    task readInt64(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int64(self.ptr, offset)
+    }
+    task writeInt64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int64(self.ptr, offset, val)
+    }
+    task readUInt64(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint64(self.ptr, offset)
+    }
+    task writeUInt64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint64(self.ptr, offset, val)
+    }
+
+    // Read a 32-bit floating point number at an offset
     task readFloat32(offset) {
+        when self.freed { throw MemoryError("use after free") }
         give os_read_float32(self.ptr, offset)
     }
 
-    # Write a 32-bit floating point number at an offset
+    // Write a 32-bit floating point number at an offset
     task writeFloat32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
         os_write_float32(self.ptr, offset, val)
     }
 
-    # Read a 64-bit double precision float at an offset
+    // Read a 64-bit double precision float at an offset
     task readFloat64(offset) {
+        when self.freed { throw MemoryError("use after free") }
         give os_read_float64(self.ptr, offset)
     }
 
-    # Write a 64-bit double precision float at an offset
+    // Write a 64-bit double precision float at an offset
     task writeFloat64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
         os_write_float64(self.ptr, offset, val)
     }
 }
@@ -61,19 +133,21 @@ export model Function {
     ptr: any
     retType: any
     sigArray: any
+    library: any
 
-    init(ptr, retType, sigArray) {
+    init(ptr, retType, sigArray, library = nil) {
         self.ptr = ptr
         self.retType = retType
         self.sigArray = sigArray
+        self.library = library
         give self
     }
 
-    # Call the native function dynamically based on argument length
+    // Call the native function dynamically based on argument length
     task call(args) {
         argCount = len(args)
         
-        # If no sigArray provided, use standard os_call (up to 12 args, integer/pointer only)
+        // If no sigArray provided, use standard os_call (up to 12 args, integer/pointer only)
         when not self.sigArray {
             when argCount == 0 { give os_call(self.ptr, self.retType) }
             when argCount == 1 { give os_call(self.ptr, self.retType, args[0]) }
@@ -89,19 +163,17 @@ export model Function {
             when argCount == 11 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10]) }
             when argCount == 12 { give os_call(self.ptr, self.retType, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10], args[11]) }
             
-            print("ezffi error: maximum 12 arguments supported without sigArray")
-            give false
+            throw FFIError("maximum 12 arguments supported without sigArray")
         }
         
-        # If sigArray is provided, use os_call_sig (up to 4 args, full float/double support)
+        // If sigArray is provided, use os_call_sig (up to 4 args, full float/double support)
         when argCount == 0 { give os_call_sig(self.ptr, self.retType, self.sigArray) }
         when argCount == 1 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0]) }
         when argCount == 2 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1]) }
         when argCount == 3 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1], args[2]) }
         when argCount == 4 { give os_call_sig(self.ptr, self.retType, self.sigArray, args[0], args[1], args[2], args[3]) }
         
-        print("ezffi error: os_call_sig maximum 4 arguments supported")
-        give false
+        throw FFIError("os_call_sig maximum 4 arguments supported")
     }
 }
 
@@ -114,17 +186,16 @@ export model Library {
         give self
     }
 
-    # Extract a function pointer and wrap it dynamically
-    # name: string (e.g. "MessageBoxA")
-    # retType: string (e.g. "int", "ptr", "float")
-    # sigArray (optional): array of arg types (e.g. ["int", "float"])
+    // Extract a function pointer and wrap it dynamically
+    // name: string (e.g. "MessageBoxA")
+    // retType: string (e.g. "int", "ptr", "float")
+    // sigArray (optional): array of arg types (e.g. ["int", "float"])
     task func(name, retType, sigArray) {
         ptr = os_get_func(self.handle, str(name))
         when ptr == 0 {
-            print("ezffi error: Failed to find function '" + str(name) + "' in DLL.")
-            give false
+            throw FFIError("Failed to find function '" + str(name) + "' in DLL.")
         }
-        give Function(ptr, retType, sigArray)
+        give Function(ptr, retType, sigArray, self)
     }
 }
 
@@ -134,28 +205,45 @@ export PTR = "ptr"
 export FLOAT = "float"
 export DOUBLE = "double"
 export STR = "string"
+export VOID = "void"
 
-# Load a dynamic library (.dll)
+// Load a dynamic library (.dll)
 export task load(dll_name) {
     handle = os_load_lib(str(dll_name))
     when handle == 0 {
-        print("ezffi error: Failed to load library '" + str(dll_name) + "'. File might not exist or architecture mismatch.")
-        give false
+        throw FFIError("Failed to load library '" + str(dll_name) + "'. File might not exist or architecture mismatch.")
     }
     give Library(handle)
 }
 
-# Allocate a block of raw heap memory
+// Allocate a block of raw heap memory
 export task alloc(size) {
     ptr = os_alloc(size)
     when ptr == 0 { 
-        print("ezffi error: Out of memory during alloc.")
-        give false 
+        throw FFIError("Out of memory during alloc.")
     }
     give Pointer(ptr)
 }
 
-# Wrap an existing raw memory address into a Pointer object
+// Wrap an existing raw memory address into a Pointer object
 export task wrap(raw_ptr_address) {
-    give Pointer(raw_ptr_address)
+    give Pointer(raw_ptr_address, false)
+}
+
+// Struct Packing/Unpacking Helpers
+export task packStruct(layoutArray, valuesArray, buffer) {
+    give os_struct_pack(layoutArray, valuesArray, buffer)
+}
+
+export task unpackStruct(layoutArray, buffer_or_ptr) {
+    give os_struct_unpack(layoutArray, buffer_or_ptr)
+}
+
+// Create an FFI Callback
+export task createCallback(sigArray, retType, ezFunction) {
+    ptr = os_ffi_create_callback(sigArray, retType, ezFunction)
+    when ptr == 0 {
+        throw FFIError("Failed to create FFI callback")
+    }
+    give Pointer(ptr)
 }

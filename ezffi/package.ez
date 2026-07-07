@@ -1,6 +1,6 @@
 {
     "name": "ffi",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Python ctypes equivalent for EZ. Dynamically call any Windows .dll and interact with raw heap memory.",
     "entry": "main.ez",
     "author": "Abdullah Masood"
