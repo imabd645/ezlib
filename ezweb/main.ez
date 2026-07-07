@@ -8,10 +8,32 @@
 __kernel32 = os_load_lib("kernel32.dll")
 __ws32 = os_load_lib("ws2_32.dll")
 __msv = os_load_lib("msvcrt.dll")
+__SetDllDirectoryA = os_get_func(__kernel32, "SetDllDirectoryA")
+when __SetDllDirectoryA != 0 { os_call(__SetDllDirectoryA, "int", "C:\\ezlib\\web\\dlls") }
+
+__web_accel = os_load_lib("web_accel.dll")
+when typeOf(__web_accel) == "nil" or __web_accel == 0 { __web_accel = os_load_lib("C:\\ezlib\\web\\dlls\\web_accel.dll") }
+
+__http_accel = os_load_lib("http_accel.dll")
+when typeOf(__http_accel) == "nil" or __http_accel == 0 { __http_accel = os_load_lib("C:\\ezlib\\web\\dlls\\http_accel.dll") }
+
+when __SetDllDirectoryA != 0 { os_call(__SetDllDirectoryA, "int", 0) }
+
+export model WebAccelFFI {
+    static render = os_get_func(__web_accel, "render_template_ext")
+    static freeBuf = os_get_func(__web_accel, "free_template_buffer")
+}
+
+export model HttpAccelFFI {
+    static start = os_get_func(__http_accel, "http_server_start")
+    static poll = os_get_func(__http_accel, "http_server_poll")
+    static respond = os_get_func(__http_accel, "http_server_respond")
+    static stop = os_get_func(__http_accel, "http_server_stop")
+}
 
 # Safe indexOf wrapper that supports 3 arguments
 export task indexOfSafe(s, search, start) {
-    when type(start) == "nil" { give indexOf(s, search) }
+    when typeOf(start) == "nil" { give indexOf(s, search) }
     when start < 0 { start = 0 }
     when start >= len(s) { give -1 }
     sub = substr(s, start, len(s) - start)
@@ -98,233 +120,18 @@ export model WebUtils {
 }
 
 export model TemplateEngine {
-    static task resolve(ctx, path) {
-        parts = split(str(path), ".")
-        cur = ctx
-        get p in parts {
-            p = trim(p)
-            when type(cur) == "dictionary" {
-                when has_key(cur, p) { cur = cur[p] }
-                other { give "" }
-            } other { give "" }
-        }
-        give cur
-    }
-
-    static task getTokens(s) {
-        parts = split(s, " ")
-        tokens = []
-        i = 0
-        l = len(parts)
-        while i < l {
-            p = trim(parts[i])
-            when len(p) > 0 { push(tokens, p) }
-            i = i + 1
-        }
-        give tokens
-    }
-
-    # Robust matching tag finder for nested {% if %} and {% for %}
-    static task findMatchingTag(tmpl, openTag, closeTag, startIdx) {
-        depth = 1
-        currIdx = startIdx
-        while depth > 0 {
-            nextOpen = indexOfSafe(tmpl, openTag, currIdx)
-            nextClose = indexOfSafe(tmpl, closeTag, currIdx)
-            
-            when nextClose == -1 { give -1 }
-            
-            when nextOpen != -1 and nextOpen < nextClose {
-                depth = depth + 1
-                currIdx = nextOpen + len(openTag)
-            } other {
-                depth = depth - 1
-                currIdx = nextClose + len(closeTag)
-                when depth == 0 { give nextClose }
-            }
-        }
-        give -1
-    }
-
     static task render(tmpl, ctx) {
-        chunks = []
-        i = 0
-        l = len(tmpl)
-        
-        while i < l {
-            vStart = indexOfSafe(tmpl, "{{", i)
-            sStart = indexOfSafe(tmpl, "{%", i)
+        when typeOf(WebAccelFFI.render) != "nil" and WebAccelFFI.render != 0 {
+            ctx_json = to_json(ctx)
+            ptr = os_call(WebAccelFFI.render, "ptr", tmpl, ctx_json, ctx["__base_dir__"])
             
-            when vStart == -1 and sStart == -1 {
-                push(chunks, substr(tmpl, i, l - i))
-                escape
-            }
-            
-            closest = -1
-            isStmt = false
-            when vStart != -1 and sStart != -1 {
-                when vStart < sStart { closest = vStart  isStmt = false }
-                other { closest = sStart  isStmt = true }
-            } other when vStart != -1 {
-                closest = vStart  isStmt = false
-            } other {
-                closest = sStart  isStmt = true
-            }
-            
-            push(chunks, substr(tmpl, i, closest - i))
-            
-            when not isStmt {
-                vEnd = indexOfSafe(tmpl, "}}", closest)
-                when vEnd == -1 { push(chunks, substr(tmpl, closest, l - closest)) escape }
-                varPath = trim(substr(tmpl, closest + 2, vEnd - (closest + 2)))
-                
-                isSafe = false
-                safeIdx = indexOf(varPath, "| safe")
-                when safeIdx != -1 {
-                    isSafe = true
-                    varPath = trim(substr(varPath, 0, safeIdx))
-                }
-                
-                rawVal = str(TemplateEngine.resolve(ctx, varPath))
-                when isSafe { push(chunks, rawVal) }
-                other { push(chunks, WebUtils.escapeHtml(rawVal)) }
-                
-                i = vEnd + 2
-            } other {
-                sEnd = indexOfSafe(tmpl, "%}", closest)
-                when sEnd == -1 { push(chunks, substr(tmpl, closest, l - closest)) escape }
-                stmtRaw = trim(substr(tmpl, closest + 2, sEnd - (closest + 2)))
-                stmtTokens = TemplateEngine.getTokens(stmtRaw)
-                
-                when len(stmtTokens) == 0 {
-                    i = sEnd + 2
-                } other {
-                    cmd = stmtTokens[0]
-                    
-                    when cmd == "if" {
-                        condVar = ""
-                        when len(stmtTokens) > 1 { condVar = stmtTokens[1] }
-                        condVal = TemplateEngine.resolve(ctx, condVar)
-                        truthy = false
-                        
-                        tType = type(condVal)
-                        when tType == "bool" { truthy = condVal }
-                        other when tType == "integer" or tType == "float" { truthy = condVal != 0 }
-                        other when tType == "string" or tType == "array" { truthy = len(condVal) > 0 }
-                        other when tType == "dictionary" { truthy = len(keys(condVal)) > 0 }
-                        other when condVal != nil { truthy = true }
-                        
-                        endIfIdx = TemplateEngine.findMatchingTag(tmpl, "{% if ", "{% endif %}", sEnd + 2)
-                        elseIdx = indexOfSafe(tmpl, "{% else %}", sEnd + 2)
-                        
-                        when endIfIdx == -1 {
-                            push(chunks, "[TEMPLATE ERROR: MISSING ENDIF]")
-                            escape
-                        }
-                        
-                        # Validate else is in the SAME scope (not nested)
-                        nextInnerIf = indexOfSafe(tmpl, "{% if ", sEnd + 2)
-                        when nextInnerIf != -1 and nextInnerIf < elseIdx { elseIdx = -1 }
-                        
-                        blockContent = ""
-                        elseContent = ""
-                        
-                        when elseIdx != -1 and elseIdx < endIfIdx {
-                            blockContent = substr(tmpl, sEnd + 2, elseIdx - (sEnd + 2))
-                            elseContent = substr(tmpl, elseIdx + 10, endIfIdx - (elseIdx + 10))
-                        } other {
-                            blockContent = substr(tmpl, sEnd + 2, endIfIdx - (sEnd + 2))
-                        }
-                        
-                        when truthy { push(chunks, TemplateEngine.render(blockContent, ctx)) }
-                        other when len(elseContent) > 0 { push(chunks, TemplateEngine.render(elseContent, ctx)) }
-                        
-                        i = endIfIdx + 11
-                        
-                    } other when cmd == "for" {
-                        iterVar = ""
-                        listVar = ""
-                        when len(stmtTokens) > 1 { iterVar = stmtTokens[1] }
-                        when len(stmtTokens) > 3 { listVar = stmtTokens[3] }
-                        listVal = TemplateEngine.resolve(ctx, listVar)
-                        
-                        endForIdx = TemplateEngine.findMatchingTag(tmpl, "{% for ", "{% endfor %}", sEnd + 2)
-                        when endForIdx == -1 { push(chunks, "[TEMPLATE ERROR: MISSING ENDFOR]") escape }
-                        
-                        blockContent = substr(tmpl, sEnd + 2, endForIdx - (sEnd + 2))
-                        
-                        when type(listVal) == "array" {
-                            get item in listVal {
-                                ctx[iterVar] = item
-                                push(chunks, TemplateEngine.render(blockContent, ctx))
-                            }
-                        } other when type(listVal) == "dictionary" {
-                            kList = keys(listVal)
-                            get k in kList {
-                                ctx[iterVar] = listVal[k]
-                                push(chunks, TemplateEngine.render(blockContent, ctx))
-                            }
-                        }
-                        
-                        i = endForIdx + 12
-                        
-                    } other when cmd == "extends" {
-                        parentPath = ""
-                        when len(stmtTokens) > 1 { parentPath = stmtTokens[1] }
-                        parentPath = substr(parentPath, 1, len(parentPath) - 2)
-                        when has_key(ctx, "__base_dir__") { parentPath = ctx["__base_dir__"] + parentPath }
-                        when not has_key(ctx, "__blocks__") { ctx["__blocks__"] = {} }
-                        
-                        bIdx = i
-                        while true {
-                            bStart = indexOfSafe(tmpl, "{% block ", bIdx)
-                            when bStart == -1 { escape }
-                            bEnd = indexOfSafe(tmpl, "%}", bStart)
-                            bCmd = trim(substr(tmpl, bStart + 2, bEnd - (bStart + 2)))
-                            bTokens = TemplateEngine.getTokens(bCmd)
-                            when len(bTokens) < 2 { escape }
-                            
-                            bName = bTokens[1]
-                            bClose = TemplateEngine.findMatchingTag(tmpl, "{% block ", "{% endblock %}", bEnd + 2)
-                            when bClose != -1 {
-                                ctx["__blocks__"][bName] = substr(tmpl, bEnd + 2, bClose - (bEnd + 2))
-                                bIdx = bClose + 14
-                            } other { escape }
-                        }
-                        
-                        parentTmpl = readFile(parentPath)
-                        give TemplateEngine.render(parentTmpl, ctx)
-                        
-                    } other when cmd == "block" {
-                        bName = ""
-                        when len(stmtTokens) > 1 { bName = stmtTokens[1] }
-                        endBlockIdx = TemplateEngine.findMatchingTag(tmpl, "{% block ", "{% endblock %}", sEnd + 2)
-                        when endBlockIdx == -1 { push(chunks, "[TEMPLATE ERROR: MISSING ENDBLOCK]") escape }
-                        
-                        defaultContent = substr(tmpl, sEnd + 2, endBlockIdx - (sEnd + 2))
-                        
-                        when has_key(ctx, "__blocks__") and has_key(ctx["__blocks__"], bName) {
-                            push(chunks, TemplateEngine.render(ctx["__blocks__"][bName], ctx))
-                        } other {
-                            push(chunks, TemplateEngine.render(defaultContent, ctx))
-                        }
-                        i = endBlockIdx + 14
-                        
-                    } other when cmd == "include" {
-                        incPath = ""
-                        when len(stmtTokens) > 1 { incPath = stmtTokens[1] }
-                        incPath = substr(incPath, 1, len(incPath) - 2)
-                        when has_key(ctx, "__base_dir__") { incPath = ctx["__base_dir__"] + incPath }
-                        incTmpl = readFile(incPath)
-                        push(chunks, TemplateEngine.render(incTmpl, ctx))
-                        i = sEnd + 2
-                    } other {
-                        i = sEnd + 2
-                    }
-                }
+            when typeOf(ptr) != "nil" and ptr != 0 {
+                res = os_read_string_ptr(ptr)
+                os_call(WebAccelFFI.freeBuf, "int", ptr)
+                give res
             }
         }
-        give join(chunks, "")
+        give "[TEMPLATE ENGINE ERROR: C++ web_accel.dll failed or is missing]"
     }
 }
 
@@ -350,6 +157,12 @@ export task redirect(url) {
     }
 }
 
+export task flash(req, message, category) {
+    when typeOf(category) == "nil" { category = "info" }
+    when not has_key(req["session"], "_flashes") { req["session"]["_flashes"] = [] }
+    push(req["session"]["_flashes"], {"c": category, "m": message})
+}
+
 export model MemorySessionStore {
     init() { self.sessions = {} }
     task get(sid) {
@@ -366,6 +179,7 @@ export model WebApp {
         self.errorHandlers = { "404": nil, "500": nil }
         self.sessionStore = MemorySessionStore()
         self.sessionCounter = 0
+        self.static_cache = {}
     }
     
     task fileExists(path) {
@@ -419,6 +233,10 @@ export model WebApp {
             when indexOf(fileName, "..") != -1 { give {"status": 403, "body": "Forbidden"} }
             when not self.fileExists(fullFile) { give {"status": 404, "body": "File Not Found"} }
             
+            when has_key(self.static_cache, fullFile) {
+                give self.static_cache[fullFile]
+            }
+            
             content = readFile(fullFile)
             contentType = "text/plain"
             when endsWith(fileName, ".html") { contentType = "text/html" }
@@ -427,12 +245,15 @@ export model WebApp {
             other when endsWith(fileName, ".json") { contentType = "application/json" }
             other when endsWith(fileName, ".png") { contentType = "image/png" }
             other when endsWith(fileName, ".jpg") or endsWith(fileName, ".jpeg") { contentType = "image/jpeg" }
+            other when endsWith(fileName, ".svg") { contentType = "image/svg+xml" }
             
-            give {
+            resp = {
                 "status": 200,
                 "body": content,
                 "headers": { "Content-Type": contentType }
             }
+            self.static_cache[fullFile] = resp
+            give resp
         })
     }
     
@@ -446,90 +267,16 @@ export model WebApp {
     task put(path, handler) { self._addRoute("PUT", path, handler) }
     task delete(path, handler) { self._addRoute("DELETE", path, handler) }
     
-    static task _handleClient(clientSocket, inst) {
-        buf = os_alloc(8192)
-        requestBuilt = ""
-        headersComplete = false
-        headerEnd = 0
-        contentLen = 0
+    static task _handleNativeRequest(req, inst) {
+        method = req["method"]
+        fullPath = req["fullPath"]
+        headers = req["headers"]
+        body = req["body"]
         
-        while not headersComplete {
-            bytesRead = os_call(WebFFI.recv, "int", clientSocket, buf, 8191, 0)
-            when bytesRead <= 0 { escape }
-            os_write_byte(buf, bytesRead, 0)
-            requestBuilt = requestBuilt + os_read_string_ptr(buf)
-            
-            headerEnd = indexOf(requestBuilt, "\r\n\r\n")
-            when headerEnd != -1 { headersComplete = true }
-        }
-        
-        when not headersComplete {
-            os_call(WebFFI.closesocket, "int", clientSocket)
-            os_free(buf)
-            give false
-        }
-        
-        method = ""
-        fullPath = ""
-        headers = {}
-        
-        firstLBreak = indexOf(requestBuilt, "\r\n")
-        when firstLBreak != -1 {
-            firstLine = substr(requestBuilt, 0, firstLBreak)
-            parts = split(firstLine, " ")
-            when len(parts) >= 2 {
-                method = parts[0]
-                fullPath = parts[1]
-            }
-        }
-        
-        hBlock = substr(requestBuilt, firstLBreak + 2, headerEnd - (firstLBreak + 2))
-        hLines = split(hBlock, "\r\n")
-        get hl in hLines {
-            cIdx = indexOf(hl, ":")
-            when cIdx != -1 {
-                k = lower(substr(hl, 0, cIdx))
-                v = substr(hl, cIdx + 1, len(hl) - (cIdx + 1))
-                while len(v) > 0 and substr(v, 0, 1) == " " { v = substr(v, 1, len(v) - 1) }
-                headers[k] = v
-                when k == "content-length" { contentLen = os_call(WebFFI.atoiFunc, "int", v) }
-            }
-        }
-        
-        bodyStart = headerEnd + 4
-        bodyBase = substr(requestBuilt, bodyStart, len(requestBuilt) - bodyStart)
-        bodyLenRead = len(bodyBase)
-        bodyChunks = []
-        
-        # Fixed Buffer reading for large files
-        while bodyLenRead < contentLen {
-            bytesToRead = contentLen - bodyLenRead
-            when bytesToRead > 8192 { bytesToRead = 8192 }
-            bytesRead = os_call(WebFFI.recv, "int", clientSocket, buf, bytesToRead, 0)
-            when bytesRead <= 0 { escape }
-            os_write_byte(buf, bytesRead, 0)
-            push(bodyChunks, os_read_string_ptr(buf))
-            bodyLenRead = bodyLenRead + bytesRead
-        }
-        body = bodyBase + join(bodyChunks, "")
-        
-        req = {
-            "method": method, "path": "", "fullPath": fullPath, "body": body,
-            "headers": headers, "query": {}, "form": {}, "params": {},
-            "cookies": {}, "session": {}
-        }
-        
-        pathParts = split(fullPath, "?")
-        req["path"] = pathParts[0]
-        
-        when len(pathParts) > 1 {
-            qPairs = split(pathParts[1], "&")
-            get pair in qPairs {
-                eIdx = indexOf(pair, "=")
-                when eIdx != -1 { req["query"][WebUtils.urlDecode(substr(pair, 0, eIdx))] = WebUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1))) }
-                other { req["query"][WebUtils.urlDecode(pair)] = true }
-            }
-        }
+        req["form"] = {}
+        req["params"] = {}
+        req["cookies"] = {}
+        req["session"] = {}
         
         when has_key(headers, "content-type") {
             cType = headers["content-type"]
@@ -581,10 +328,9 @@ export model WebApp {
         }
         
         handled = false
-        respStr = ""
         routeKeys = keys(inst.routes)
         matchedRoute = nil
-        
+        reqParts = split(req["path"], "/")
         i_route = 0
         while i_route < len(routeKeys) {
             rKey = routeKeys[i_route]
@@ -613,7 +359,6 @@ export model WebApp {
             i_route = i_route + 1
         }
         
-        # Init Response Object
         resObj = { "status": 200, "headers": {}, "body": "" }
         
         when matchedRoute != nil {
@@ -628,7 +373,7 @@ export model WebApp {
             
             when result == nil { result = matchedRoute["handler"](req) }
             
-            t = type(result)
+            t = typeOf(result)
             b = ""
             status = 200
             h = resObj["headers"]
@@ -637,7 +382,7 @@ export model WebApp {
                 when has_key(result, "status") { status = result["status"] }
                 when has_key(result, "body") { 
                     bd = result["body"]
-                    when type(bd) == "dictionary" or type(bd) == "array" {
+                    when typeOf(bd) == "dictionary" or typeOf(bd) == "array" {
                         b = to_json(bd)
                         h["Content-Type"] = "application/json"
                     } other { b = str(bd) }
@@ -658,21 +403,42 @@ export model WebApp {
                 when not has_key(h, "Content-Type") { h["Content-Type"] = "text/html" }
             }
             
-            statusPhrase = "OK"
-            when has_key(WebUtils.HTTP_STATUS, status) { statusPhrase = WebUtils.HTTP_STATUS[status] }
+            when has_key(h, "Content-Type") and h["Content-Type"] == "text/html" and has_key(req["session"], "_flashes") {
+                flashes = req["session"]["_flashes"]
+                when len(flashes) > 0 {
+                    flash_html = ""
+                    get f in flashes {
+                        cat = f["c"]
+                        msg = f["m"]
+                        style = "background:var(--primary-light);border-color:var(--primary);color:var(--primary);"
+                        when cat == "success" { style = "background:var(--success-light);border-color:#6ee7b7;color:#065f46;" }
+                        when cat == "error" or cat == "danger" { style = "background:var(--danger-light);border-color:#fca5a5;color:#991b1b;" }
+                        flash_html = flash_html + "<div class='alert' style='padding:1rem;margin-bottom:1rem;border:1px solid;border-radius:0.5rem;" + style + "'>" + msg + "</div>"
+                    }
+                    req["session"]["_flashes"] = []
+                    
+                    bIdx = indexOf(b, "<body")
+                    when bIdx != -1 {
+                        bEnd = indexOfSafe(b, ">", bIdx)
+                        when bEnd != -1 {
+                            b = substr(b, 0, bEnd + 1) + "<div style='max-width:1200px;margin:1rem auto;padding:0 1.5rem;'>" + flash_html + "</div>" + substr(b, bEnd + 1, len(b) - (bEnd + 1))
+                        }
+                    }
+                }
+            }
             
-            sessionModified = false
             sKeys = keys(req["session"])
-            when len(sKeys) > 0 or sessionId != nil { sessionModified = true }
-            
-            when sessionModified {
+            when len(sKeys) > 0 {
                 when sessionId == nil {
                     inst.sessionCounter = inst.sessionCounter + 1
-                    sessionId = "sess_" + str(inst.sessionCounter) + "_" + replace(str(clock()), ".", "")
+                    sessionId = "sess_" + str(clock()) + "_" + str(inst.sessionCounter)
                 }
                 inst.sessionStore.set(sessionId, req["session"])
-                h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/; HttpOnly"
+                when not has_key(h, "Set-Cookie") { h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/; HttpOnly" }
             }
+            
+            statusPhrase = "OK"
+            when has_key(WebUtils.HTTP_STATUS, status) { statusPhrase = WebUtils.HTTP_STATUS[status] }
             
             respChunks = ["HTTP/1.1 ", str(status), " ", statusPhrase, "\r\n"]
             when not has_key(h, "Server") { h["Server"] = "EZ Web Framework" }
@@ -686,7 +452,6 @@ export model WebApp {
                 push(respChunks, "\r\n")
             }
             
-            # Use actual byte length using FFI strlen for accurate UTF-8 transport
             byteLen = os_call(WebFFI.strlenFunc, "int", b)
             push(respChunks, "Content-Length: ")
             push(respChunks, str(byteLen))
@@ -694,51 +459,36 @@ export model WebApp {
             push(respChunks, b)
             
             respStr = join(respChunks, "")
-            os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
+            os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
         }
         
         when not handled {
             b = "<h1>404 Not Found</h1>"
             byteLen = os_call(WebFFI.strlenFunc, "int", b)
             respStr = "HTTP/1.1 404 Not Found\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(byteLen) + "\r\n\r\n" + b
-            os_call(WebFFI.send, "int", clientSocket, respStr, len(respStr), 0)
+            os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
         }
-        
-        os_call(WebFFI.closesocket, "int", clientSocket)
-        os_free(buf)
     }
     
     task run(port) {
-        wsaData = os_alloc(400)
-        os_call(WebFFI.wsaStartup, "int", 514, wsaData)
-        os_free(wsaData)
-        
-        listenSocket = os_call(WebFFI.socket, "ptr", 2, 1, 6)
-        
-        addr = os_alloc(16)
-        b1 = port & 255
-        b2 = (port >> 8) & 255
-        
-        os_write_byte(addr, 0, 2)
-        os_write_byte(addr, 1, 0)
-        os_write_byte(addr, 2, b2)
-        os_write_byte(addr, 3, b1)
-        os_write_uint64(addr, 4, 0)
-        os_write_uint64(addr, 8, 0)
-        
-        bound = os_call(WebFFI.bind, "int", listenSocket, addr, 16)
-        os_free(addr)
-        
-        os_call(WebFFI.listen, "int", listenSocket, 128)
+        res = os_call(HttpAccelFFI.start, "int", port)
+        when res != 1 {
+            out "Failed to start C++ HTTP Accel server"
+            give nil
+        }
         out "==================================================="
-        out " EZ Web Framework (Flask-Style) "
+        out " EZ Web Framework (C++ Accel Mode) "
         out " Listening natively on http://localhost:" + str(port)
         out "==================================================="
         
         while true {
-            clientSocket = os_call(WebFFI.accept, "ptr", listenSocket, 0, 0)
-            when clientSocket != 0 and clientSocket != -1 {
-                spawn(WebApp._handleClient, clientSocket, self)
+            ptr = os_call(HttpAccelFFI.poll, "ptr")
+            when ptr != 0 and ptr != -1 {
+                jsonStr = os_read_string_ptr(ptr)
+                reqObj = parse_json(jsonStr)
+                spawn(WebApp._handleNativeRequest, reqObj, self)
+            } other {
+                stop(1)
             }
         }
     }
