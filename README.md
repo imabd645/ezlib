@@ -260,7 +260,7 @@ A minimal `package.ez`:
 }
 ```
 
-To make it installable, push it to GitHub as `imabd645/EZ<name>` and anyone can install it with `ez install <name>`.
+To make it installable, push it to GitHub as `imabd645/ezlib/ez<name>` and anyone can install it with `ez install <name>`.
 
 ---
 
