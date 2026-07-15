@@ -1,0 +1,56 @@
+# ============================================================================
+# EZ Standard Library: JWT (JSON Web Tokens)
+# Requires: ezcrypto
+# ============================================================================
+use "crypto"
+
+export model JWT {
+    # Generate a JWT token (HS256)
+    static task encode(payload, secret) {
+        headerJson = to_json({"alg": "HS256", "typ": "JWT"})
+        payloadJson = to_json(payload)
+        
+        headerB64 = b64url_encode(headerJson)
+        payloadB64 = b64url_encode(payloadJson)
+        
+        sigInput = headerB64 + "." + payloadB64
+        
+        # Crypto.hmac returns a hex string
+        sigHex = Crypto.hmac(secret, sigInput)
+        
+        # Convert hex to byte array, then Base64Url encode it
+        sigBytes = hex_to_bytes(sigHex)
+        sigB64 = b64url_encode(sigBytes)
+        
+        give sigInput + "." + sigB64
+    }
+
+    # Verify and decode a JWT token (HS256)
+    # Returns the payload dictionary, or throws an error on failure
+    static task decode(token, secret) {
+        parts = split(token, ".")
+        when len(parts) != 3 {
+            throw "jwt: Invalid token format (expected 3 parts)"
+        }
+        
+        sigInput = parts[0] + "." + parts[1]
+        expectedSigHex = Crypto.hmac(secret, sigInput)
+        expectedSigBytes = hex_to_bytes(expectedSigHex)
+        expectedSigB64 = b64url_encode(expectedSigBytes)
+        
+        when parts[2] != expectedSigB64 {
+            throw "jwt: Signature verification failed"
+        }
+        
+        # Decode header to check alg
+        headerJson = b64url_decode(parts[0])
+        header = parse_json(headerJson)
+        
+        when header["alg"] != "HS256" {
+            throw "jwt: Unsupported algorithm '" + header["alg"] + "'. Only HS256 is supported."
+        }
+        
+        payloadJson = b64url_decode(parts[1])
+        give parse_json(payloadJson)
+    }
+}

@@ -1032,6 +1032,24 @@
       ],
       "description": "Native Supabase REST API Client for EZ Language. Perform database queries directly over HTTP without ODBC drivers.",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "jwt",
+      "folder": "ezjwt",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezjwt",
+          "dependencies": {
+            "crypto": "^1.0.0"
+          }
+        }
+      ],
+      "description": "JSON Web Tokens (JWT) encoder and decoder using HS256 algorithm for EZ Language",
+      "author": "Abdullah Masood"
     }
   ]
 }
