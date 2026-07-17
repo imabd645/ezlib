@@ -1066,6 +1066,22 @@
       ],
       "description": "Library to display a full calendar for specific months and years using the native DateTime class",
       "author": "Antigravity"
+    },
+    {
+      "name": "csv",
+      "folder": "ezcsv",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezcsv",
+          "dependencies": {}
+        }
+      ],
+      "description": "Production-ready CSV parser and stringifier handling RFC 4180 rules",
+      "author": "Abdullah Masood"
     }
   ]
 }

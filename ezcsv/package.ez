@@ -1,0 +1,9 @@
+{
+    "name": "csv",
+    "version": "1.0.0",
+    "description": "Production-ready CSV parser and stringifier handling RFC 4180 rules",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "repository": "https://github.com/imabd645/EZ",
+    "dependencies": {}
+}

@@ -1,0 +1,190 @@
+# ============================================================================
+# CSV - Comma-Separated Values Parser/Stringifier for EZ
+# Handles RFC 4180 rules (quotes, escaped quotes, newlines in fields)
+# ============================================================================
+
+task containsChar(s, charSet) {
+    i = 0
+    l = len(s)
+    lc = len(charSet)
+    while i < l {
+        c = substr(s, i, 1)
+        j = 0
+        while j < lc {
+            when c == substr(charSet, j, 1) {
+                give true
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    give false
+}
+
+task parseCSVLines(strData) {
+    result = []
+    currField = ""
+    currRow = []
+    inQuotes = false
+    i = 0
+    l = len(strData)
+    
+    while i < l {
+        c = substr(strData, i, 1)
+        
+        when c == "\"" {
+            when i + 1 < l and substr(strData, i+1, 1) == "\"" {
+                currField = currField + "\""
+                i = i + 1
+            } other {
+                when inQuotes { inQuotes = false } other { inQuotes = true }
+            }
+        } other {
+            when c == "," and not inQuotes {
+                push(currRow, currField)
+                currField = ""
+            } other {
+                when (c == "\n" or c == "\r") and not inQuotes {
+                    when c == "\r" and i + 1 < l and substr(strData, i+1, 1) == "\n" {
+                        i = i + 1
+                    }
+                    push(currRow, currField)
+                    push(result, currRow)
+                    currRow = []
+                    currField = ""
+                } other {
+                    currField = currField + c
+                }
+            }
+        }
+        i = i + 1
+    }
+    
+    when len(currField) > 0 or len(currRow) > 0 {
+        push(currRow, currField)
+        push(result, currRow)
+    }
+    
+    give result
+}
+
+export task parse(csvString) {
+    when type(csvString) != "string" { give [] }
+    when len(csvString) == 0 { give [] }
+    
+    rows = parseCSVLines(csvString)
+    when len(rows) == 0 { give [] }
+    
+    headers = rows[0]
+    result = []
+    
+    r = 1
+    while r < len(rows) {
+        row = rows[r]
+        when len(row) > 0 and (len(row) > 1 or len(row[0]) > 0) {
+            dict = {}
+            c = 0
+            while c < len(headers) {
+                when c < len(row) {
+                    dict[headers[c]] = row[c]
+                } other {
+                    dict[headers[c]] = ""
+                }
+                c = c + 1
+            }
+            push(result, dict)
+        }
+        r = r + 1
+    }
+    
+    give result
+}
+
+task escapeCSVField(val) {
+    s = str(val)
+    needsQuotes = containsChar(s, ",\"\n\r")
+    
+    when needsQuotes {
+        res = ""
+        i = 0
+        l = len(s)
+        while i < l {
+            c = substr(s, i, 1)
+            when c == "\"" {
+                res = res + "\"\""
+            } other {
+                res = res + c
+            }
+            i = i + 1
+        }
+        give "\"" + res + "\""
+    }
+    give s
+}
+
+export task stringify(dataArray) {
+    when type(dataArray) != "array" or len(dataArray) == 0 { give "" }
+    
+    firstRow = dataArray[0]
+    headers = keys(firstRow)
+    
+    res = ""
+    
+    h = 0
+    while h < len(headers) {
+        res = res + escapeCSVField(headers[h])
+        when h < len(headers) - 1 {
+            res = res + ","
+        }
+        h = h + 1
+    }
+    res = res + "\n"
+    
+    r = 0
+    while r < len(dataArray) {
+        rowDict = dataArray[r]
+        c = 0
+        while c < len(headers) {
+            val = ""
+            key = headers[c]
+            
+            hasKey = false
+            k_arr = keys(rowDict)
+            k_idx = 0
+            while k_idx < len(k_arr) {
+                when k_arr[k_idx] == key { hasKey = true }
+                k_idx = k_idx + 1
+            }
+            when hasKey {
+                val = rowDict[key]
+            }
+            
+            res = res + escapeCSVField(val)
+            when c < len(headers) - 1 {
+                res = res + ","
+            }
+            c = c + 1
+        }
+        res = res + "\n"
+        r = r + 1
+    }
+    
+    give res
+}
+
+export task read(filePath) {
+    f = File(filePath, "r")
+    when not f.isOpen() { give nil }
+    data = f.readAll()
+    f.close()
+    give parse(data)
+}
+
+export task write(filePath, dataArray) {
+    f = File(filePath, "w")
+    when not f.isOpen() { give false }
+    csvStr = stringify(dataArray)
+    f.write(csvStr)
+    f.close()
+    give true
+}
