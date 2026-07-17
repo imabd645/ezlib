@@ -1,15 +1,15 @@
-# ============================================================================
-# ezsqlite / errors.ez -- turning result codes into something diagnosable.
-#
-# SQLite reports failure as a small integer. On its own "rc=19" tells a caller
-# nothing; the useful information is the code's name, SQLite's own message, and
-# the extended code -- which is the part that distinguishes "UNIQUE constraint
-# failed" from "FOREIGN KEY constraint failed", both of which are plain 19.
-# ============================================================================
+// ============================================================================
+// ezsqlite / errors.ez -- turning result codes into something diagnosable.
+//
+// SQLite reports failure as a small integer. On its own "rc=19" tells a caller
+// nothing; the useful information is the code's name, SQLite's own message, and
+// the extended code -- which is the part that distinguishes "UNIQUE constraint
+// failed" from "FOREIGN KEY constraint failed", both of which are plain 19.
+// ============================================================================
 
 use "ffi.ez"
 
-# Primary result code -> name.
+// Primary result code -> name.
 __CODE_NAMES = {
     "0": "SQLITE_OK",
     "1": "SQLITE_ERROR",
@@ -44,8 +44,8 @@ __CODE_NAMES = {
     "101": "SQLITE_DONE"
 }
 
-# The extended codes worth naming: each one answers "which constraint?" or
-# "which I/O step?", which is the question you actually have at 3am.
+// The extended codes worth naming: each one answers "which constraint?" or
+// "which I/O step?", which is the question you actually have at 3am.
 __EXTENDED_NAMES = {
     "266": "SQLITE_IOERR_READ",
     "267": "SQLITE_IOERR_SHORT_READ",
@@ -84,14 +84,14 @@ export task code_name(rc) {
 export task extended_code_name(rc) {
     k = str(rc)
     when has_key(__EXTENDED_NAMES, k) { give __EXTENDED_NAMES[k] }
-    # An extended code's low 8 bits are the primary code.
+    // An extended code's low 8 bits are the primary code.
     give code_name(rc % 256)
 }
 
 export task is_ok(rc) { give rc == SQLITE_OK }
 
-# True for codes that may succeed if simply retried: the database was locked by
-# another connection. Nothing else is worth a blind retry.
+// True for codes that may succeed if simply retried: the database was locked by
+// another connection. Nothing else is worth a blind retry.
 export task is_retryable(rc) {
     give rc == SQLITE_BUSY or rc == SQLITE_LOCKED
 }
@@ -100,11 +100,11 @@ export task is_constraint_violation(rc) {
     give rc == SQLITE_CONSTRAINT or (rc % 256) == SQLITE_CONSTRAINT
 }
 
-# Build the error object thrown by everything in this library.
-#
-# It is a dictionary rather than a bare string so callers can branch on `code`
-# (retry on BUSY, report a duplicate on CONSTRAINT_UNIQUE) instead of matching
-# on message text, which is not a stable API.
+// Build the error object thrown by everything in this library.
+//
+// It is a dictionary rather than a bare string so callers can branch on `code`
+// (retry on BUSY, report a duplicate on CONSTRAINT_UNIQUE) instead of matching
+// on message text, which is not a stable API.
 export task make_error(rc, message, sql = nil, extended = nil) {
     e = {
         "error": "SqliteError",
@@ -120,8 +120,8 @@ export task make_error(rc, message, sql = nil, extended = nil) {
     give e
 }
 
-# Human-readable one-liner. `throw` stringifies, so this is what a user sees when
-# they do not catch: it must carry the code name, SQLite's message, and the SQL.
+// Human-readable one-liner. `throw` stringifies, so this is what a user sees when
+// they do not catch: it must carry the code name, SQLite's message, and the SQL.
 export task format_error(e) {
     when typeOf(e) != "dictionary" { give str(e) }
     when not has_key(e, "code_name") { give str(e) }
@@ -132,10 +132,10 @@ export task format_error(e) {
     give s
 }
 
-# Raise a failure, reading SQLite's own message off the connection.
-#
-# db may be 0 (a failure with no connection to ask), in which case only the code
-# is reported.
+// Raise a failure, reading SQLite's own message off the connection.
+//
+// db may be 0 (a failure with no connection to ask), in which case only the code
+// is reported.
 export task raise_db_error(db, rc, sql = nil) {
     msg = "unknown error"
     ext = rc

@@ -1,50 +1,50 @@
-# ============================================================================
-# ezsqlite / connection.ez -- the Database handle.
-#
-# Owns the sqlite3*, compiles statements, and runs transactions. This is the file
-# users spend their time in; everything below it exists so this one can be plain.
-# ============================================================================
+// ============================================================================
+// ezsqlite / connection.ez -- the Database handle.
+//
+// Owns the sqlite3*, compiles statements, and runs transactions. This is the file
+// users spend their time in; everything below it exists so this one can be plain.
+// ============================================================================
 
 use "ffi.ez"
 use "errors.ez"
 use "types.ez"
 use "statement.ez"
 
-# Default: wait up to 5s for another connection to release a lock rather than
-# failing instantly with SQLITE_BUSY. Without this, any concurrent writer turns
-# into a hard error the moment two processes touch the file -- which is exactly
-# what happens under `workers` in the web framework.
+// Default: wait up to 5s for another connection to release a lock rather than
+// failing instantly with SQLITE_BUSY. Without this, any concurrent writer turns
+// into a hard error the moment two processes touch the file -- which is exactly
+// what happens under `workers` in the web framework.
 export DEFAULT_BUSY_TIMEOUT_MS = 5000
 
 export model Database {
-    # path: a filename, ":memory:", or a file: URI (with uri = true).
-    #
-    # Options:
-    #   readonly       (false) open without write access; the file must exist
-    #   create         (true)  create the file if missing
-    #   uri            (false) interpret `path` as a file: URI
-    #   busy_timeout   (5000)  ms to wait on a locked database
-    #   wal            (false) enable write-ahead logging; big win for concurrent
-    #                          readers, ignored for :memory:
-    #   foreign_keys   (true)  enforce FOREIGN KEY constraints
-    # NOTE: nothing in here may throw.
-    #
-    # An exception that escapes a model's init() crashes the interpreter with an
-    # access violation at shutdown -- reproducible in eight lines with no FFI
-    # involved:
-    #     model M { init() { throw "x" } }
-    #     try { M() } catch (e) { }        # -> 0xc0000005
-    # The error is even caught correctly first; the process dies afterwards.
-    #
-    # So the whole body is wrapped, and any failure is stashed in _init_error for
-    # connect() to raise from outside the constructor. Use connect(), not
-    # Database() directly, or an open failure will be silent.
+    // path: a filename, ":memory:", or a file: URI (with uri = true).
+    //
+    // Options:
+    //   readonly       (false) open without write access; the file must exist
+    //   create         (true)  create the file if missing
+    //   uri            (false) interpret `path` as a file: URI
+    //   busy_timeout   (5000)  ms to wait on a locked database
+    //   wal            (false) enable write-ahead logging; big win for concurrent
+    //                          readers, ignored for :memory:
+    //   foreign_keys   (true)  enforce FOREIGN KEY constraints
+    // NOTE: nothing in here may throw.
+    //
+    // An exception that escapes a model's init() crashes the interpreter with an
+    // access violation at shutdown -- reproducible in eight lines with no FFI
+    // involved:
+    //     model M { init() { throw "x" } }
+    //     try { M() } catch (e) { }        // -> 0xc0000005
+    // The error is even caught correctly first; the process dies afterwards.
+    //
+    // So the whole body is wrapped, and any failure is stashed in _init_error for
+    // connect() to raise from outside the constructor. Use connect(), not
+    // Database() directly, or an open failure will be silent.
     init(path, options = nil) {
         when typeOf(options) == "nil" { options = {} }
         self.path = str(path)
         self.handle = 0
         self.closed = false
-        # Depth of nested transaction() calls; drives SAVEPOINT naming.
+        // Depth of nested transaction() calls; drives SAVEPOINT naming.
         self._tx_depth = 0
         self._savepoint_seq = 0
         self._init_error = nil
@@ -71,7 +71,7 @@ export model Database {
             flags = SQLITE_OPEN_READONLY
         } other {
             flags = SQLITE_OPEN_READWRITE
-            # CREATE is meaningless (and rejected) alongside READONLY.
+            // CREATE is meaningless (and rejected) alongside READONLY.
             when create { flags = flags + SQLITE_OPEN_CREATE }
         }
         when uri { flags = flags + SQLITE_OPEN_URI }
@@ -79,8 +79,8 @@ export model Database {
         r = raw_open(self.path, flags)
         self.handle = r["db"]
         when r["rc"] != SQLITE_OK {
-            # SQLite hands back a handle even on failure so the message can be
-            # read off it. Read it, then close it -- otherwise the failure leaks.
+            // SQLite hands back a handle even on failure so the message can be
+            // read off it. Read it, then close it -- otherwise the failure leaks.
             msg = raw_errmsg(self.handle)
             code = r["rc"]
             when self.handle != 0 { raw_close(self.handle)  self.handle = 0 }
@@ -93,15 +93,15 @@ export model Database {
         when has_key(options, "busy_timeout") { ms = options["busy_timeout"] }
         raw_busy_timeout(self.handle, ms)
 
-        # FOREIGN KEY enforcement is OFF by default in SQLite, for backwards
-        # compatibility with databases written before it existed. That default
-        # silently lets orphaned rows accumulate, so flip it unless asked not to.
+        // FOREIGN KEY enforcement is OFF by default in SQLite, for backwards
+        // compatibility with databases written before it existed. That default
+        // silently lets orphaned rows accumulate, so flip it unless asked not to.
         fk = true
         when has_key(options, "foreign_keys") { fk = options["foreign_keys"] }
         when fk { self.exec("PRAGMA foreign_keys = ON") }
 
         when has_key(options, "wal") and options["wal"] {
-            # Not an error for :memory: -- SQLite just reports the mode it kept.
+            // Not an error for :memory: -- SQLite just reports the mode it kept.
             self.exec("PRAGMA journal_mode = WAL")
         }
     }
@@ -112,24 +112,24 @@ export model Database {
         }
     }
 
-    # Compile `sql` into a Statement. The caller owns it and MUST finalize() it;
-    # prefer query/exec/one/scalar, which do that for you.
+    // Compile `sql` into a Statement. The caller owns it and MUST finalize() it;
+    // prefer query/exec/one/scalar, which do that for you.
     task prepare(sql) {
         self._check_open()
         r = raw_prepare(self.handle, sql)
         when r["rc"] != SQLITE_OK {
-            # A failed prepare can still return a handle; do not leak it.
+            // A failed prepare can still return a handle; do not leak it.
             when r["stmt"] != 0 { raw_finalize(r["stmt"]) }
             raise_db_error(self.handle, r["rc"], sql)
         }
         when r["stmt"] == 0 {
-            # Empty or comment-only SQL compiles OK to a null statement.
+            // Empty or comment-only SQL compiles OK to a null statement.
             raise_error(SQLITE_ERROR, "no statement to execute", sql)
         }
         give Statement(self.handle, r["stmt"], str(sql))
     }
 
-    # Run a statement that returns no rows. Gives the number of rows changed.
+    // Run a statement that returns no rows. Gives the number of rows changed.
     task exec(sql, params = nil) {
         self._check_open()
         st = self.prepare(sql)
@@ -140,7 +140,7 @@ export model Database {
         })
     }
 
-    # Run `sql` and return every row as a dictionary.
+    // Run `sql` and return every row as a dictionary.
     task query(sql, params = nil) {
         self._check_open()
         st = self.prepare(sql)
@@ -159,7 +159,7 @@ export model Database {
         })
     }
 
-    # First row as a dictionary, or nil.
+    // First row as a dictionary, or nil.
     task one(sql, params = nil) {
         self._check_open()
         st = self.prepare(sql)
@@ -169,7 +169,7 @@ export model Database {
         })
     }
 
-    # First column of the first row, or nil. For `SELECT count(*) FROM t`.
+    // First column of the first row, or nil. For `SELECT count(*) FROM t`.
     task scalar(sql, params = nil) {
         self._check_open()
         st = self.prepare(sql)
@@ -179,11 +179,11 @@ export model Database {
         })
     }
 
-    # Run the same statement once per parameter set, compiling it ONCE.
-    #
-    # This is the reason to reach for it over a loop of exec(): re-preparing the
-    # SQL for every row is usually the dominant cost of a bulk insert. Wrap it in
-    # a transaction to avoid one fsync per row as well.
+    // Run the same statement once per parameter set, compiling it ONCE.
+    //
+    // This is the reason to reach for it over a loop of exec(): re-preparing the
+    // SQL for every row is usually the dominant cost of a bulk insert. Wrap it in
+    // a transaction to avoid one fsync per row as well.
     task exec_many(sql, param_sets) {
         self._check_open()
         when typeOf(param_sets) != "array" {
@@ -193,8 +193,8 @@ export model Database {
         give with_statement(st, |s| {
             total = 0
             get p in param_sets {
-                # clear_bindings = true: without it a set that binds fewer
-                # parameters would silently reuse the previous row's values.
+                // clear_bindings = true: without it a set that binds fewer
+                // parameters would silently reuse the previous row's values.
                 s.reset(true)
                 s.bind(p)
                 s.next()
@@ -204,15 +204,15 @@ export model Database {
         })
     }
 
-    # Execute a script of several statements separated by ";".
-    #
-    # prepare_v2 compiles ONE statement and ignores the rest, so passing a
-    # multi-statement string to exec() silently runs only the first -- the classic
-    # way a migration half-applies. This walks the whole script.
-    #
-    # The split is SQL-aware enough to ignore semicolons inside quotes and
-    # comments, but it is not a full parser: it does not understand BEGIN...END
-    # trigger bodies. Use exec() per statement if you need those.
+    // Execute a script of several statements separated by ";".
+    //
+    // prepare_v2 compiles ONE statement and ignores the rest, so passing a
+    // multi-statement string to exec() silently runs only the first -- the classic
+    // way a migration half-applies. This walks the whole script.
+    //
+    // The split is SQL-aware enough to ignore semicolons inside quotes and
+    // comments, but it is not a full parser: it does not understand BEGIN...END
+    // trigger bodies. Use exec() per statement if you need those.
     task exec_script(sql) {
         self._check_open()
         parts = self._split_statements(str(sql))
@@ -220,12 +220,12 @@ export model Database {
         get p in parts {
             t = trim(p)
             when len(t) > 0 {
-                # A chunk can be non-empty text and still contain no statement --
-                # a trailing "-- comment" is the common case. SQLite compiles
-                # that to a NULL statement rather than an error, so go through
-                # raw_prepare and skip it, instead of using prepare(), which
-                # rightly treats "nothing to execute" as a mistake when you ask
-                # for one statement by name.
+                // A chunk can be non-empty text and still contain no statement --
+                // a trailing "-- comment" is the common case. SQLite compiles
+                // that to a NULL statement rather than an error, so go through
+                // raw_prepare and skip it, instead of using prepare(), which
+                // rightly treats "nothing to execute" as a mistake when you ask
+                // for one statement by name.
                 r = raw_prepare(self.handle, t)
                 when r["rc"] != SQLITE_OK {
                     when r["stmt"] != 0 { raw_finalize(r["stmt"]) }
@@ -241,7 +241,7 @@ export model Database {
         give n
     }
 
-    # Split on semicolons that are not inside a string literal or a comment.
+    // Split on semicolons that are not inside a string literal or a comment.
     task _split_statements(sql) {
         out_parts = []
         cur = ""
@@ -252,8 +252,8 @@ export model Database {
             nxt = ""
             when i + 1 < n { nxt = substr(sql, i + 1, 1) }
 
-            # A quoted run: '...' string literal or "..." identifier. A doubled
-            # quote inside is an escaped quote, not the end.
+            // A quoted run: '...' string literal or "..." identifier. A doubled
+            // quote inside is an escaped quote, not the end.
             when c == "'" or c == "\"" {
                 quote = c
                 cur = cur + c
@@ -275,14 +275,14 @@ export model Database {
                 }
             }
             other when c == "-" and nxt == "-" {
-                # -- line comment, to end of line.
+                // -- line comment, to end of line.
                 while i < n and substr(sql, i, 1) != "\n" {
                     cur = cur + substr(sql, i, 1)
                     i = i + 1
                 }
             }
             other when c == "/" and nxt == "*" {
-                # /* block comment */
+                // /* block comment */
                 cur = cur + "/*"
                 i = i + 2
                 done_c = false
@@ -311,15 +311,15 @@ export model Database {
         give out_parts
     }
 
-    # ── Transactions ────────────────────────────────────────────────────────
-    #
-    # Run `fn(db)` inside a transaction. Commits if it returns, rolls back if it
-    # throws, and re-raises. Nested calls use SAVEPOINTs, so an inner failure
-    # rolls back only its own work.
-    #
-    # This is the only transaction API that cannot leave a transaction dangling,
-    # which is why begin/commit/rollback below are marked as the manual escape
-    # hatch rather than the normal route.
+    // ── Transactions ────────────────────────────────────────────────────────
+    //
+    // Run `fn(db)` inside a transaction. Commits if it returns, rolls back if it
+    // throws, and re-raises. Nested calls use SAVEPOINTs, so an inner failure
+    // rolls back only its own work.
+    //
+    // This is the only transaction API that cannot leave a transaction dangling,
+    // which is why begin/commit/rollback below are marked as the manual escape
+    // hatch rather than the normal route.
     task transaction(fn) {
         self._check_open()
         self._tx_depth = self._tx_depth + 1
@@ -327,11 +327,11 @@ export model Database {
         name = nil
 
         when depth == 1 {
-            # IMMEDIATE, not DEFERRED: a deferred transaction takes its write
-            # lock at the first write, so two writers can both start, both read,
-            # and only then discover they cannot both commit -- SQLITE_BUSY at
-            # commit time, after the work is done. IMMEDIATE takes the lock up
-            # front and waits via busy_timeout instead.
+            // IMMEDIATE, not DEFERRED: a deferred transaction takes its write
+            // lock at the first write, so two writers can both start, both read,
+            // and only then discover they cannot both commit -- SQLITE_BUSY at
+            // commit time, after the work is done. IMMEDIATE takes the lock up
+            // front and waits via busy_timeout instead.
             self.exec("BEGIN IMMEDIATE")
         } other {
             self._savepoint_seq = self._savepoint_seq + 1
@@ -342,8 +342,8 @@ export model Database {
         result = nil
         failure = nil
         caught = false
-        # No `give` inside this try: a give would skip the rollback/commit below
-        # entirely and leave the transaction open. See statement.ez's note.
+        // No `give` inside this try: a give would skip the rollback/commit below
+        // entirely and leave the transaction open. See statement.ez's note.
         try {
             result = fn(self)
         } catch (e) {
@@ -352,9 +352,9 @@ export model Database {
         }
 
         when caught {
-            # Roll back on the way out. Best-effort: if the rollback itself
-            # fails, the original error is the one worth reporting, so it is not
-            # allowed to be masked by a secondary failure.
+            // Roll back on the way out. Best-effort: if the rollback itself
+            // fails, the original error is the one worth reporting, so it is not
+            // allowed to be masked by a secondary failure.
             try {
                 when depth == 1 {
                     self.exec("ROLLBACK")
@@ -381,20 +381,20 @@ export model Database {
         give result
     }
 
-    # Manual transaction control. Prefer transaction(); these exist for the cases
-    # it cannot express, and they put the burden of matching every BEGIN with a
-    # COMMIT or ROLLBACK -- on every path, including thrown errors -- on you.
+    // Manual transaction control. Prefer transaction(); these exist for the cases
+    // it cannot express, and they put the burden of matching every BEGIN with a
+    // COMMIT or ROLLBACK -- on every path, including thrown errors -- on you.
     task begin(mode = "IMMEDIATE") { give self.exec("BEGIN " + str(mode)) }
     task commit() { give self.exec("COMMIT") }
     task rollback() { give self.exec("ROLLBACK") }
 
-    # False while a transaction is open.
+    // False while a transaction is open.
     task in_transaction() {
         self._check_open()
         give raw_get_autocommit(self.handle) == 0
     }
 
-    # ── Introspection ───────────────────────────────────────────────────────
+    // ── Introspection ───────────────────────────────────────────────────────
     task last_insert_id() {
         self._check_open()
         give raw_last_insert_rowid(self.handle)
@@ -425,32 +425,32 @@ export model Database {
         give names
     }
 
-    # Column metadata for a table: name, type, notnull, dflt_value, pk.
+    // Column metadata for a table: name, type, notnull, dflt_value, pk.
     task columns(table) {
-        # PRAGMA does not accept a bound parameter for its argument, so the table
-        # name has to be inlined -- which means it must be validated, not
-        # trusted. table_exists() only matches names already in sqlite_master, so
-        # a caller cannot smuggle SQL through here.
+        // PRAGMA does not accept a bound parameter for its argument, so the table
+        // name has to be inlined -- which means it must be validated, not
+        // trusted. table_exists() only matches names already in sqlite_master, so
+        // a caller cannot smuggle SQL through here.
         when not self.table_exists(table) {
             raise_error(SQLITE_ERROR, "no such table: " + str(table))
         }
         give self.query("PRAGMA table_info(\"" + replace(str(table), "\"", "\"\"") + "\")")
     }
 
-    # Ask SQLite to check the file over. Returns "ok" on a healthy database.
+    // Ask SQLite to check the file over. Returns "ok" on a healthy database.
     task integrity_check() {
         give self.scalar("PRAGMA integrity_check")
     }
 
-    # ── Lifetime ────────────────────────────────────────────────────────────
-    #
-    # Close the connection. Safe to call twice.
-    #
-    # close_v2 (not close) is deliberate: close() fails with SQLITE_BUSY if any
-    # statement is still alive, whereas close_v2 marks the connection as
-    # zombie and frees it once the last statement is finalized. That makes
-    # close() safe to call during error handling, which is exactly when an
-    # unfinalized statement is most likely to exist.
+    // ── Lifetime ────────────────────────────────────────────────────────────
+    //
+    // Close the connection. Safe to call twice.
+    //
+    // close_v2 (not close) is deliberate: close() fails with SQLITE_BUSY if any
+    // statement is still alive, whereas close_v2 marks the connection as
+    // zombie and frees it once the last statement is finalized. That makes
+    // close() safe to call during error handling, which is exactly when an
+    // unfinalized statement is most likely to exist.
     task close() {
         when self.closed { give SQLITE_OK }
         self.closed = true
