@@ -46,6 +46,11 @@ Kernel32FFI = {
     "getFileAttributes": os_get_func(__kernel32, "GetFileAttributesA")
 }
 
+export task file_exists(path) {
+    attr = os_call(Kernel32FFI["getFileAttributes"], "ptr", path)
+    give attr != -1 and attr != 4294967295
+}
+
 export model WebFFI {
     static wsaStartup = os_get_func(__ws32, "WSAStartup")
     static wsaCleanup = os_get_func(__ws32, "WSACleanup")
@@ -172,6 +177,43 @@ export model MemorySessionStore {
     task set(sid, data) { self.sessions[sid] = data }
 }
 
+export model FileSessionStore {
+    init(storageDir) {
+        self.storageDir = storageDir
+    }
+    task _getPath(sid) {
+        give self.storageDir + "/" + sid + ".json"
+    }
+    task get(sid) {
+        path = self._getPath(sid)
+        when file_exists(path) {
+            content = readFile(path)
+            give parse_json(content)
+        }
+        give {}
+    }
+    task set(sid, data) {
+        path = self._getPath(sid)
+        writeFile(path, to_json(data))
+    }
+}
+
+export model Router {
+    init() {
+        self.routes = {}
+        self.middlewares = []
+    }
+    task use(handler) { push(self.middlewares, handler) }
+    task _addRoute(method, pathPattern, handler) {
+        parts = split(pathPattern, "/")
+        self.routes[method + "_" + pathPattern] = { "pattern": parts, "handler": handler }
+    }
+    task get(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("GET", path, fn)  give fn } } self._addRoute("GET", path, handler) }
+    task post(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("POST", path, fn)  give fn } } self._addRoute("POST", path, handler) }
+    task put(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("PUT", path, fn)  give fn } } self._addRoute("PUT", path, handler) }
+    task delete(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("DELETE", path, fn)  give fn } } self._addRoute("DELETE", path, handler) }
+}
+
 export model WebApp {
     init() {
         self.routes = {}
@@ -182,9 +224,8 @@ export model WebApp {
         self.static_cache = {}
     }
     
-    task fileExists(path) {
-        attr = os_call(Kernel32FFI.getFileAttributes, "ptr", path)
-        give attr != -1 and attr != 4294967295
+    task setSessionStore(store) {
+        self.sessionStore = store
     }
     
     task use(handler) { push(self.middlewares, handler) }
@@ -231,7 +272,7 @@ export model WebApp {
             fileName = req["params"]["file"]
             fullFile = folder_path + "/" + fileName
             when indexOf(fileName, "..") != -1 { give {"status": 403, "body": "Forbidden"} }
-            when not self.fileExists(fullFile) { give {"status": 404, "body": "File Not Found"} }
+            when not file_exists(fullFile) { give {"status": 404, "body": "File Not Found"} }
             
             when has_key(self.static_cache, fullFile) {
                 give self.static_cache[fullFile]
@@ -262,10 +303,40 @@ export model WebApp {
         self.routes[method + "_" + pathPattern] = { "pattern": parts, "handler": handler }
     }
     
-    task get(path, handler) { self._addRoute("GET", path, handler) }
-    task post(path, handler) { self._addRoute("POST", path, handler) }
-    task put(path, handler) { self._addRoute("PUT", path, handler) }
-    task delete(path, handler) { self._addRoute("DELETE", path, handler) }
+    task get(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("GET", path, fn)  give fn } } self._addRoute("GET", path, handler) }
+    task post(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("POST", path, fn)  give fn } } self._addRoute("POST", path, handler) }
+    task put(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("PUT", path, fn)  give fn } } self._addRoute("PUT", path, handler) }
+    task delete(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("DELETE", path, fn)  give fn } } self._addRoute("DELETE", path, handler) }
+    
+    task mount(prefix, router) {
+        while endsWith(prefix, "/") { prefix = substr(prefix, 0, len(prefix) - 1) }
+        
+        rKeys = keys(router.routes)
+        get rKey in rKeys {
+            routeObj = router.routes[rKey]
+            
+            methodEnd = indexOf(rKey, "_")
+            method = substr(rKey, 0, methodEnd)
+            pathPatt = substr(rKey, methodEnd + 1, len(rKey) - methodEnd - 1)
+            
+            fullPath = prefix + pathPatt
+            
+            wrappedHandler = |req| {
+                resObj = { "status": 200, "headers": {}, "body": "" }
+                result = nil
+                i_mid = 0
+                while i_mid < len(router.middlewares) {
+                    m_res = router.middlewares[i_mid](req, resObj)
+                    when m_res != nil { result = m_res  i_mid = len(router.middlewares) }
+                    other { i_mid = i_mid + 1 }
+                }
+                when result == nil { result = routeObj["handler"](req) }
+                give result
+            }
+            
+            self._addRoute(method, fullPath, wrappedHandler)
+        }
+    }
     
     static task _handleNativeRequest(req, inst) {
         method = req["method"]
