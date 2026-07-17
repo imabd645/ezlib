@@ -1,9 +1,9 @@
 # ezweb — Web Framework for EZ
 
-> **Version:** 1.0  
-> **Import:** `use "ezweb"`  
-> **File:** `E:\ezlib\ezweb\main.ez`  
-> **Requires:** `kernel32.dll`, `ws2_32.dll`, `msvcrt.dll`
+> **Version:** 2.0.2  
+> **Import:** `use "web"`  
+> **File:** `C:\ezlib\web\main.ez`  
+> **Requires:** `kernel32.dll`, `ws2_32.dll`, `msvcrt.dll`, and the bundled `dlls/http_accel.dll` + `dlls/web_accel.dll`
 
 ---
 
@@ -25,7 +25,7 @@
 ## Quick Start
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -49,7 +49,7 @@ app.run(8080)
 Creates a new web application instance.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 ```
@@ -67,6 +67,27 @@ Registers a POST route.
 ### `app.put(path, handler)`
 Registers a PUT route.
 
+### `app.patch(path, handler)`
+### `app.head(path, handler)`
+### `app.options(path, handler)`
+Same shape as the others. A request whose path matches a route registered under a
+*different* method gets `405 Method Not Allowed` with an `Allow:` header (not a
+misleading `404`).
+
+### `app.run(port, workers = 1)`
+Binds `port` and serves until stopped. `workers` > 1 runs that many worker processes so
+handlers execute in parallel — see [Worker Processes](#worker-processes) for what that
+changes about shared state.
+
+```ez
+app.run(8080)                     # single process
+app.run(port=8080, workers=4)     # 4 worker processes
+```
+
+### `app.stop()`
+Stops the listener and waits for in-flight handlers to finish. Useful for tests and
+graceful shutdown.
+
 ### `app.delete(path, handler)`
 Registers a DELETE route.
 
@@ -78,7 +99,7 @@ Registers a DELETE route.
 - `dictionary` with `status`, `body`, `headers` keys → Full control response
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -107,7 +128,7 @@ app.run(8080)
 Use `<paramName>` in the route pattern to capture dynamic segments.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -145,7 +166,7 @@ Every handler receives a `req` dictionary:
 | `session` | `dictionary` | Session data for this user |
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -170,7 +191,7 @@ app.run(8080)
 ## Query Parameters
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -197,7 +218,7 @@ app.run(8080)
 ## JSON API
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -236,7 +257,7 @@ app.run(8080)
 Sessions are managed automatically via a `ez_session` cookie. Session data is stored server-side in memory.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -273,7 +294,7 @@ app.run(8080)
 ## Cookies
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -304,7 +325,7 @@ app.run(8080)
 Renders a template file with a context dictionary. Returns the rendered HTML.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -385,7 +406,7 @@ app.run(8080)
 ```
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -398,13 +419,69 @@ app.run(8080)
 
 ---
 
+## Response Helpers
+
+### `send_file(path, contentType = nil)` → `dictionary`
+Streams a file's raw bytes from C++ — the only correct way to serve binary content
+(images, PDFs, downloads). Content-Type is inferred from the extension if omitted.
+
+```ez
+app.get("/logo", |req| { give send_file("assets/logo.png") })
+```
+
+### `json_response(data, status = 200)` → `dictionary`
+```ez
+app.get("/api", |req| { give json_response({"ok": true}, 200) })
+```
+
+### `set_cookie(res, name, value, opts = nil)` → `res`
+Options: `path`, `maxAge`, `domain`, `httpOnly` (default true), `secure`, `sameSite`
+(default `Lax`).
+
+```ez
+app.get("/login", |req| {
+    res = { "status": 200, "body": "hi", "headers": {} }
+    set_cookie(res, "token", "abc123", {"maxAge": 3600, "secure": true})
+    give res
+})
+```
+
+### `clear_session(req)` → `req`
+Empties the session (logout).
+
+### `secure_token(nbytes = 32)` → `string`
+Cryptographically secure random hex (`BCryptGenRandom`). Used for session ids.
+
+---
+
+## File Uploads
+
+`multipart/form-data` parts carrying a `filename="..."` appear in `req["files"]`:
+
+| Key | Meaning |
+|---|---|
+| `filename` | Client-supplied name |
+| `contentType` | Part's Content-Type |
+| `size` | Byte length |
+| `content` | Raw content |
+
+```ez
+app.post("/upload", |req| {
+    f = req["files"]["doc"]
+    writeFile("uploads/" + f["filename"], f["content"])
+    give "saved " + str(f["size"]) + " bytes"
+})
+```
+
+---
+
 ## Redirects
 
 ### `redirect(url)` → `dictionary`
 Returns a 302 redirect response.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -428,7 +505,7 @@ app.run(8080)
 Registers a route to serve static files from a directory.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -458,9 +535,24 @@ app.run(8080)
 - `.jpg` / `.jpeg` → `image/jpeg`
 - `.gif` → `image/gif`
 - `.svg` → `image/svg+xml`
-- Other → `text/plain`
+- Other → `application/octet-stream`
 
-**Security:** Directory traversal (`..`) in file names is blocked with a 403 response.
+**Security:** Directory traversal (`..`) in file names is blocked with a 403 response, as are path separators (`/`, `\`, `:`) — the `<file>` segment is percent-decoded after routing, so `%2F` would otherwise arrive here as a separator.
+
+### Caching
+
+Static responses carry an `ETag` (derived from the file's size and mtime) and a
+`Cache-Control: public, max-age=...` header. A client that sends a matching
+`If-None-Match` gets a `304 Not Modified` with no body.
+
+```ez
+app.static_max_age = 3600     # Cache-Control max-age, in seconds (default 3600)
+app.static_cache_max = 128    # max files held in the in-memory cache (default 128; 0 disables)
+```
+
+The in-memory cache is keyed on the ETag, so editing a file on disk invalidates
+its entry and the next request re-reads it. The cache is capped at
+`static_cache_max` entries so a large directory cannot pin unbounded memory.
 
 ---
 
@@ -471,7 +563,7 @@ app.run(8080)
 Registers middleware. The handler receives `req` and can return a response (short-circuit) or `nil` to continue to the route handler.
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -504,7 +596,7 @@ app.run(8080)
 ## Custom Error Handlers
 
 ```ez
-use "ezweb"
+use "web"
 
 app = WebApp()
 
@@ -526,16 +618,134 @@ app.run(8080)
 ## Edge Cases & Important Notes
 
 ### Request Body Size Limit
-The body parser caps `Content-Length` at **10 MB** (`10485760` bytes). Larger payloads are truncated for safety.
+`Content-Length` is capped at **32 MB** by the C++ accelerator (`MAX_BODY_BYTES` in
+`src/http_accel.cpp`). A malformed or oversized value is rejected with `400 Bad Request`;
+a claimed length is never trusted.
 
 ### Concurrent Connections
-Each client connection is handled in a spawned task. The server accepts connections in a `while true` loop and spawns `WebApp._handleClient` for each. This enables multiple concurrent clients.
+Connections are accepted and served by the C++ accelerator (`http_accel.dll`), one
+thread per connection, which invokes your EZ handlers through an FFI callback. The EZ
+side no longer touches sockets. Concurrency is capped at `MAX_CONNECTIONS` (512):
+without a ceiling, a flood spawns unbounded threads until the process dies.
+
+**Within one process, your handlers do not run in parallel.** The connection threads are
+C++, but they all call into the single EZ VM — the FFI callback marshals onto the
+interpreter's main thread and blocks — so handler bodies are serialized. A handler that
+blocks for one second blocks every other in-flight request for that second. Either keep
+handlers short, or run multiple worker processes (below).
+
+### Worker Processes
+
+`workers` runs N copies of your process, each with its own VM and its own main thread,
+all accepting on one shared listening socket. This is the only way handler bodies
+actually run in parallel: more *threads* in one process buy nothing, because they all
+queue on the same VM.
+
+```ez
+app.run(port=8080, workers=4)     # default: workers = 1
+```
+
+Measured on the same app, three concurrent 1-second handlers:
+
+| | Elapsed |
+|---|---|
+| `workers=1` | 3091 ms (serialized) |
+| `workers=3` | 1108 ms (parallel) |
+
+Requests are distributed by the OS, and evenly in practice (12 requests split 4/4/4
+across 3 workers). Use `worker_pid()` to see which process served a request:
+
+```ez
+app.get("/whoami", |req| { give "served by pid " + str(worker_pid()) })
+```
+
+**What stops being shared.** Each worker is a separate process with a separate heap, so
+anything held in memory is per-worker and there is no shared mutable state to corrupt.
+That is the point — but it means:
+
+- **Sessions must move to a shared store.** The default `MemorySessionStore` gives each
+  worker its own session table, so a user would appear logged out whenever a later
+  request landed on a different worker. Use `app.setSessionStore(FileSessionStore("./sessions"))`
+  or another backend shared across processes.
+- **Rate limiter counters are per-worker.** With N workers the effective limit is
+  roughly N × what you configured, since each keeps its own tally.
+- **Any global you mutate is per-worker** — in-memory caches, counters, queues. The
+  static-file cache is per-worker too, which is harmless (just N copies).
+- **Your script runs once per worker**, so start-up side effects (opening files, seeding
+  data, printing) happen N times. Guard anything that must happen once.
+
+The supervisor process binds the port and then only supervises: it serves no requests.
+Workers are held in a Windows job object configured to kill them when the supervisor
+exits, so Ctrl-C takes the whole group down rather than orphaning workers that still hold
+the port.
+
+### Keep-Alive
+HTTP/1.1 connections are kept open by default (`Connection: close` or HTTP/1.0 opts out),
+so a browser fetching a page plus its assets pays for one TCP handshake instead of one
+per asset. Disable with `app.keep_alive = false`. An idle connection is closed after
+`IDLE_TIMEOUT_MS` (5s) while waiting for the next request.
+
+### Compression
+Responses are gzipped when the client sends `Accept-Encoding: gzip`, the body is at least
+`GZIP_MIN_BYTES` (256), and the content type is compressible (text, JSON, JS, CSS, SVG —
+never already-compressed image/archive types). Compressed responses carry
+`Content-Encoding: gzip` and `Vary: Accept-Encoding`. zlib is linked statically, so no
+extra runtime DLL is needed.
+
+### Slow-Client (Slowloris) Defenses
+Every blocking socket operation has a deadline, and — separately — receiving a whole
+request has one:
+
+| Limit | Default | Covers |
+|---|---|---|
+| `RECV_TIMEOUT_MS` | 15s | a single `recv()` while reading a request |
+| `SEND_TIMEOUT_MS` | 15s | a single `send()` while writing a response |
+| `IDLE_TIMEOUT_MS` | 5s | waiting for the next keep-alive request |
+| `REQUEST_DEADLINE_MS` | 20s | the entire request, first byte to last |
+
+The per-`recv()` timeout alone is not enough: it only bounds the gap *between* bytes, and
+a client trickling one byte every 5s resets it forever while never reaching the 64KB
+header cap. `REQUEST_DEADLINE_MS` bounds total wall time instead, and an over-deadline or
+incomplete request is answered `408 Request Timeout` and closed. An incomplete body is
+rejected rather than passed to the handler as a shorter one.
+
+### Client IP
+`req["ip"]` is the peer address from `accept()`. Behind a reverse proxy that is the
+*proxy's* address — see `useRateLimiter(..., trustProxy = true)`.
 
 ### Session Storage
-Sessions are stored in memory (`app.sessions` dictionary). Sessions are lost when the server restarts. For production, integrate with `ezdb` for persistent sessions.
+Sessions live in `app.sessionStore`, which defaults to `MemorySessionStore` (lost on
+restart). Swap in a persistent backend:
+
+```ez
+app.setSessionStore(FileSessionStore("./sessions"))
+```
+
+Session ids are `secure_token(32)` — 256 bits from `BCryptGenRandom` — and the cookie is
+set `HttpOnly; SameSite=Lax`.
+
+### Binary Files
+Binary responses must go through `send_file(path)` (or `serve_static`, which routes
+binary content types there automatically). A binary body returned as a normal string is
+truncated at its first NUL byte, because the response is handed to the FFI as a C string.
 
 ### Template Rendering Performance
 The template engine is an interpreter scanning character-by-character. Deeply nested templates or very large templates may be slow. For performance-sensitive pages, pre-render to a string.
+
+A template named by `{% extends %}` is cached in memory across renders, keyed on its
+mtime, so editing a base template takes effect on the next request without a restart.
+
+### Template Includes
+`{% include %}` is bounded at `MAX_INCLUDE_DEPTH` (32) nested levels. Unlike `{% if %}`,
+`{% for %}`, and `{% block %}` — which recurse into a strict substring of the template and
+so always terminate — an include renders a whole file from the top, so a cycle (a template
+including itself, or `a → b → a`) would otherwise recurse until the stack overflowed and
+took the process down. Past the limit the render emits an `[Error: include depth
+exceeded ...]` marker instead.
+
+Include and `extends` paths are resolved relative to the template's base directory and are
+**not** sandboxed to it — they are as trusted as the template source itself. Do not render
+templates whose text comes from user input.
 
 ### Static File Security
 `serve_static()` blocks filenames containing `..` to prevent directory traversal. However, it does not check for symlinks. Only serve static files from trusted directories.
@@ -551,7 +761,7 @@ The `ctx` dictionary is mutated when iterating in `{% for item in items %}` — 
 ## Full Example: Blog Application
 
 ```ez
-use "ezweb"
+use "web"
 
 posts = [
     {"id": 1, "title": "Hello EZ", "body": "Welcome to my EZ blog!", "author": "alice"},

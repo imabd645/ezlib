@@ -10,6 +10,7 @@
 #include <cctype>
 #include <unordered_map>
 #include <mutex>
+#include <sys/stat.h>
 
 extern "C" {
 
@@ -171,11 +172,20 @@ public:
 // TEMPLATE ENGINE MODULE
 // ---------------------------------------------------------
 
+// {% include %} is the one construct that can recurse without shrinking its
+// input: if/for/block all recurse into a strict SUBSTRING of the template and so
+// must terminate, but an include pulls in a whole file and renders it from the
+// top. A template that includes itself (directly, or A->B->A) therefore recurses
+// until the stack overflows, which on the server thread kills the process rather
+// than failing the one render.
+static const int MAX_INCLUDE_DEPTH = 32;
+
 struct TemplateContext {
     JsonValue root;
     std::string baseDir;
     std::map<std::string, std::string> blocks;
-    
+    int includeDepth = 0;
+
     const JsonValue* resolvePath(const std::string& path) const {
         if (path == "this" || path == ".") return &root;
         
@@ -511,12 +521,20 @@ std::string render_ast(const std::string& tmpl, TemplateContext& ctx) {
                 incPath.erase(incPath.find_last_not_of(" \"\'\t\r\n") + 1);
                 
                 std::string fullPath = ctx.baseDir + "/" + incPath;
-                std::ifstream ifs(fullPath);
-                if (ifs.is_open()) {
-                    std::string incContent((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-                    result += render_ast(incContent, ctx);
+                if (ctx.includeDepth >= MAX_INCLUDE_DEPTH) {
+                    // Report the cycle instead of riding the stack into a crash.
+                    result += "[Error: include depth exceeded at " + incPath +
+                              " (recursive include?)]";
                 } else {
-                    result += "[Error: Could not include " + incPath + "]";
+                    std::ifstream ifs(fullPath);
+                    if (ifs.is_open()) {
+                        std::string incContent((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                        ctx.includeDepth++;
+                        result += render_ast(incContent, ctx);
+                        ctx.includeDepth--;
+                    } else {
+                        result += "[Error: Could not include " + incPath + "]";
+                    }
                 }
                 i = sEnd + 2;
             }
@@ -572,19 +590,29 @@ extern "C" {
                 }
                 
                 std::string fullParentPath = ctx.baseDir + "/" + parentPath;
-                static std::unordered_map<std::string, std::string> g_templateCache;
+                // The parent template is cached across renders (it is read on
+                // every request that extends it). The entry records the mtime it
+                // was read at: without that check the cache was never
+                // invalidated, so editing a base template had no effect until
+                // the process restarted.
+                struct CachedTemplate { std::string text; long long mtime; };
+                static std::unordered_map<std::string, CachedTemplate> g_templateCache;
                 static std::mutex g_cacheMutex;
-                
+
+                struct _stat64 st;
+                bool haveStat = (_stat64(fullParentPath.c_str(), &st) == 0);
+                long long curMtime = haveStat ? (long long)st.st_mtime : -1;
+
                 {
                     std::lock_guard<std::mutex> lock(g_cacheMutex);
                     auto it = g_templateCache.find(fullParentPath);
-                    if (it != g_templateCache.end()) {
-                        t = it->second;
+                    if (it != g_templateCache.end() && haveStat && it->second.mtime == curMtime) {
+                        t = it->second.text;
                     } else {
                         std::ifstream ifs(fullParentPath);
                         if (ifs.is_open()) {
                             t = std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-                            g_templateCache[fullParentPath] = t;
+                            if (haveStat) g_templateCache[fullParentPath] = CachedTemplate{t, curMtime};
                         } else {
                             t = "[TEMPLATE ERROR: Could not read parent template " + parentPath + "]";
                         }

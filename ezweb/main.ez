@@ -8,7 +8,11 @@
 __kernel32 = os_load_lib("kernel32.dll")
 __ws32 = os_load_lib("ws2_32.dll")
 __msv = os_load_lib("msvcrt.dll")
+__sleep = os_get_func(__kernel32, "Sleep")
 __SetDllDirectoryA = os_get_func(__kernel32, "SetDllDirectoryA")
+# There is no file-deletion builtin in the language; FileSessionStore.delete()
+# needs one to retire a session file.
+__DeleteFileA = os_get_func(__kernel32, "DeleteFileA")
 when __SetDllDirectoryA != 0 { os_call(__SetDllDirectoryA, "int", "C:\\ezlib\\web\\dlls") }
 
 __web_accel = os_load_lib("web_accel.dll")
@@ -26,9 +30,25 @@ export model WebAccelFFI {
 
 export model HttpAccelFFI {
     static start = os_get_func(__http_accel, "http_server_start")
-    static poll = os_get_func(__http_accel, "http_server_poll")
+    # (there is no `poll` binding: http_server_poll has never existed in the DLL,
+    # so the lookup only ever produced a nil that nothing called.)
     static respond = os_get_func(__http_accel, "http_server_respond")
     static stop = os_get_func(__http_accel, "http_server_stop")
+    # Streams a file's raw bytes straight from C++ so binary payloads survive:
+    # http_server_respond() can only take a C string from EZ, which truncates at
+    # the first NUL byte.
+    static sendFile = os_get_func(__http_accel, "http_server_send_file")
+    static fileSize = os_get_func(__http_accel, "http_file_size")
+    static fileMtime = os_get_func(__http_accel, "http_file_mtime")
+    # 1 when this process is a prefork worker rather than the supervisor.
+    static isWorker = os_get_func(__http_accel, "http_is_worker")
+    static getpid = os_get_func(__http_accel, "http_getpid")
+}
+
+# This process's id. Useful in logs when running with `workers`, where several
+# identical processes serve the same port and log lines are otherwise ambiguous.
+export task worker_pid() {
+    give os_call(HttpAccelFFI.getpid, "int")
 }
 
 # Safe indexOf wrapper that supports 3 arguments
@@ -46,30 +66,65 @@ Kernel32FFI = {
     "getFileAttributes": os_get_func(__kernel32, "GetFileAttributesA")
 }
 
+# --- Cryptographically secure randomness (for session ids) -------------------
+# BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG (0x00000002).
+__bcrypt = os_load_lib("bcrypt.dll")
+__BCryptGenRandom = 0
+when typeOf(__bcrypt) != "nil" and __bcrypt != 0 {
+    __BCryptGenRandom = os_get_func(__bcrypt, "BCryptGenRandom")
+}
+
+export task secure_token(nbytes) {
+    when typeOf(nbytes) == "nil" { nbytes = 32 }
+    when __BCryptGenRandom == 0 {
+        throw "secure_token: BCryptGenRandom unavailable (bcrypt.dll did not load)"
+    }
+    buf = os_alloc(nbytes)
+    when buf == 0 { throw "secure_token: allocation failed" }
+    rc = os_call(__BCryptGenRandom, "int", 0, buf, nbytes, 2)
+    when rc != 0 {
+        os_free(buf)
+        throw "secure_token: BCryptGenRandom failed (NTSTATUS=" + str(rc) + ")"
+    }
+    hc = "0123456789abcdef"
+    outHex = ""
+    i = 0
+    while i < nbytes {
+        b = os_read_byte(buf, i)
+        outHex = outHex + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+        i = i + 1
+    }
+    os_free(buf)
+    give outHex
+}
+
 export task file_exists(path) {
     attr = os_call(Kernel32FFI["getFileAttributes"], "ptr", path)
     give attr != -1 and attr != 4294967295
 }
 
 export model WebFFI {
-    static wsaStartup = os_get_func(__ws32, "WSAStartup")
-    static wsaCleanup = os_get_func(__ws32, "WSACleanup")
-    static socket = os_get_func(__ws32, "socket")
-    static bind = os_get_func(__ws32, "bind")
-    static listen = os_get_func(__ws32, "listen")
-    static accept = os_get_func(__ws32, "accept")
-    static recv = os_get_func(__ws32, "recv")
-    static send = os_get_func(__ws32, "send")
-    static closesocket = os_get_func(__ws32, "closesocket")
-    static atoiFunc = os_get_func(__msv, "atoi")
+    # The socket calls that used to live here (WSAStartup/socket/bind/listen/
+    # accept/recv/send/closesocket/atoi) are gone: they were left over from the
+    # original pure-EZ socket server, which http_accel.dll replaced. All nine had
+    # zero references -- each one only cost an os_get_func on import. The C++
+    # accelerator now owns Winsock entirely.
     static strlenFunc = os_get_func(__msv, "strlen")
 }
 
 export model WebUtils {
     static HTTP_STATUS = {
-        200: "OK", 301: "Moved Permanently", 302: "Found",
+        200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+        301: "Moved Permanently", 302: "Found", 303: "See Other",
+        304: "Not Modified", 307: "Temporary Redirect", 308: "Permanent Redirect",
         400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-        429: "Too Many Requests", 500: "Internal Server Error"
+        # 405 was absent, so a Method-Not-Allowed reply went out as
+        # "HTTP/1.1 405 Not Found" -- a correct code with a contradictory phrase.
+        405: "Method Not Allowed", 406: "Not Acceptable", 409: "Conflict",
+        410: "Gone", 413: "Payload Too Large", 415: "Unsupported Media Type",
+        422: "Unprocessable Entity", 429: "Too Many Requests",
+        500: "Internal Server Error", 501: "Not Implemented",
+        502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout"
     }
 
     static task hexVal(c) {
@@ -85,32 +140,69 @@ export model WebUtils {
         give 0
     }
 
-    static task urlDecode(strVal) {
-        res = ""
-        i = 0
-        t = str(strVal)
-        l = len(t)
-        
-        while i < l {
-            c = substr(t, i, 1)
-            when c == "+" {
-                res = res + " "
-                i = i + 1
-            } other when c == "%" {
-                when i + 2 < l {
-                    val = (WebUtils.hexVal(substr(t, i + 1, 1)) * 16) + WebUtils.hexVal(substr(t, i + 2, 1))
-                    res = res + chr(val)
-                    i = i + 3
-                } other {
-                    res = res + c
-                    i = i + 1
-                }
-            } other {
-                res = res + c
-                i = i + 1
-            }
+    # NOTE: must NOT be named urlDecode. `give urlDecode(...)` inside a task
+    # that is itself named urlDecode compiles to TAIL_CALL (the compiler matches
+    # the callee by NAME against the enclosing function), and since the callee is
+    # actually the global builtin rather than this task, the VM takes the
+    # non-self path: it calls the builtin, then falls through to the LOAD_NIL +
+    # RETURN emitted after TAIL_CALL, discarding the result. The task returned
+    # nil for every input, which silently broke form-field and query-param
+    # decoding below.
+    static task decodeUrl(strVal) {
+        give urlDecode(str(strVal))
+    }
+
+    # The counterpart to decodeUrl. Needed whenever a value is put INTO a URL --
+    # a ?next= path, a query argument -- so that a "&", "?" or "#" in the value
+    # cannot end the parameter early and inject another one. Named encodeUrl, not
+    # urlEncode, for the same tail-call reason as decodeUrl above.
+    static task encodeUrl(strVal) {
+        give urlEncode(str(strVal))
+    }
+
+    # Map a filename to a Content-Type. Extracted from serve_static so that
+    # send_file and any user code can share one table.
+    static task contentTypeFor(fileName) {
+        f = lower(str(fileName))
+        when endsWith(f, ".html") or endsWith(f, ".htm") { give "text/html" }
+        other when endsWith(f, ".css") { give "text/css" }
+        other when endsWith(f, ".js") { give "application/javascript" }
+        other when endsWith(f, ".json") { give "application/json" }
+        other when endsWith(f, ".svg") { give "image/svg+xml" }
+        other when endsWith(f, ".txt") { give "text/plain" }
+        other when endsWith(f, ".png") { give "image/png" }
+        other when endsWith(f, ".jpg") or endsWith(f, ".jpeg") { give "image/jpeg" }
+        other when endsWith(f, ".gif") { give "image/gif" }
+        other when endsWith(f, ".webp") { give "image/webp" }
+        other when endsWith(f, ".ico") { give "image/x-icon" }
+        other when endsWith(f, ".pdf") { give "application/pdf" }
+        other when endsWith(f, ".zip") { give "application/zip" }
+        other when endsWith(f, ".woff") { give "font/woff" }
+        other when endsWith(f, ".woff2") { give "font/woff2" }
+        other when endsWith(f, ".ttf") { give "font/ttf" }
+        other when endsWith(f, ".mp4") { give "video/mp4" }
+        other when endsWith(f, ".mp3") { give "audio/mpeg" }
+        give "application/octet-stream"
+    }
+
+    # Did the client ask us to close the connection? HTTP/1.1 keeps it open by
+    # default, so only an explicit "Connection: close" (or an HTTP/1.0 client
+    # that did not ask for keep-alive) means close.
+    static task wantsClose(req) {
+        hdrs = req["headers"]
+        when has_key(hdrs, "connection") {
+            give indexOf(lower(str(hdrs["connection"])), "close") != -1
         }
-        give res
+        give false
+    }
+
+    # Types whose bytes must not be routed through a C string (NUL-truncating).
+    static task isBinaryType(ct) {
+        c = str(ct)
+        when startsWith(c, "text/") { give false }
+        when c == "application/javascript" or c == "application/json" { give false }
+        when c == "image/svg+xml" { give false }
+        give true
     }
 
     static task escapeHtml(strVal) {
@@ -162,6 +254,63 @@ export task redirect(url) {
     }
 }
 
+# Stream a file's raw bytes to the client, binary-safe (see the __sendfile__
+# handling in WebApp._handleCallback). Use this for images/PDFs/downloads:
+# returning readFile(path) as a body truncates at the first NUL byte.
+#   app.get("/logo", |req| { give send_file("assets/logo.png") })
+export task send_file(path, contentType = nil) {
+    hdrs = {}
+    when typeOf(contentType) != "nil" { hdrs["Content-Type"] = str(contentType) }
+    give { "__sendfile__": str(path), "headers": hdrs }
+}
+
+# Build a JSON response without hand-assembling the dictionary.
+export task json_response(data, status = 200) {
+    give { "status": status, "body": data, "headers": { "Content-Type": "application/json" } }
+}
+
+# Set-Cookie helper. Previously the only way to set a cookie was to hand-write
+# the header string, so attributes were easy to get wrong or forget.
+export task set_cookie(res, name, value, opts = nil) {
+    when typeOf(opts) == "nil" { opts = {} }
+    c = str(name) + "=" + str(value)
+    p = "/"
+    when has_key(opts, "path") { p = str(opts["path"]) }
+    c = c + "; Path=" + p
+    when has_key(opts, "maxAge") { c = c + "; Max-Age=" + str(opts["maxAge"]) }
+    when has_key(opts, "domain") { c = c + "; Domain=" + str(opts["domain"]) }
+    when not has_key(opts, "httpOnly") or opts["httpOnly"] { c = c + "; HttpOnly" }
+    when has_key(opts, "secure") and opts["secure"] { c = c + "; Secure" }
+    ss = "Lax"
+    when has_key(opts, "sameSite") { ss = str(opts["sameSite"]) }
+    c = c + "; SameSite=" + ss
+    when not has_key(res, "headers") { res["headers"] = {} }
+    res["headers"]["Set-Cookie"] = c
+    give res
+}
+
+# Drop every key from the session (logout). There was no supported way to clear
+# a session -- callers had to know the internals.
+# Issue a brand-new session id on the next response, retiring the current one.
+#
+# Call this whenever a session changes privilege level -- above all on login.
+# Without it, a session id chosen by an attacker (planted via a link, a subdomain,
+# or an XSS-set cookie) survives the login and ends up authenticated as the
+# victim: session fixation. Rotating means the id the attacker knows is retired
+# server-side, and the id that gets the privileges is one they never saw.
+#
+# The session CONTENTS are preserved, so this is safe to call mid-request.
+export task regenerate_session(req) {
+    req["__regenerate_session__"] = true
+    give req
+}
+
+export task clear_session(req) {
+    get k in keys(req["session"]) { req["session"][k] = nil }
+    req["session"] = {}
+    give req
+}
+
 export task flash(req, message, category) {
     when typeOf(category) == "nil" { category = "info" }
     when not has_key(req["session"], "_flashes") { req["session"]["_flashes"] = [] }
@@ -175,6 +324,11 @@ export model MemorySessionStore {
         give {}
     }
     task set(sid, data) { self.sessions[sid] = data }
+    # Needed to retire a session id rather than merely stop using it -- see
+    # regenerate_session(). (dictRemove, not remove: remove() is for arrays.)
+    task delete(sid) {
+        when has_key(self.sessions, sid) { dictRemove(self.sessions, sid) }
+    }
 }
 
 export model FileSessionStore {
@@ -195,6 +349,20 @@ export model FileSessionStore {
     task set(sid, data) {
         path = self._getPath(sid)
         writeFile(path, to_json(data))
+    }
+    task delete(sid) {
+        path = self._getPath(sid)
+        when file_exists(path) {
+            # There is no file-deletion builtin, so go through DeleteFileA. If
+            # that is somehow unavailable, truncating to "{}" still retires the
+            # session's contents, which is the part that matters -- get() on an
+            # empty object hands back a session with nothing in it.
+            when __DeleteFileA != 0 {
+                os_call(__DeleteFileA, "int", path)
+            } other {
+                writeFile(path, "{}")
+            }
+        }
     }
 }
 
@@ -222,6 +390,20 @@ export model WebApp {
         self.sessionStore = MemorySessionStore()
         self.sessionCounter = 0
         self.static_cache = {}
+        # Cap the static-file cache (entries). It used to be unbounded and never
+        # invalidated. 0 disables caching entirely.
+        self.static_cache_max = 128
+        self.running = false
+        # HTTP/1.1 persistent connections. Set app.keep_alive = false to force
+        # "Connection: close" on every response (the old behaviour).
+        self.keep_alive = true
+        # Cache-Control max-age (seconds) advertised for served static files.
+        self.static_max_age = 3600
+        # Per-request tracing, off by default. The framework used to print
+        # "CALLBACK TRIGGERED: ..." and "RESPONDING length: ..." on EVERY
+        # request, which is pure noise in any real deployment. Set
+        # app.debug = true to get that back.
+        self.debug = false
     }
     
     task setSessionStore(store) {
@@ -246,10 +428,38 @@ export model WebApp {
         })
     }
 
-    task useRateLimiter(maxReq, timeWindowMs) {
+    # Rate-limit per client.
+    #
+    # The key used to be the constant "client", which made this a single global
+    # bucket rather than a per-client limit: one busy caller would 429 everyone
+    # else. The C++ side now passes the peer address from accept() through to
+    # req["ip"], so clients can actually be told apart.
+    #
+    # Resolution order:
+    #   1. keyFn(req)              -- caller decides (session id, API key, ...)
+    #   2. X-Forwarded-For/X-Real-IP when trustProxy is true (behind a reverse
+    #      proxy, req["ip"] is the PROXY, so the header is the real client).
+    #      Only honour these when you actually run behind a proxy: they are
+    #      client-supplied and trivially spoofed to evade the limit.
+    #   3. req["ip"]               -- the real peer address.
+    task useRateLimiter(maxReq, timeWindowMs, keyFn = nil, trustProxy = false) {
         store = {}
         self.use(|req, res| {
-            ip = "client" # Placeholder for actual IP
+            ip = str(req["ip"])
+            when typeOf(keyFn) != "nil" {
+                ip = str(keyFn(req))
+            } other when trustProxy {
+                hdrs = req["headers"]
+                when has_key(hdrs, "x-forwarded-for") {
+                    # May be "client, proxy1, proxy2" -- the first entry is the client.
+                    xff = str(hdrs["x-forwarded-for"])
+                    cIdx = indexOf(xff, ",")
+                    when cIdx != -1 { ip = trim(substr(xff, 0, cIdx)) } other { ip = trim(xff) }
+                } other when has_key(hdrs, "x-real-ip") {
+                    ip = trim(str(hdrs["x-real-ip"]))
+                }
+            }
+            when ip == "" or ip == "nil" { ip = "unknown" }
             now = clock()
             when not has_key(store, ip) { store[ip] = [] }
             valid = []
@@ -270,30 +480,69 @@ export model WebApp {
         
         self._addRoute("GET", url_prefix + "/<file>", |req| {
             fileName = req["params"]["file"]
-            fullFile = folder_path + "/" + fileName
+            # Reject traversal AND separators. `<file>` is a single URL segment,
+            # but the value is percent-DECODED after the split, so "%2F" arrives
+            # here as "/" and could escape folder_path even without a "..".
             when indexOf(fileName, "..") != -1 { give {"status": 403, "body": "Forbidden"} }
-            when not file_exists(fullFile) { give {"status": 404, "body": "File Not Found"} }
-            
-            when has_key(self.static_cache, fullFile) {
-                give self.static_cache[fullFile]
+            when indexOf(fileName, "/") != -1 or indexOf(fileName, "\\") != -1 or indexOf(fileName, ":") != -1 {
+                give {"status": 403, "body": "Forbidden"}
             }
-            
+            fullFile = folder_path + "/" + fileName
+            when not file_exists(fullFile) { give {"status": 404, "body": "File Not Found"} }
+
+            contentType = WebUtils.contentTypeFor(fileName)
+
+            # ETag from size+mtime. Browsers re-request assets constantly; without
+            # a validator every one of those re-sends the whole file. With it, an
+            # unchanged asset costs a 304 and no body at all.
+            etag = "\"" + str(os_call(HttpAccelFFI.fileSize, "int", fullFile)) + "-" + str(os_call(HttpAccelFFI.fileMtime, "int", fullFile)) + "\""
+            cacheHdrs = {
+                "Content-Type": contentType,
+                "ETag": etag,
+                "Cache-Control": "public, max-age=" + str(self.static_max_age)
+            }
+            when has_key(req["headers"], "if-none-match") {
+                when str(req["headers"]["if-none-match"]) == etag {
+                    give { "status": 304, "body": "", "headers": cacheHdrs }
+                }
+            }
+
+            # Binary types stream straight from C++. They CANNOT go through the
+            # normal response path: the body would be handed to the FFI as a C
+            # string and Content-Length computed with strlen(), both of which stop
+            # at the first NUL byte -- so every .png/.jpg this advertised was
+            # served truncated.
+            when WebUtils.isBinaryType(contentType) {
+                give { "__sendfile__": fullFile, "headers": cacheHdrs }
+            }
+
+            # A cache hit is only valid while the file is unchanged. The entry
+            # records the etag it was built from; since the etag is size+mtime,
+            # comparing it against the freshly computed one detects any edit and
+            # re-reads. Without this the cache returned the stale BODY *and* the
+            # stale ETag header, so a file edit was never picked up until the
+            # process restarted, and clients kept re-validating into old content.
+            when has_key(self.static_cache, fullFile) {
+                entry = self.static_cache[fullFile]
+                when entry["etag"] == etag { give entry["resp"] }
+            }
+
             content = readFile(fullFile)
-            contentType = "text/plain"
-            when endsWith(fileName, ".html") { contentType = "text/html" }
-            other when endsWith(fileName, ".css") { contentType = "text/css" }
-            other when endsWith(fileName, ".js") { contentType = "application/javascript" }
-            other when endsWith(fileName, ".json") { contentType = "application/json" }
-            other when endsWith(fileName, ".png") { contentType = "image/png" }
-            other when endsWith(fileName, ".jpg") or endsWith(fileName, ".jpeg") { contentType = "image/jpeg" }
-            other when endsWith(fileName, ".svg") { contentType = "image/svg+xml" }
-            
             resp = {
                 "status": 200,
                 "body": content,
-                "headers": { "Content-Type": contentType }
+                "headers": cacheHdrs
             }
-            self.static_cache[fullFile] = resp
+            # Bound the cache. It previously grew forever, so a directory of
+            # files was pinned in memory for the process's life. Keep it opt-out
+            # and capped; set app.static_cache_max = 0 to disable caching.
+            # A stale entry is replaced in place, so refreshing an already-cached
+            # file does not need to fit under the cap.
+            when self.static_cache_max > 0 {
+                when has_key(self.static_cache, fullFile) or len(keys(self.static_cache)) < self.static_cache_max {
+                    self.static_cache[fullFile] = { "etag": etag, "resp": resp }
+                }
+            }
             give resp
         })
     }
@@ -307,7 +556,49 @@ export model WebApp {
     task post(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("POST", path, fn)  give fn } } self._addRoute("POST", path, handler) }
     task put(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("PUT", path, fn)  give fn } } self._addRoute("PUT", path, handler) }
     task delete(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("DELETE", path, fn)  give fn } } self._addRoute("DELETE", path, handler) }
-    
+    # PATCH/HEAD/OPTIONS were missing entirely: only GET/POST/PUT/DELETE could be
+    # registered, so a PATCH endpoint (the normal verb for partial updates) was
+    # impossible and OPTIONS only answered if you happened to enable CORS.
+    task patch(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("PATCH", path, fn)  give fn } } self._addRoute("PATCH", path, handler) }
+    task head(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("HEAD", path, fn)  give fn } } self._addRoute("HEAD", path, handler) }
+    task options(path, handler = nil) { when typeOf(handler) == "nil" { give |fn| { self._addRoute("OPTIONS", path, fn)  give fn } } self._addRoute("OPTIONS", path, handler) }
+
+    # Which methods are registered for a path that did not match the request's
+    # method? Used to answer 405 + Allow instead of a misleading 404.
+    task _allowedMethodsFor(reqParts) {
+        found = []
+        rKeys = keys(self.routes)
+        get rKey in rKeys {
+            routeObj = self.routes[rKey]
+            pattParts = routeObj["pattern"]
+            when len(pattParts) == len(reqParts) {
+                ok = true
+                i = 0
+                while i < len(pattParts) {
+                    p1 = pattParts[i]
+                    when startsWith(p1, "<") and indexOf(p1, ">") != -1 { } other when p1 != reqParts[i] { ok = false  i = len(pattParts) }
+                    when ok { i = i + 1 }
+                }
+                when ok {
+                    uIdx = indexOf(rKey, "_")
+                    m = substr(rKey, 0, uIdx)
+                    when indexOf(join(found, ","), m) == -1 { push(found, m) }
+                }
+            }
+        }
+        give found
+    }
+
+    # Graceful shutdown. http_server_stop() closes the listener and waits for
+    # in-flight handlers, but WebApp never exposed it -- there was no way to stop
+    # a server short of killing the process, which also made servers untestable.
+    task stop() {
+        when typeOf(HttpAccelFFI.stop) != "nil" and HttpAccelFFI.stop != 0 {
+            os_call(HttpAccelFFI.stop, "int")
+        }
+        self.running = false
+    }
+
     task mount(prefix, router) {
         while endsWith(prefix, "/") { prefix = substr(prefix, 0, len(prefix) - 1) }
         
@@ -338,229 +629,460 @@ export model WebApp {
         }
     }
     
-    static task _handleNativeRequest(req, inst) {
-        method = req["method"]
-        fullPath = req["fullPath"]
-        headers = req["headers"]
-        body = req["body"]
-        
+    # NOTE: the parameter list here mirrors the EZCallback typedef in
+    # src/http_accel.cpp exactly. libffi marshals by that shape, so the two must
+    # always be changed together -- a mismatch corrupts the stack instead of
+    # failing cleanly.
+    task _handleCallback(req_id, method, path, query_json, headers_json, body, client_ip) {
+        # Built BEFORE the try so that the catch below (and any on_500 handler)
+        # still has a usable request to report on -- anything declared inside the
+        # try is out of scope in the catch.
+        req = {}
+        req["id"] = req_id
+        req["method"] = method
+        req["path"] = path
+        req["fullPath"] = path
+        req["body"] = body
+        # Real peer address from accept(), so handlers and the rate limiter can
+        # finally tell clients apart.
+        req["ip"] = client_ip
+        req["headers"] = {}
+        req["query"] = {}
         req["form"] = {}
+        req["files"] = {}
         req["params"] = {}
         req["cookies"] = {}
         req["session"] = {}
-        
-        when has_key(headers, "content-type") {
-            cType = headers["content-type"]
-            when indexOf(cType, "application/x-www-form-urlencoded") != -1 {
-                fPairs = split(body, "&")
-                get pair in fPairs {
-                    eIdx = indexOf(pair, "=")
-                    when eIdx != -1 { req["form"][WebUtils.urlDecode(substr(pair, 0, eIdx))] = WebUtils.urlDecode(substr(pair, eIdx + 1, len(pair) - (eIdx + 1))) }
-                    other { req["form"][WebUtils.urlDecode(pair)] = true }
-                }
-            } other when indexOf(cType, "multipart/form-data") != -1 {
-                bIdx = indexOf(cType, "boundary=")
-                when bIdx != -1 {
-                    boundary = "--" + substr(cType, bIdx + 9, len(cType) - (bIdx + 9))
-                    parts = split(body, boundary)
-                    get p in parts {
-                        headEnd = indexOf(p, "\r\n\r\n")
-                        when headEnd != -1 {
-                            pHead = substr(p, 0, headEnd)
-                            pBody = substr(p, headEnd + 4, len(p) - (headEnd + 4) - 2)
-                            nIdx = indexOf(pHead, "name=\"")
-                            when nIdx != -1 {
-                                nEnd = indexOfSafe(pHead, "\"", nIdx + 6)
-                                req["form"][substr(pHead, nIdx + 6, nEnd - (nIdx + 6))] = pBody
+
+        try {
+            when self.debug { out "[ez.web] " + method + " " + path + " from " + str(client_ip) }
+            # form/params/cookies/session were initialised above, before the try.
+            req["headers"] = parse_json(headers_json)
+            req["query"] = parse_json(query_json)
+
+            headers = req["headers"]
+            inst = self
+            
+            when has_key(headers, "content-type") {
+                cType = headers["content-type"]
+                when indexOf(cType, "application/x-www-form-urlencoded") != -1 {
+                    fPairs = split(body, "&")
+                    get pair in fPairs {
+                        eIdx = indexOf(pair, "=")
+                        when eIdx != -1 { req["form"][WebUtils.decodeUrl(substr(pair, 0, eIdx))] = WebUtils.decodeUrl(substr(pair, eIdx + 1, len(pair) - (eIdx + 1))) }
+                        other { req["form"][WebUtils.decodeUrl(pair)] = true }
+                    }
+                } other when indexOf(cType, "multipart/form-data") != -1 {
+                    bIdx = indexOf(cType, "boundary=")
+                    when bIdx != -1 {
+                        boundary = "--" + substr(cType, bIdx + 9, len(cType) - (bIdx + 9))
+                        parts = split(body, boundary)
+                        get p in parts {
+                            headEnd = indexOf(p, "\r\n\r\n")
+                            when headEnd != -1 {
+                                pHead = substr(p, 0, headEnd)
+                                pBody = substr(p, headEnd + 4, len(p) - (headEnd + 4) - 2)
+                                nIdx = indexOf(pHead, "name=\"")
+                                when nIdx != -1 {
+                                    nEnd = indexOfSafe(pHead, "\"", nIdx + 6)
+                                    fieldName = substr(pHead, nIdx + 6, nEnd - (nIdx + 6))
+                                    req["form"][fieldName] = pBody
+
+                                    # A part carrying filename="..." is an uploaded
+                                    # FILE, not a plain field. The filename and
+                                    # Content-Type were sitting in the part header
+                                    # and thrown away, so there was no way to tell
+                                    # an upload from a text field, or to know what
+                                    # was actually sent. Surface them in req["files"].
+                                    fIdx = indexOf(pHead, "filename=\"")
+                                    when fIdx != -1 {
+                                        fEnd = indexOfSafe(pHead, "\"", fIdx + 10)
+                                        upName = substr(pHead, fIdx + 10, fEnd - (fIdx + 10))
+                                        upType = "application/octet-stream"
+                                        ctIdx = indexOf(pHead, "Content-Type:")
+                                        when ctIdx != -1 {
+                                            ctEnd = indexOfSafe(pHead, "\r\n", ctIdx)
+                                            when ctEnd == -1 { ctEnd = len(pHead) }
+                                            upType = trim(substr(pHead, ctIdx + 13, ctEnd - (ctIdx + 13)))
+                                        }
+                                        req["files"][fieldName] = {
+                                            "filename": upName,
+                                            "contentType": upType,
+                                            "size": len(pBody),
+                                            "content": pBody
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        
-        when has_key(headers, "cookie") {
-            cPairs = split(headers["cookie"], ";")
-            get pair in cPairs {
-                pair = trim(pair)
-                eIdx = indexOf(pair, "=")
-                when eIdx != -1 { req["cookies"][substr(pair, 0, eIdx)] = substr(pair, eIdx + 1, len(pair) - (eIdx + 1)) }
-            }
-        }
-        
-        sessionId = nil
-        when has_key(req["cookies"], "ez_session") {
-            sessionId = req["cookies"]["ez_session"]
-            sData = inst.sessionStore.get(sessionId)
-            when sData != nil {
-                hKeys = keys(sData)
-                get hk in hKeys { req["session"][hk] = sData[hk] }
-            }
-        }
-        
-        handled = false
-        routeKeys = keys(inst.routes)
-        matchedRoute = nil
-        reqParts = split(req["path"], "/")
-        i_route = 0
-        while i_route < len(routeKeys) {
-            rKey = routeKeys[i_route]
-            when startsWith(rKey, method + "_") {
-                routeObj = inst.routes[rKey]
-                pattParts = routeObj["pattern"]
-                
-                when len(pattParts) == len(reqParts) {
-                    is_match = true
-                    tempParams = {}
-                    i = 0
-                    while i < len(pattParts) {
-                        p1 = pattParts[i]
-                        p2 = reqParts[i]
-                        when startsWith(p1, "<") and indexOf(p1, ">") != -1 {
-                            tempParams[substr(p1, 1, len(p1) - 2)] = WebUtils.urlDecode(p2)
-                        } other when p1 != p2 {
-                            is_match = false
-                            i = len(pattParts)
-                        }
-                        when is_match { i = i + 1 }
-                    }
-                    when is_match { req["params"] = tempParams  matchedRoute = routeObj  i_route = len(routeKeys) }
+            
+            when has_key(headers, "cookie") {
+                cPairs = split(headers["cookie"], ";")
+                get pair in cPairs {
+                    pair = trim(pair)
+                    eIdx = indexOf(pair, "=")
+                    when eIdx != -1 { req["cookies"][substr(pair, 0, eIdx)] = substr(pair, eIdx + 1, len(pair) - (eIdx + 1)) }
                 }
             }
-            i_route = i_route + 1
-        }
-        
-        resObj = { "status": 200, "headers": {}, "body": "" }
-        
-        when matchedRoute != nil {
-            handled = true
-            result = nil
-            i_mid = 0
-            while i_mid < len(inst.middlewares) {
-                m_res = inst.middlewares[i_mid](req, resObj)
-                when m_res != nil { result = m_res  i_mid = len(inst.middlewares) }
-                other { i_mid = i_mid + 1 }
+            
+            sessionId = nil
+            when has_key(req["cookies"], "ez_session") {
+                sessionId = req["cookies"]["ez_session"]
+                sData = inst.sessionStore.get(sessionId)
+                when sData != nil {
+                    hKeys = keys(sData)
+                    get hk in hKeys { req["session"][hk] = sData[hk] }
+                }
             }
             
-            when result == nil { result = matchedRoute["handler"](req) }
+            handled = false
+            routeKeys = keys(inst.routes)
+            matchedRoute = nil
+            reqParts = split(req["path"], "/")
+
+            # Pick the MOST SPECIFIC matching route, not simply the first one
+            # found. routeKeys comes from keys() over a dictionary, which is hash
+            # order, not registration order -- so "first match wins" made routing
+            # depend on hashing. In practice "/users/<id>" hashes ahead of
+            # "/users/new", so GET /users/new matched the parameterised route with
+            # id="new" and the static route was unreachable.
+            #
+            # Scoring by the number of literal segments makes a static segment
+            # always beat a parameter, which is what every routing framework
+            # promises, and makes the outcome independent of hash order.
+            bestScore = -1
+            bestParams = {}
+            i_route = 0
+            while i_route < len(routeKeys) {
+                rKey = routeKeys[i_route]
+                when startsWith(rKey, method + "_") {
+                    routeObj = inst.routes[rKey]
+                    pattParts = routeObj["pattern"]
+
+                    when len(pattParts) == len(reqParts) {
+                        is_match = true
+                        tempParams = {}
+                        staticCount = 0
+                        i = 0
+                        while i < len(pattParts) {
+                            p1 = pattParts[i]
+                            p2 = reqParts[i]
+                            when startsWith(p1, "<") and indexOf(p1, ">") != -1 {
+                                tempParams[substr(p1, 1, len(p1) - 2)] = WebUtils.decodeUrl(p2)
+                            } other when p1 != p2 {
+                                is_match = false
+                                i = len(pattParts)
+                            } other {
+                                staticCount = staticCount + 1
+                            }
+                            when is_match { i = i + 1 }
+                        }
+                        when is_match and staticCount > bestScore {
+                            bestScore = staticCount
+                            matchedRoute = routeObj
+                            bestParams = tempParams
+                        }
+                    }
+                }
+                i_route = i_route + 1
+            }
+            when matchedRoute != nil { req["params"] = bestParams }
             
-            t = typeOf(result)
-            b = ""
-            status = 200
-            h = resObj["headers"]
+            resObj = { "status": 200, "headers": {}, "body": "" }
             
-            when t == "dictionary" {
-                when has_key(result, "status") { status = result["status"] }
-                when has_key(result, "body") { 
-                    bd = result["body"]
-                    when typeOf(bd) == "dictionary" or typeOf(bd) == "array" {
-                        b = to_json(bd)
+            when matchedRoute != nil {
+                handled = true
+                result = nil
+                i_mid = 0
+                while i_mid < len(inst.middlewares) {
+                    m_res = inst.middlewares[i_mid](req, resObj)
+                    when m_res != nil { result = m_res  i_mid = len(inst.middlewares) }
+                    other { i_mid = i_mid + 1 }
+                }
+                
+                when result == nil { result = matchedRoute["handler"](req) }
+
+                # Binary/file responses stream from C++ (see WebUtils.isBinaryType).
+                # A handler returns {"__sendfile__": "<path>"} -- or calls
+                # send_file() -- and the bytes never pass through an EZ string, so
+                # NULs survive and large files are not copied into memory.
+                when typeOf(result) == "dictionary" and has_key(result, "__sendfile__") {
+                    fpath = str(result["__sendfile__"])
+                    fsize = os_call(HttpAccelFFI.fileSize, "int", fpath)
+                    when fsize < 0 {
+                        fb = "<h1>404 Not Found</h1>"
+                        fLen = os_call(WebFFI.strlenFunc, "int", fb)
+                        fResp = "HTTP/1.1 404 Not Found\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(fLen) + "\r\n\r\n" + fb
+                        os_call(HttpAccelFFI.respond, "int", req["id"], fResp, len(fResp))
+                        give nil
+                    }
+                    fh = resObj["headers"]
+                    when has_key(result, "headers") {
+                        rh = result["headers"]
+                        get hk in keys(rh) { fh[hk] = rh[hk] }
+                    }
+                    when not has_key(fh, "Content-Type") { fh["Content-Type"] = WebUtils.contentTypeFor(fpath) }
+                    fhdr = "HTTP/1.1 200 OK\r\nServer: EZ Web Framework\r\nConnection: close\r\n"
+                    get hk in keys(fh) { fhdr = fhdr + hk + ": " + str(fh[hk]) + "\r\n" }
+                    fhdr = fhdr + "Content-Length: " + str(fsize) + "\r\n\r\n"
+                    when self.debug { out "[ez.web] sendfile " + fpath + " (" + str(fsize) + " bytes)" }
+                    os_call(HttpAccelFFI.sendFile, "int", req["id"], fhdr, fpath)
+                    give nil
+                }
+
+                t = typeOf(result)
+                b = ""
+                status = 200
+                h = resObj["headers"]
+                
+                when t == "string" {
+                    b = result
+                    # A handler returning a bare string got NO Content-Type at all
+                    # -- only the catch-all `other` branch below set one. Browsers
+                    # were left to sniff the type, and gzip skipped the response
+                    # because it could not tell whether it was compressible.
+                    when not has_key(h, "Content-Type") { h["Content-Type"] = "text/html; charset=utf-8" }
+                }
+                other when t == "dictionary" or t == "dict" {
+                    when has_key(result, "status") { status = result["status"] }
+                    when has_key(result, "body") { 
+                        bd = result["body"]
+                        when typeOf(bd) == "dictionary" or typeOf(bd) == "array" or typeOf(bd) == "dict" {
+                            b = to_json(bd)
+                            h["Content-Type"] = "application/json"
+                        } other { b = str(bd) }
+                    } other {
+                        b = to_json(result)
                         h["Content-Type"] = "application/json"
-                    } other { b = str(bd) }
-                } other {
+                    }
+                    when has_key(result, "headers") { 
+                        hx = result["headers"]
+                        hKeys = keys(hx)
+                        get hk in hKeys { h[hk] = hx[hk] }
+                    }
+                } other when t == "array" {
                     b = to_json(result)
                     h["Content-Type"] = "application/json"
+                } other {
+                    b = str(result)
+                    when not has_key(h, "Content-Type") { h["Content-Type"] = "text/html" }
                 }
-                when has_key(result, "headers") { 
-                    hx = result["headers"]
-                    hKeys = keys(hx)
-                    get hk in hKeys { h[hk] = hx[hk] }
-                }
-            } other when t == "array" {
-                b = to_json(result)
-                h["Content-Type"] = "application/json"
-            } other {
-                b = str(result)
-                when not has_key(h, "Content-Type") { h["Content-Type"] = "text/html" }
-            }
-            
-            when has_key(h, "Content-Type") and h["Content-Type"] == "text/html" and has_key(req["session"], "_flashes") {
-                flashes = req["session"]["_flashes"]
-                when len(flashes) > 0 {
-                    flash_html = ""
-                    get f in flashes {
-                        cat = f["c"]
-                        msg = f["m"]
-                        style = "background:var(--primary-light);border-color:var(--primary);color:var(--primary);"
-                        when cat == "success" { style = "background:var(--success-light);border-color:#6ee7b7;color:#065f46;" }
-                        when cat == "error" or cat == "danger" { style = "background:var(--danger-light);border-color:#fca5a5;color:#991b1b;" }
-                        flash_html = flash_html + "<div class='alert' style='padding:1rem;margin-bottom:1rem;border:1px solid;border-radius:0.5rem;" + style + "'>" + msg + "</div>"
-                    }
-                    req["session"]["_flashes"] = []
-                    
-                    bIdx = indexOf(b, "<body")
-                    when bIdx != -1 {
-                        bEnd = indexOfSafe(b, ">", bIdx)
-                        when bEnd != -1 {
-                            b = substr(b, 0, bEnd + 1) + "<div style='max-width:1200px;margin:1rem auto;padding:0 1.5rem;'>" + flash_html + "</div>" + substr(b, bEnd + 1, len(b) - (bEnd + 1))
+                
+                when has_key(h, "Content-Type") and h["Content-Type"] == "text/html" and has_key(req["session"], "_flashes") {
+                    flashes = req["session"]["_flashes"]
+                    when len(flashes) > 0 {
+                        flash_html = ""
+                        get f in flashes {
+                            cat = f["c"]
+                            msg = f["m"]
+                            style = "background:var(--primary-light);border-color:var(--primary);color:var(--primary);"
+                            when cat == "success" { style = "background:var(--success-light);border-color:#6ee7b7;color:#065f46;" }
+                            when cat == "error" or cat == "danger" { style = "background:var(--danger-light);border-color:#fca5a5;color:#991b1b;" }
+                            # Escape the message: it is application-supplied and
+                            # frequently derived from user input (e.g.
+                            # flash(req, "No user named " + username)). It used to
+                            # be interpolated raw, which made flash() a stored-XSS
+                            # sink even though the template engine escapes {{ }}
+                            # by default.
+                            flash_html = flash_html + "<div class='alert' style='padding:1rem;margin-bottom:1rem;border:1px solid;border-radius:0.5rem;" + style + "'>" + WebUtils.escapeHtml(msg) + "</div>"
+                        }
+                        req["session"]["_flashes"] = []
+                        
+                        bIdx = indexOf(b, "<body")
+                        when bIdx != -1 {
+                            bEnd = indexOfSafe(b, ">", bIdx)
+                            when bEnd != -1 {
+                                b = substr(b, 0, bEnd + 1) + "<div style='max-width:1200px;margin:1rem auto;padding:0 1.5rem;'>" + flash_html + "</div>" + substr(b, bEnd + 1, len(b) - (bEnd + 1))
+                            }
                         }
                     }
                 }
-            }
-            
-            sKeys = keys(req["session"])
-            when len(sKeys) > 0 {
-                when sessionId == nil {
-                    inst.sessionCounter = inst.sessionCounter + 1
-                    sessionId = "sess_" + str(clock()) + "_" + str(inst.sessionCounter)
+                
+                # regenerate_session() asked for a fresh id: retire the old one
+                # server-side (so a fixed/stolen id stops working) and fall
+                # through to minting a new one below.
+                when has_key(req, "__regenerate_session__") and req["__regenerate_session__"] {
+                    when sessionId != nil { inst.sessionStore.delete(sessionId) }
+                    sessionId = nil
+                    dictRemove(req, "__regenerate_session__")
+                    # The old cookie must be replaced, not kept.
+                    when has_key(h, "Set-Cookie") { dictRemove(h, "Set-Cookie") }
                 }
-                inst.sessionStore.set(sessionId, req["session"])
-                when not has_key(h, "Set-Cookie") { h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/; HttpOnly" }
+
+                sKeys = keys(req["session"])
+                when len(sKeys) > 0 {
+                    when sessionId == nil {
+                        # Session ids MUST be unguessable: anyone who can predict
+                        # one can hijack that session by sending it as a cookie.
+                        # This used to be "sess_" + clock() + "_" + counter --
+                        # a millisecond timestamp plus a small integer, which an
+                        # attacker can simply enumerate.
+                        inst.sessionCounter = inst.sessionCounter + 1
+                        sessionId = "sess_" + secure_token(32)
+                    }
+                    inst.sessionStore.set(sessionId, req["session"])
+                    # SameSite=Lax stops the cookie riding along on cross-site
+                    # form posts (CSRF) while still surviving normal navigation.
+                    when not has_key(h, "Set-Cookie") { h["Set-Cookie"] = "ez_session=" + sessionId + "; Path=/; HttpOnly; SameSite=Lax" }
+                }
+                
+                statusPhrase = "OK"
+                when has_key(WebUtils.HTTP_STATUS, status) { statusPhrase = WebUtils.HTTP_STATUS[status] }
+                
+                respChunks = ["HTTP/1.1 ", str(status), " ", statusPhrase, "\r\n"]
+                when not has_key(h, "Server") { h["Server"] = "EZ Web Framework" }
+                # Honour HTTP/1.1's persistent-connection default instead of
+                # hardcoding "close" on every response, which forced a fresh TCP
+                # handshake (and a fresh server thread) for every single request.
+                # The C++ side treats this header as the source of truth for
+                # whether to reuse the socket.
+                when not has_key(h, "Connection") {
+                    h["Connection"] = "close"
+                    when inst.keep_alive and not WebUtils.wantsClose(req) { h["Connection"] = "keep-alive" }
+                }
+                
+                hKeys = keys(h)
+                get hk in hKeys { 
+                    push(respChunks, hk)
+                    push(respChunks, ": ")
+                    push(respChunks, str(h[hk]))
+                    push(respChunks, "\r\n")
+                }
+                
+                byteLen = os_call(WebFFI.strlenFunc, "int", b)
+                push(respChunks, "Content-Length: ")
+                push(respChunks, str(byteLen))
+                push(respChunks, "\r\n\r\n")
+                push(respChunks, b)
+                
+                respStr = join(respChunks, "")
+                when self.debug { out "[ez.web] " + str(status) + " -> " + str(len(respStr)) + " bytes" }
+                os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
             }
             
-            statusPhrase = "OK"
-            when has_key(WebUtils.HTTP_STATUS, status) { statusPhrase = WebUtils.HTTP_STATUS[status] }
-            
-            respChunks = ["HTTP/1.1 ", str(status), " ", statusPhrase, "\r\n"]
-            when not has_key(h, "Server") { h["Server"] = "EZ Web Framework" }
-            when not has_key(h, "Connection") { h["Connection"] = "close" }
-            
-            hKeys = keys(h)
-            get hk in hKeys { 
-                push(respChunks, hk)
-                push(respChunks, ": ")
-                push(respChunks, str(h[hk]))
-                push(respChunks, "\r\n")
+            when not handled {
+                # 405 vs 404: if the path matches a route registered under a
+                # DIFFERENT method, that is "Method Not Allowed", not "Not Found".
+                # Reporting 404 here hid the real mistake (e.g. posting to a
+                # GET-only route looked like a missing route).
+                allowed = inst._allowedMethodsFor(reqParts)
+                status404 = 404
+                when len(allowed) > 0 { status404 = 405 }
+
+                # Honour the handler registered via on_404(). This used to be
+                # hardcoded HTML: errorHandlers was written by on_404()/on_500()
+                # and then never read anywhere, so both were silently no-ops even
+                # though the README documents them and uses them in its example.
+                b = ""
+                hdrsExtra = ""
+                custom = inst.errorHandlers["404"]
+                when status404 == 404 and typeOf(custom) != "nil" {
+                    cres = custom(req)
+                    when typeOf(cres) == "dictionary" {
+                        when has_key(cres, "status") { status404 = cres["status"] }
+                        when has_key(cres, "body") { b = str(cres["body"]) } other { b = "" }
+                    } other { b = str(cres) }
+                } other {
+                    b = "<h1>404 Not Found</h1>"
+                    when status404 == 405 {
+                        b = "<h1>405 Method Not Allowed</h1>"
+                        hdrsExtra = "Allow: " + join(allowed, ", ") + "\r\n"
+                    }
+                }
+
+                phrase = "Not Found"
+                when has_key(WebUtils.HTTP_STATUS, status404) { phrase = WebUtils.HTTP_STATUS[status404] }
+                byteLen = os_call(WebFFI.strlenFunc, "int", b)
+                respStr = "HTTP/1.1 " + str(status404) + " " + phrase + "\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\n" + hdrsExtra + "Content-Length: " + str(byteLen) + "\r\n\r\n" + b
+                when self.debug { out "[ez.web] " + str(status404) + " -> " + str(len(respStr)) + " bytes" }
+                os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
             }
-            
-            byteLen = os_call(WebFFI.strlenFunc, "int", b)
-            push(respChunks, "Content-Length: ")
-            push(respChunks, str(byteLen))
-            push(respChunks, "\r\n\r\n")
-            push(respChunks, b)
-            
-            respStr = join(respChunks, "")
-            os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
-        }
-        
-        when not handled {
-            b = "<h1>404 Not Found</h1>"
-            byteLen = os_call(WebFFI.strlenFunc, "int", b)
-            respStr = "HTTP/1.1 404 Not Found\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(byteLen) + "\r\n\r\n" + b
-            os_call(HttpAccelFFI.respond, "int", req["id"], respStr, len(respStr))
+        } catch e {
+            # A handler that throws MUST still answer the socket. The C++ side
+            # keeps the connection in g_active_sockets and holds g_active_handlers
+            # up until http_server_respond() is called for this req_id, so simply
+            # logging here leaked the socket AND the handler slot -- and
+            # http_server_stop() waits on g_active_handlers, so it would hang
+            # forever. Send a 500 so the client sees a real error and the C++ side
+            # can reclaim the connection.
+            out "ERROR in _handleCallback: " + str(e)
+            try {
+                # Honour on_500() if one is registered -- like on_404() this was
+                # stored and never consulted.
+                eb = "<h1>500 Internal Server Error</h1>"
+                h500 = self.errorHandlers["500"]
+                when typeOf(h500) != "nil" {
+                    try {
+                        cres = h500(req, e)
+                        when typeOf(cres) == "dictionary" and has_key(cres, "body") { eb = str(cres["body"]) }
+                        other { eb = str(cres) }
+                    } catch e3 {
+                        # A broken error handler must not stop us answering.
+                        out "ERROR in on_500 handler: " + str(e3)
+                    }
+                }
+                eLen = os_call(WebFFI.strlenFunc, "int", eb)
+                eResp = "HTTP/1.1 500 Internal Server Error\r\nServer: EZ Web Framework\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: " + str(eLen) + "\r\n\r\n" + eb
+                os_call(HttpAccelFFI.respond, "int", req_id, eResp, len(eResp))
+            } catch e2 {
+                out "ERROR sending 500: " + str(e2)
+            }
         }
     }
     
-    task run(port) {
-        res = os_call(HttpAccelFFI.start, "int", port)
+    # workers > 1 runs the prefork model: this same script is re-executed in that
+    # many child processes, each with its own VM, all accepting on one inherited
+    # listening socket. That is the only way handlers actually run in parallel --
+    # EZ handlers are serialized on the interpreter's single main thread, so more
+    # threads in one process buy nothing. See "Worker Processes" in the README for
+    # what stops being shared once you do this (in-memory sessions, most notably).
+    task run(port, workers = 1) {
+        cb = |req_id, method, path, query_json, headers_json, body, client_ip| {
+            self._handleCallback(req_id, method, path, query_json, headers_json, body, client_ip)
+        }
+        # Must match EZCallback in src/http_accel.cpp exactly (7 args, trailing
+        # client_ip). libffi marshals by this list; a mismatch corrupts the stack.
+        self.__cb_ref = os_ffi_create_callback(["int", "string", "string", "string", "string", "string", "string"], "void", cb)
+
+        # typeOf() reports "integer"/"float" -- there is no "number".
+        when typeOf(workers) != "integer" and typeOf(workers) != "float" { workers = 1 }
+        when workers < 1 { workers = 1 }
+
+        # Workers re-run this whole script, so without this check every one of
+        # them would print the banner again.
+        when os_call(HttpAccelFFI.isWorker, "int") != 1 {
+            out "==================================================="
+            out " EZ Web Framework (C++ Accel Callback Mode) "
+            out " Listening natively on http://localhost:" + str(port)
+            when workers > 1 { out " Workers: " + str(workers) + " processes" }
+            out "==================================================="
+        }
+
+        res = os_call(HttpAccelFFI.start, "int", port, self.__cb_ref, workers)
+        # 2 = this process was the supervisor and every worker has now exited.
+        when res == 2 { give nil }
         when res != 1 {
             out "Failed to start C++ HTTP Accel server"
             give nil
         }
-        out "==================================================="
-        out " EZ Web Framework (C++ Accel Mode) "
-        out " Listening natively on http://localhost:" + str(port)
-        out "==================================================="
         
-        while true {
-            ptr = os_call(HttpAccelFFI.poll, "ptr")
-            when ptr != 0 and ptr != -1 {
-                jsonStr = os_read_string_ptr(ptr)
-                reqObj = parse_json(jsonStr)
-                spawn(WebApp._handleNativeRequest, reqObj, self)
-            } other {
-                stop(1)
+        # Park the main thread while the C++ accelerator serves requests on its
+        # own threads and drives us through the FFI callback.
+        #
+        # The fallback used to be `while true { }` -- a bare spin that pins a CPU
+        # core at 100% for the entire life of the server. Sleep() is part of
+        # kernel32 and is loaded at the top of this file, so if it is somehow
+        # missing, block on a plain wait() rather than burning a core.
+        when typeOf(__sleep) != "nil" and __sleep != 0 {
+            while true {
+                fut = waitAsync(10000)
+                await(fut)
             }
+        } other {
+            while true { wait(1000) }
         }
     }
 }
