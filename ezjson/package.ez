@@ -1,0 +1,9 @@
+{
+  "name": "json",
+  "version": "1.0.0",
+  "description": "JSON (JavaScript Object Notation) parser and stringifier",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

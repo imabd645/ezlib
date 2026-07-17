@@ -1082,6 +1082,22 @@
       ],
       "description": "Production-ready CSV parser and stringifier handling RFC 4180 rules",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "json",
+      "folder": "ezjson",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezjson",
+          "dependencies": {}
+        }
+      ],
+      "description": "JSON (JavaScript Object Notation) parser and stringifier",
+      "author": "Abdullah Masood"
     }
   ]
 }

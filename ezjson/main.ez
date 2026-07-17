@@ -1,0 +1,261 @@
+# ============================================================================
+# JSON - JavaScript Object Notation Parser/Stringifier for EZ
+# ============================================================================
+
+task skipWhitespace(state) {
+    while state.i < state.l {
+        c = substr(state.src, state.i, 1)
+        when c == " " or c == "\n" or c == "\r" or c == "\t" {
+            state.i = state.i + 1
+        } other {
+            give nil
+        }
+    }
+}
+
+task parseString(state) {
+    state.i = state.i + 1 
+    res = ""
+    done = false
+    while state.i < state.l and not done {
+        c = substr(state.src, state.i, 1)
+        when c == "\"" {
+            state.i = state.i + 1 
+            done = true
+        } other {
+            when c == "\\" {
+                state.i = state.i + 1
+                when state.i < state.l {
+                    esc = substr(state.src, state.i, 1)
+                    when esc == "n" { res = res + "\n" }
+                    other {
+                        when esc == "r" { res = res + "\r" }
+                        other {
+                            when esc == "t" { res = res + "\t" }
+                            other {
+                                when esc == "\"" { res = res + "\"" }
+                                other {
+                                    when esc == "\\" { res = res + "\\" }
+                                    other { res = res + esc }
+                                }
+                            }
+                        }
+                    }
+                }
+                state.i = state.i + 1
+            } other {
+                res = res + c
+                state.i = state.i + 1
+            }
+        }
+    }
+    give res
+}
+
+task parseNumber(state) {
+    res = ""
+    while state.i < state.l {
+        c = substr(state.src, state.i, 1)
+        when c == "-" or c == "." or c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7" or c == "8" or c == "9" or c == "e" or c == "E" or c == "+" {
+            res = res + c
+            state.i = state.i + 1
+        } other {
+            give num(res)
+        }
+    }
+    give num(res)
+}
+
+task parseArray(state, parseValueFn) {
+    state.i = state.i + 1 
+    arr = []
+    skipWhitespace(state)
+    
+    when state.i < state.l and substr(state.src, state.i, 1) == "]" {
+        state.i = state.i + 1
+        give arr
+    }
+    
+    done = false
+    while state.i < state.l and not done {
+        val = parseValueFn(state, parseValueFn)
+        push(arr, val)
+        
+        skipWhitespace(state)
+        when state.i < state.l {
+            c = substr(state.src, state.i, 1)
+            when c == "]" {
+                state.i = state.i + 1
+                done = true
+            } other {
+                when c == "," {
+                    state.i = state.i + 1
+                }
+            }
+        }
+    }
+    give arr
+}
+
+task parseObject(state, parseValueFn) {
+    state.i = state.i + 1
+    obj = {}
+    skipWhitespace(state)
+    
+    when state.i < state.l and substr(state.src, state.i, 1) == "}" {
+        state.i = state.i + 1
+        give obj
+    }
+    
+    done = false
+    while state.i < state.l and not done {
+        skipWhitespace(state)
+        key = parseString(state)
+        
+        skipWhitespace(state)
+        when state.i < state.l and substr(state.src, state.i, 1) == ":" {
+            state.i = state.i + 1
+        }
+        
+        val = parseValueFn(state, parseValueFn)
+        obj[key] = val
+        
+        skipWhitespace(state)
+        when state.i < state.l {
+            c = substr(state.src, state.i, 1)
+            when c == "}" {
+                state.i = state.i + 1
+                done = true
+            } other {
+                when c == "," {
+                    state.i = state.i + 1
+                }
+            }
+        }
+    }
+    give obj
+}
+
+task parseValue(state, parseValueFn) {
+    skipWhitespace(state)
+    when state.i >= state.l { give nil }
+    
+    c = substr(state.src, state.i, 1)
+    when c == "\"" { give parseString(state) }
+    when c == "[" { give parseArray(state, parseValueFn) }
+    when c == "{" { give parseObject(state, parseValueFn) }
+    
+    when c == "t" {
+        state.i = state.i + 4
+        give true
+    }
+    when c == "f" {
+        state.i = state.i + 5
+        give false
+    }
+    when c == "n" {
+        state.i = state.i + 4
+        give nil
+    }
+    
+    give parseNumber(state)
+}
+
+export task parse(jsonString) {
+    when type(jsonString) != "string" { give nil }
+    state = { src: jsonString, i: 0, l: len(jsonString) }
+    give parseValue(state, parseValue)
+}
+
+# ============================================================================
+# STRINGIFIER
+# ============================================================================
+
+task escapeJsonString(s) {
+    s = str(s)
+    res = ""
+    i = 0
+    l = len(s)
+    while i < l {
+        c = substr(s, i, 1)
+        when c == "\"" { res = res + "\\\"" }
+        other {
+            when c == "\\" { res = res + "\\\\" }
+            other {
+                when c == "\n" { res = res + "\\n" }
+                other {
+                    when c == "\r" { res = res + "\\r" }
+                    other {
+                        when c == "\t" { res = res + "\\t" }
+                        other { res = res + c }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    give "\"" + res + "\""
+}
+
+task stringifyHelper(val, selfFn) {
+    t = type(val)
+    
+    when val == nil { give "null" }
+    when t == "integer" or t == "float" { give str(val) }
+    when t == "bool" {
+        when val { give "true" }
+        give "false"
+    }
+    when t == "string" { give escapeJsonString(val) }
+    
+    when t == "array" {
+        res = "["
+        i = 0
+        l = len(val)
+        while i < l {
+            res = res + selfFn(val[i], selfFn)
+            when i < l - 1 { res = res + "," }
+            i = i + 1
+        }
+        res = res + "]"
+        give res
+    }
+    
+    when t == "dictionary" {
+        res = "{"
+        k_arr = keys(val)
+        i = 0
+        l = len(k_arr)
+        while i < l {
+            k = k_arr[i]
+            res = res + escapeJsonString(k) + ":" + selfFn(val[k], selfFn)
+            when i < l - 1 { res = res + "," }
+            i = i + 1
+        }
+        res = res + "}"
+        give res
+    }
+    
+    give "\"{unknown_type}\""
+}
+
+export task stringify(val) {
+    give stringifyHelper(val, stringifyHelper)
+}
+
+export task read(filePath) {
+    f = File(filePath, "r")
+    when not f.isOpen() { give nil }
+    data = f.readAll()
+    f.close()
+    give parse(data)
+}
+
+export task write(filePath, data) {
+    f = File(filePath, "w")
+    when not f.isOpen() { give false }
+    jsonStr = stringify(data)
+    f.write(jsonStr)
+    f.close()
+    give true
+}
