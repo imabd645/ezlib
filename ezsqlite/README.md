@@ -7,7 +7,7 @@
 
 ---
 
-//// Overview
+## Overview
 
 SQLite for EZ over **pure FFI**. There is no C++ in this package and no DLL to build:
 it calls the SQLite C API directly, and falls back to the copy of SQLite that Windows
@@ -35,7 +35,7 @@ db.close()
 
 ---
 
-//// Structure
+## Structure
 
 One concern per file. The layering is real: each file only uses the ones below it.
 
@@ -53,9 +53,9 @@ If SQLite's C API or EZ's FFI changes shape, only `src/ffi.ez` should need to mo
 
 ---
 
-//// Connecting
+## Connecting
 
-////// `connect(path, options = nil)` → `Database`
+### `connect(path, options = nil)` → `Database`
 
 `path` is a filename, `":memory:"`, or a `file:` URI (with `uri: true`).
 
@@ -86,7 +86,7 @@ Two defaults differ from raw SQLite, deliberately:
 Always open with `connect()`, never `Database()` directly — see
 [Interpreter bugs](//interpreter-bugs-worked-around-here).
 
-////// `with_db(path, fn, options = nil)`
+### `with_db(path, fn, options = nil)`
 
 Open, run, close — even if `fn` throws.
 
@@ -94,14 +94,14 @@ Open, run, close — even if `fn` throws.
 names = with_db("app.db", |db| { give db.query("SELECT name FROM users") })
 ```
 
-////// `db.close()`
+### `db.close()`
 
 Idempotent. Uses `sqlite3_close_v2`, so it is safe to call while statements are still
 alive — they are released as they finalize.
 
 ---
 
-//// Querying
+## Querying
 
 | Method | Returns |
 |---|---|
@@ -131,7 +131,7 @@ A wrong parameter count is an **error**, not a shrug. SQLite leaves an unbound p
 as `NULL`, so a query with a missing value silently returns nothing and looks like "no
 rows" — which is a genuinely hard afternoon.
 
-////// `exec_many` — bulk insert
+### `exec_many` — bulk insert
 
 Compiles the SQL **once** and runs it per parameter set. Re-preparing per row is usually
 the dominant cost of a bulk load. Wrap it in a transaction to avoid one fsync per row too:
@@ -144,7 +144,7 @@ db.transaction(|d| {
 })
 ```
 
-////// `exec_script` — several statements
+### `exec_script` — several statements
 
 `sqlite3_prepare_v2` compiles **one** statement and ignores the rest, so passing
 multi-statement SQL to `exec()` silently runs only the first — the classic way a
@@ -164,7 +164,7 @@ for those.
 
 ---
 
-//// SQL Injection
+## SQL Injection
 
 Values are **bound**, never formatted into SQL. There is deliberately no "quote this for
 me" helper, because offering one invites building SQL by concatenation.
@@ -185,7 +185,7 @@ library. If a table name must be dynamic, check it against a list you control;
 
 ---
 
-//// Types
+## Types
 
 | EZ | SQLite | Notes |
 |---|---|---|
@@ -204,7 +204,7 @@ Reads dispatch on the value's **actual** type, not the column's declared type, b
 SQLite is dynamically typed: a `TEXT` column can hold an integer, and `SELECT 1` has no
 declared type at all.
 
-////// Integers
+### Integers
 
 The full signed 64-bit range binds and reads back exactly. Booleans store as `1`/`0` and
 read back as integers (SQLite has no boolean type).
@@ -217,9 +217,9 @@ are the only remaining edge: they exceed EZ's signed 64-bit integer and come bac
 
 ---
 
-//// Transactions
+## Transactions
 
-////// `db.transaction(fn)`
+### `db.transaction(fn)`
 
 Commits if `fn` returns, rolls back if it throws, and re-raises. This is the only
 transaction API that cannot leave one dangling.
@@ -249,14 +249,14 @@ lock at the first write, so two writers can both start, both read, and only disc
 conflict at COMMIT — `SQLITE_BUSY` *after* the work is done. IMMEDIATE takes the lock up
 front and waits out `busy_timeout` instead.
 
-////// `db.begin(mode)` / `db.commit()` / `db.rollback()` / `db.in_transaction()`
+### `db.begin(mode)` / `db.commit()` / `db.rollback()` / `db.in_transaction()`
 
 The manual escape hatch. It puts matching every `BEGIN` on every path — including thrown
 errors — on you. Prefer `transaction()`.
 
 ---
 
-//// Statements
+## Statements
 
 For large result sets, step instead of materialising:
 
@@ -285,7 +285,7 @@ the second is suffixed (`id:1`) rather than dropped. Alias your columns if you c
 
 ---
 
-//// Migrations
+## Migrations
 
 Tracked in `PRAGMA user_version` — an integer in the database header — so a fresh
 database is already at version 0 with no table to set up.
@@ -315,7 +315,7 @@ applied = migrate(db, migrations)      // -> [1, 2] first run, [] after
 
 ---
 
-//// Errors
+## Errors
 
 Every failure throws a formatted message carrying the code name, SQLite's own text, and
 the SQL:
@@ -333,14 +333,14 @@ Helpers from `src/errors.ez`: `code_name(rc)`, `extended_code_name(rc)`, `is_ok(
 
 ---
 
-//// Introspection
+## Introspection
 
 `db.last_insert_id()`, `db.changes()`, `db.total_changes()`, `db.tables()`,
 `db.table_exists(name)`, `db.columns(table)`, `db.integrity_check()`.
 
 ---
 
-//// Using it with the web framework
+## Using it with the web framework
 
 Handlers are serialized within a process, so one connection per process is fine. With
 `workers > 1` each worker is a separate process, so **give each its own connection** and
@@ -361,7 +361,7 @@ Without WAL, writers block readers and the workers spend their time waiting on e
 
 ---
 
-//// Interpreter bugs worked around here
+## Interpreter bugs worked around here
 
 Both are reproducible without this library, and both are worth knowing about:
 
@@ -391,7 +391,7 @@ then re-throw. See `with_statement` in `src/statement.ez`.
 
 ---
 
-//// Notes & Limits
+## Notes & Limits
 
 - **Windows only**, like the rest of the stack.
 - **`winsqlite3.dll` is Microsoft's copy** and its version is whatever your Windows ships
@@ -404,7 +404,7 @@ then re-throw. See `with_statement` in `src/statement.ez`.
 
 ---
 
-//// Tests
+## Tests
 
 ```
 cd C:\ezlib\sqlite
