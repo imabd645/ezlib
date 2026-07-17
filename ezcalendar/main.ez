@@ -1,0 +1,118 @@
+# ============================================================================
+# CALENDAR - Calendar display library for EZ Language
+# Uses the native DateTime class
+# ============================================================================
+
+# Checks if a given year is a leap year
+task isLeap(year) {
+    when (year % 4 == 0) and ((year % 100 != 0) or (year % 400 == 0)) {
+        give true
+    }
+    give false
+}
+
+# Returns the number of days in a specific month
+task daysInMonth(year, month) {
+    when month == 2 {
+        when isLeap(year) { give 29 }
+        give 28
+    }
+    
+    when month == 4 or month == 6 or month == 9 or month == 11 {
+        give 30
+    }
+    
+    give 31
+}
+
+# Pads a string with spaces on the left up to a certain length
+task padLeft(s, length) {
+    res = str(s)
+    while len(res) < length {
+        res = " " + res
+    }
+    give res
+}
+
+# ============================================================================
+# Core Functions
+# ============================================================================
+
+# Displays a calendar for a specific month
+export task printMonth(year, month) {
+    months = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    
+    # Center the header roughly
+    header = months[month] + " " + str(year)
+    padding = (20 - len(header)) / 2
+    padStr = ""
+    i = 0
+    while i < padding {
+        padStr = padStr + " "
+        i = i + 1
+    }
+    
+    out padStr + header
+    out "Su Mo Tu We Th Fr Sa"
+    
+    # Get weekday of the 1st of the month
+    d = DateTime(year, month, 1)
+    startDay = d.weekday() # 0 = Sunday, 6 = Saturday
+    dim = daysInMonth(year, month)
+    
+    row = ""
+    
+    # Print leading spaces for the first week
+    i = 0
+    while i < startDay {
+        row = row + "   "
+        i = i + 1
+    }
+    
+    currDay = 1
+    currCol = startDay
+    
+    while currDay <= dim {
+        row = row + padLeft(currDay, 2) + " "
+        currCol = currCol + 1
+        
+        when currCol == 7 {
+            out row
+            row = ""
+            currCol = 0
+        }
+        currDay = currDay + 1
+    }
+    
+    # Print any remaining days in the last row
+    when len(row) > 0 {
+        out row
+    }
+}
+
+# Displays a full calendar for a given year
+export task printYear(year) {
+    out "========================================"
+    out "              YEAR " + str(year)
+    out "========================================"
+    out ""
+    
+    currMonth = 1
+    while currMonth <= 12 {
+        printMonth(year, currMonth)
+        out ""
+        currMonth = currMonth + 1
+    }
+}
+
+# Displays the calendar for the current month
+export task printCurrentMonth() {
+    now = DateTime()
+    printMonth(now.year(), now.month())
+}
+
+# Displays the full calendar for the current year
+export task printCurrentYear() {
+    now = DateTime()
+    printYear(now.year())
+}

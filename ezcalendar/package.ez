@@ -1,0 +1,9 @@
+{
+  "name": "calendar",
+  "version": "1.0.0",
+  "description": "Library to display a full calendar for specific months and years using the native DateTime class",
+  "author": "Antigravity",
+  "main": "main.ez",
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

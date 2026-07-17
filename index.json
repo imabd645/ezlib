@@ -1050,6 +1050,22 @@
       ],
       "description": "JSON Web Tokens (JWT) encoder and decoder using HS256 algorithm for EZ Language",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "calendar",
+      "folder": "ezcalendar",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezcalendar",
+          "dependencies": {}
+        }
+      ],
+      "description": "Library to display a full calendar for specific months and years using the native DateTime class",
+      "author": "Antigravity"
     }
   ]
 }
