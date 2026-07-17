@@ -1105,6 +1105,24 @@
       ],
       "description": "JSON (JavaScript Object Notation) parser and stringifier",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "auth",
+      "folder": "ezauth",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezauth",
+          "dependencies": {
+            "web": "^2.0.2"
+          }
+        }
+      ],
+      "description": "Session authentication, password hashing and CSRF for the EZ web framework",
+      "author": "Abdullah Masood"
     }
   ]
 }

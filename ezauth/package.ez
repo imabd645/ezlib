@@ -1,0 +1,10 @@
+{
+    "name": "auth",
+    "version": "1.0.0",
+    "description": "Session authentication, password hashing and CSRF for the EZ web framework",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {
+        "web": "^2.0.2"
+    }
+}

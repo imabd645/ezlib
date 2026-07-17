@@ -1,0 +1,306 @@
+# ============================================================================
+# ezauth - Session authentication for the EZ web framework
+#
+# Roughly flask-login's job (who is logged in, and gating routes on it), plus the
+# parts flask-login deliberately leaves to other packages but which nobody can
+# safely skip: password hashing and CSRF. A login library that punts on hashing
+# invites md5(password), so it is included here.
+#
+# Everything that must be constant-time, slow-by-design, or random comes from
+# auth_accel.dll (Windows CNG). None of it is reimplemented in EZ.
+# ============================================================================
+
+use "web"
+
+__auth_accel = os_load_lib("auth_accel.dll")
+when typeOf(__auth_accel) == "nil" or __auth_accel == 0 {
+    __auth_accel = os_load_lib("C:/ezlib/auth/dlls/auth_accel.dll")
+}
+when typeOf(__auth_accel) == "nil" or __auth_accel == 0 {
+    throw "ezauth: could not load auth_accel.dll (build it with src/build.bat)"
+}
+
+export model AuthFFI {
+    static hash = os_get_func(__auth_accel, "auth_hash_password")
+    static verify = os_get_func(__auth_accel, "auth_verify_password")
+    static iterations = os_get_func(__auth_accel, "auth_hash_iterations")
+    static hmac = os_get_func(__auth_accel, "auth_hmac_sha256")
+    static ctEq = os_get_func(__auth_accel, "auth_const_time_eq")
+    static free = os_get_func(__auth_accel, "auth_free")
+}
+
+# OWASP's 2023 recommendation for PBKDF2-HMAC-SHA256. Measured at ~160ms per
+# call on a normal desktop, which is the entire point: it is the same cost for an
+# attacker, multiplied by every guess.
+#
+# That cost is paid on the request thread, and handlers are serialized within a
+# process, so a login blocks other requests for its duration. Run `workers` if
+# that matters, and rate-limit the login route regardless. Lowering this trades
+# your users' passwords for latency -- do it deliberately.
+export PBKDF2_ITERATIONS = 600000
+
+# ── Password hashing ────────────────────────────────────────────────────────
+
+# Hash a password for storage. Returns "pbkdf2_sha256$<iters>$<salt>$<hash>";
+# store the whole string. The salt is random per call, so hashing the same
+# password twice gives different output -- that is correct and expected.
+export task hash_password(password, iterations = nil) {
+    when typeOf(password) != "string" { throw "hash_password: password must be a string" }
+    when typeOf(iterations) == "nil" { iterations = PBKDF2_ITERATIONS }
+    p = os_call(AuthFFI.hash, "ptr", password, iterations)
+    when p == 0 { throw "hash_password: PBKDF2 failed" }
+    s = os_read_string_ptr(p)
+    os_call(AuthFFI.free, "void", p)
+    give s
+}
+
+# Check a password against a stored hash. Constant-time; false for any malformed
+# or nil hash rather than throwing, so a corrupt row cannot become a login.
+export task verify_password(password, encoded) {
+    when typeOf(password) != "string" { give false }
+    when typeOf(encoded) != "string" { give false }
+    give os_call(AuthFFI.verify, "int", password, encoded) == 1
+}
+
+# True if `encoded` was made with fewer iterations than we now use, i.e. it was
+# hashed when the cost setting was lower. Re-hash on the user's next successful
+# login (that is the only moment the plaintext is available):
+#
+#   when verify_password(pw, u["password_hash"]) {
+#       when needs_rehash(u["password_hash"]) { u["password_hash"] = hash_password(pw) }
+#   }
+export task needs_rehash(encoded) {
+    when typeOf(encoded) != "string" { give true }
+    it = os_call(AuthFFI.iterations, "int", encoded)
+    when it < 1 { give true }
+    give it < PBKDF2_ITERATIONS
+}
+
+# ── Signing / comparison ────────────────────────────────────────────────────
+
+# HMAC-SHA256(key, msg) as hex. For signing values that travel through the client.
+export task sign(key, message) {
+    p = os_call(AuthFFI.hmac, "ptr", str(key), str(message))
+    when p == 0 { throw "sign: HMAC failed" }
+    s = os_read_string_ptr(p)
+    os_call(AuthFFI.free, "void", p)
+    give s
+}
+
+# Constant-time string equality. Use this for tokens and digests: `==` returns on
+# the first differing byte, so its timing leaks how long a prefix was correct.
+export task secure_equals(a, b) {
+    when typeOf(a) != "string" or typeOf(b) != "string" { give false }
+    give os_call(AuthFFI.ctEq, "int", a, b) == 1
+}
+
+# ── Session keys ────────────────────────────────────────────────────────────
+# Namespaced so they cannot collide with anything an app puts in the session.
+__USER_KEY = "_auth_user_id"
+__CSRF_KEY = "_auth_csrf"
+
+# ── Current user ────────────────────────────────────────────────────────────
+
+# The logged-in user's id, or nil. Cheap: no user_loader call.
+export task current_user_id(req) {
+    when not has_key(req, "session") { give nil }
+    when not has_key(req["session"], __USER_KEY) { give nil }
+    give req["session"][__USER_KEY]
+}
+
+export task is_authenticated(req) {
+    give typeOf(current_user_id(req)) != "nil"
+}
+
+export model LoginManager {
+    init(app = nil) {
+        self.app = app
+        # Callbacks live in a dictionary, NOT in plain fields. Reading a function
+        # out of an instance field yields a BOUND METHOD, so `self.fn(x)` -- and
+        # even `f = self.fn  f(x)` -- passes self as a hidden first argument and
+        # dies with "expected at most 1 args but got 2". Going through a dict
+        # gives back the plain function. (The web framework's route table stores
+        # handlers in a dict for the same reason.)
+        self._hooks = { "user_loader": nil, "unauthorized": nil, "forbidden": nil }
+        # Where to send an unauthenticated user. nil => plain 401.
+        self.login_view = nil
+        # Per-request memo, so N current_user() calls in one handler cost one
+        # user_loader call. Safe because handlers are serialized within a
+        # process; keyed by id so a stale entry cannot leak across users.
+        self._cache_id = nil
+        self._cache_user = nil
+        when typeOf(app) != "nil" { app.auth = self }
+    }
+
+    # Tell ezauth how to turn a stored id back into a user. Required.
+    #   auth.user_loader(|uid| { give db_find_user(uid) })
+    # Return nil for an unknown/deleted id and the session is treated as logged
+    # out, which is what makes deleting a user take effect immediately.
+    task user_loader(fn) {
+        self._hooks["user_loader"] = fn
+        give fn
+    }
+
+    task unauthorized_handler(fn) { self._hooks["unauthorized"] = fn  give fn }
+    task forbidden_handler(fn) { self._hooks["forbidden"] = fn  give fn }
+
+    # The current user object, or nil. Calls user_loader at most once per id.
+    task current_user(req) {
+        uid = current_user_id(req)
+        when typeOf(uid) == "nil" { give nil }
+        when typeOf(self._hooks["user_loader"]) == "nil" {
+            throw "ezauth: no user_loader registered -- call auth.user_loader(|uid| { ... })"
+        }
+        when self._cache_id == uid and typeOf(self._cache_user) != "nil" {
+            give self._cache_user
+        }
+        u = self._hooks["user_loader"](uid)
+        self._cache_id = uid
+        self._cache_user = u
+        give u
+    }
+
+    # Record `user` as logged in for this session.
+    #
+    # `user` may be the id itself, or a dictionary/instance carrying one -- an
+    # "id" key, or whatever `id_field` names. Only the id goes in the session:
+    # storing the whole user would serialize password hashes into the session
+    # store and go stale the moment the record changes.
+    task login_user(req, user, id_field = "id") {
+        uid = user
+        when typeOf(user) == "dictionary" {
+            when has_key(user, id_field) { uid = user[id_field] }
+        }
+        when typeOf(uid) == "nil" { throw "login_user: could not determine a user id" }
+
+        req["session"][__USER_KEY] = uid
+        # Rotate the session id: the pre-login id may have been chosen by an
+        # attacker, and it must not survive into an authenticated session.
+        regenerate_session(req)
+        # A rotated session must not keep the old CSRF token either.
+        when has_key(req["session"], __CSRF_KEY) { dictRemove(req["session"], __CSRF_KEY) }
+
+        self._cache_id = uid
+        self._cache_user = nil
+        give req
+    }
+
+    task logout_user(req) {
+        when has_key(req["session"], __USER_KEY) { dictRemove(req["session"], __USER_KEY) }
+        when has_key(req["session"], __CSRF_KEY) { dictRemove(req["session"], __CSRF_KEY) }
+        # Rotate on logout too, so the id that was authenticated is retired
+        # rather than left valid for whoever holds it.
+        regenerate_session(req)
+        self._cache_id = nil
+        self._cache_user = nil
+        give req
+    }
+
+    task _reject(req) {
+        when typeOf(self._hooks["unauthorized"]) != "nil" { give self._hooks["unauthorized"](req) }
+        when typeOf(self.login_view) != "nil" {
+            # Send them where they were trying to go, after login. Only ever a
+            # path from this request -- never a caller-supplied absolute URL,
+            # which is how open-redirect bugs get built.
+            nxt = req["path"]
+            give redirect(self.login_view + "?next=" + WebUtils.encodeUrl(nxt))
+        }
+        give { "status": 401, "body": "401 Unauthorized", "headers": {"Content-Type": "text/plain"} }
+    }
+
+    # Wrap a handler so only logged-in users reach it.
+    #   app.get("/dash", auth.login_required(|req| { give "hi" }))
+    task login_required(handler) {
+        give |req| {
+            when not is_authenticated(req) { give self._reject(req) }
+            # Authenticated per the session, but the user is gone (deleted, or a
+            # session left over from another database). Treat as logged out.
+            when typeOf(self.current_user(req)) == "nil" { give self._reject(req) }
+            give handler(req)
+        }
+    }
+
+    # Gate on a role. The user object must expose `role_field` (default "roles"),
+    # holding either an array of roles or a single role string.
+    #   app.get("/admin", auth.roles_required(["admin"], |req| { ... }))
+    task roles_required(roles, handler, role_field = "roles") {
+        give |req| {
+            when not is_authenticated(req) { give self._reject(req) }
+            u = self.current_user(req)
+            when typeOf(u) == "nil" { give self._reject(req) }
+
+            have = []
+            when typeOf(u) == "dictionary" and has_key(u, role_field) {
+                r = u[role_field]
+                when typeOf(r) == "array" { have = r } other { have = [r] }
+            }
+
+            ok = false
+            get need in roles {
+                get h in have {
+                    when str(h) == str(need) { ok = true }
+                }
+            }
+            when not ok {
+                when typeOf(self._hooks["forbidden"]) != "nil" { give self._hooks["forbidden"](req) }
+                give { "status": 403, "body": "403 Forbidden", "headers": {"Content-Type": "text/plain"} }
+            }
+            give handler(req)
+        }
+    }
+}
+
+# ── CSRF ────────────────────────────────────────────────────────────────────
+#
+# Cookies are attached by the browser to cross-site requests too, so a form on
+# any other site can POST to yours with the victim's session. `SameSite=Lax` (set
+# by the web framework) blocks the common case, but it is a browser-side default,
+# not a guarantee: it does not cover top-level cross-site POSTs on every browser,
+# and it does nothing for anything that relaxes it. A per-session token that the
+# attacker cannot read is the actual defence.
+
+# The CSRF token for this session, minting one on first use. Put it in every
+# state-changing form:
+#   <input type="hidden" name="_csrf" value="{{ csrf }}">
+export task csrf_token(req) {
+    when not has_key(req, "session") { throw "csrf_token: request has no session" }
+    when not has_key(req["session"], __CSRF_KEY) {
+        req["session"][__CSRF_KEY] = secure_token(32)
+    }
+    give req["session"][__CSRF_KEY]
+}
+
+# True if this request carries a valid CSRF token. Checks the "_csrf" form field
+# then the "X-CSRF-Token" header (for fetch/XHR).
+export task csrf_valid(req) {
+    expected = nil
+    when has_key(req, "session") and has_key(req["session"], __CSRF_KEY) {
+        expected = req["session"][__CSRF_KEY]
+    }
+    # No token in the session means nothing to verify against. Fail closed.
+    when typeOf(expected) != "string" { give false }
+
+    sent = nil
+    when has_key(req, "form") and has_key(req["form"], "_csrf") { sent = req["form"]["_csrf"] }
+    when typeOf(sent) != "string" and has_key(req, "headers") {
+        when has_key(req["headers"], "x-csrf-token") { sent = req["headers"]["x-csrf-token"] }
+    }
+    when typeOf(sent) != "string" { give false }
+    give secure_equals(sent, expected)
+}
+
+# Middleware: reject state-changing requests without a valid CSRF token.
+#   app.use(csrf_protect())
+# GET/HEAD/OPTIONS pass through: they are supposed to be side-effect free, and
+# gating them would break ordinary navigation.
+# Middleware takes (req, res); returning nil continues the chain, returning a
+# response short-circuits it.
+export task csrf_protect() {
+    give |req, res| {
+        m = req["method"]
+        when m == "GET" or m == "HEAD" or m == "OPTIONS" { give nil }
+        when csrf_valid(req) { give nil }
+        give { "status": 403, "body": "403 CSRF token missing or invalid",
+               "headers": {"Content-Type": "text/plain"} }
+    }
+}

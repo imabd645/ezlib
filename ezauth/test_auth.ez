@@ -1,0 +1,183 @@
+# Regression tests for the ezauth package.
+# Run:  ez test_auth.ez     (from C:\ezlib\auth)
+
+use "auth"
+
+passes = 0
+fails = 0
+
+task check(name, actual, expected) {
+    when str(actual) == str(expected) {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+
+out "=== ezauth regression tests ==="
+
+# --- Password hashing -------------------------------------------------------
+# Use a low iteration count in tests: the real default (600k) is ~160ms per call
+# BY DESIGN, and the suite hashes many times.
+T = 1000
+
+h = hash_password("correct horse battery staple", T)
+check("hash has pbkdf2_sha256 prefix", startsWith(h, "pbkdf2_sha256$"), true)
+check("hash encodes its iterations", indexOf(h, "$1000$") != -1, true)
+check("hash has 4 $-separated parts", len(split(h, "$")), 4)
+
+check("correct password verifies", verify_password("correct horse battery staple", h), true)
+check("wrong password rejected", verify_password("Correct horse battery staple", h), false)
+check("empty password rejected", verify_password("", h), false)
+
+# A password must never be recoverable from, or equal to, its hash.
+check("hash does not contain the password", indexOf(h, "correct horse") == -1, true)
+
+# Salting: the same password twice must NOT produce the same hash, or identical
+# passwords would be visible to anyone reading the user table, and one cracked
+# hash would crack every account sharing that password.
+h2 = hash_password("correct horse battery staple", T)
+check("same password -> different hash (salted)", h != h2, true)
+check("...but both still verify", verify_password("correct horse battery staple", h2), true)
+
+# Malformed stored hashes must fail closed, never throw and never pass.
+check("nil hash rejected", verify_password("x", nil), false)
+check("garbage hash rejected", verify_password("x", "not-a-hash"), false)
+check("empty hash rejected", verify_password("x", ""), false)
+check("truncated hash rejected", verify_password("x", "pbkdf2_sha256$1000$abcd"), false)
+check("unknown algorithm rejected", verify_password("x", "md5$1000$aa$bb"), false)
+check("non-string password rejected", verify_password(123, h), false)
+
+# --- Rehash on cost increase ------------------------------------------------
+check("low-iteration hash needs rehash", needs_rehash(h), true)
+check("current-cost hash does not", needs_rehash(hash_password("p", PBKDF2_ITERATIONS)), false)
+check("garbage needs rehash", needs_rehash("garbage"), true)
+check("nil needs rehash", needs_rehash(nil), true)
+
+# --- HMAC / constant-time compare -------------------------------------------
+# Verified against Python's hmac module: HMAC-SHA256("key", "message").
+check("hmac matches reference vector", sign("key", "message"),
+      "6e9ef29b75fffc5b7abae527d58fdadb2fe42e7219011976917343065f58ed4a")
+check("hmac is deterministic", sign("k", "m") == sign("k", "m"), true)
+check("hmac changes with key", sign("k1", "m") != sign("k2", "m"), true)
+check("hmac changes with message", sign("k", "m1") != sign("k", "m2"), true)
+
+check("secure_equals equal", secure_equals("abc", "abc"), true)
+check("secure_equals differing", secure_equals("abc", "abd"), false)
+check("secure_equals length mismatch", secure_equals("abc", "abcd"), false)
+check("secure_equals non-string", secure_equals(nil, "a"), false)
+
+# --- Session helpers --------------------------------------------------------
+req = { "session": {}, "path": "/x", "method": "GET", "headers": {}, "form": {} }
+check("anonymous is not authenticated", is_authenticated(req), false)
+check("anonymous has no user id", typeOf(current_user_id(req)), "nil")
+
+auth = LoginManager()
+auth.user_loader(|uid| {
+    when uid == 7 { give {"id": 7, "name": "ana", "roles": ["admin"]} }
+    when uid == 8 { give {"id": 8, "name": "bob", "roles": ["user"]} }
+    give nil
+})
+
+auth.login_user(req, {"id": 7, "name": "ana"})
+check("login_user authenticates", is_authenticated(req), true)
+check("login_user stores the id", current_user_id(req), 7)
+# Only the id belongs in the session -- not the user record.
+check("session stores id, not user object", typeOf(req["session"]["_auth_user_id"]), "integer")
+# Session fixation: login MUST rotate the session id.
+check("login_user requests session rotation", req["__regenerate_session__"], true)
+
+check("current_user loads via user_loader", auth.current_user(req)["name"], "ana")
+
+auth.logout_user(req)
+check("logout_user de-authenticates", is_authenticated(req), false)
+check("logout_user rotates the session too", req["__regenerate_session__"], true)
+
+# Logging in by bare id, not just by object.
+req2 = { "session": {}, "path": "/x", "method": "GET", "headers": {}, "form": {} }
+auth.login_user(req2, 8)
+check("login_user accepts a bare id", current_user_id(req2), 8)
+check("current_user for bare id", auth.current_user(req2)["name"], "bob")
+
+# A session naming a user the loader no longer knows must not count as logged in.
+req3 = { "session": {"_auth_user_id": 999}, "path": "/x", "method": "GET", "headers": {}, "form": {} }
+check("deleted user -> current_user nil", typeOf(auth.current_user(req3)), "nil")
+
+# --- login_required ---------------------------------------------------------
+guarded = auth.login_required(|req| { give "SECRET" })
+
+anon = { "session": {}, "path": "/dash", "method": "GET", "headers": {}, "form": {} }
+r = guarded(anon)
+check("login_required blocks anonymous", r["status"], 401)
+check("...and does not leak the body", indexOf(str(r["body"]), "SECRET") == -1, true)
+
+member = { "session": {}, "path": "/dash", "method": "GET", "headers": {}, "form": {} }
+auth.login_user(member, 7)
+check("login_required admits a member", guarded(member), "SECRET")
+
+# A session for a user the loader cannot resolve must be blocked, not admitted.
+ghost = { "session": {"_auth_user_id": 999}, "path": "/dash", "method": "GET", "headers": {}, "form": {} }
+check("login_required blocks a deleted user", guarded(ghost)["status"], 401)
+
+# login_view => redirect instead of a bare 401, carrying ?next=
+auth.login_view = "/login"
+r2 = guarded(anon)
+check("login_view redirects", r2["status"], 302)
+check("redirect targets login_view", startsWith(r2["headers"]["Location"], "/login?next="), true)
+check("redirect preserves next", indexOf(r2["headers"]["Location"], "%2Fdash") != -1, true)
+auth.login_view = nil
+
+# --- roles_required ---------------------------------------------------------
+adminOnly = auth.roles_required(["admin"], |req| { give "ADMIN AREA" })
+check("roles_required admits admin", adminOnly(member), "ADMIN AREA")
+
+bob = { "session": {}, "path": "/admin", "method": "GET", "headers": {}, "form": {} }
+auth.login_user(bob, 8)
+check("roles_required forbids wrong role", adminOnly(bob)["status"], 403)
+check("roles_required blocks anonymous", adminOnly(anon)["status"], 401)
+
+# --- CSRF -------------------------------------------------------------------
+c = { "session": {}, "path": "/x", "method": "POST", "headers": {}, "form": {} }
+tok = csrf_token(c)
+check("csrf_token is long enough", len(tok) >= 32, true)
+check("csrf_token is stable within a session", csrf_token(c), tok)
+
+c2 = { "session": {}, "path": "/x", "method": "POST", "headers": {}, "form": {} }
+check("csrf_token differs per session", csrf_token(c2) != tok, true)
+
+check("csrf rejects a missing token", csrf_valid(c), false)
+c["form"]["_csrf"] = tok
+check("csrf accepts the form field", csrf_valid(c), true)
+c["form"]["_csrf"] = tok + "x"
+check("csrf rejects a tampered token", csrf_valid(c), false)
+dictRemove(c["form"], "_csrf")
+c["headers"]["x-csrf-token"] = tok
+check("csrf accepts the header", csrf_valid(c), true)
+
+# Fail closed: no token in the session means nothing to compare against.
+c3 = { "session": {}, "path": "/x", "method": "POST", "headers": {}, "form": {"_csrf": "anything"} }
+check("csrf fails closed with no session token", csrf_valid(c3), false)
+
+# Rotating the session must invalidate the old CSRF token.
+c4 = { "session": {}, "path": "/x", "method": "POST", "headers": {}, "form": {} }
+old = csrf_token(c4)
+auth.login_user(c4, 7)
+check("login clears the pre-login csrf token", csrf_token(c4) != old, true)
+
+# --- csrf_protect middleware ------------------------------------------------
+mw = csrf_protect()
+g = { "session": {}, "path": "/x", "method": "GET", "headers": {}, "form": {} }
+check("csrf_protect ignores GET", typeOf(mw(g, {})), "nil")
+
+p = { "session": {}, "path": "/x", "method": "POST", "headers": {}, "form": {} }
+check("csrf_protect blocks unverified POST", mw(p, {})["status"], 403)
+t = csrf_token(p)
+p["form"]["_csrf"] = t
+check("csrf_protect passes verified POST", typeOf(mw(p, {})), "nil")
+
+out ""
+out "========================================"
+out " passed: " + str(passes) + "   failed: " + str(fails)
+out "========================================"
