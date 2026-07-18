@@ -1,0 +1,125 @@
+// ============================================================================
+// eztaskschd / manager.ez -- Tasks and Scheduler Models
+// ============================================================================
+use "csv" as csv
+use "runner.ez"
+use "types.ez"
+
+// Represents a queried Windows Scheduled Task.
+export model ScheduledTask {
+    init(scheduler, details) {
+        self.scheduler = scheduler
+        self.name = details["TaskName"]
+        self.nextRunTime = details["Next Run Time"]
+        self.status = details["Status"]
+        self.lastRunTime = details["Last Run Time"]
+        self.lastResult = details["Last Result"]
+        self.creator = details["Author"]
+        self.rawDetails = details
+    }
+    
+    // Runs the task immediately.
+    task run() {
+        give self.scheduler.runTask(self.name)
+    }
+    
+    // Ends the task if it is running.
+    task end() {
+        give self.scheduler.endTask(self.name)
+    }
+    
+    // Deletes the task from Windows Task Scheduler.
+    task delete() {
+        give self.scheduler.delete(self.name)
+    }
+    
+    // Refresh task details from the scheduler.
+    task refresh() {
+        updated = self.scheduler.query(self.name)
+        when updated {
+            self.nextRunTime = updated.nextRunTime
+            self.status = updated.status
+            self.lastRunTime = updated.lastRunTime
+            self.lastResult = updated.lastResult
+            self.rawDetails = updated.rawDetails
+        }
+        give self
+    }
+}
+
+// Main Scheduler interface
+export model TaskScheduler {
+    init() {}
+    
+    // Creates a new scheduled task.
+    // Supports triggers, privilege levels, and credentials.
+    // Options:
+    //   runLevel: "highest" or "limited" (defaults to "limited")
+    //   user: Specific user under which to execute task (e.g. "SYSTEM")
+    //   password: Password for the user
+    task create(name, action, trigger = nil, options = nil) {
+        args = ["/Create", "/TN", Runner.escape(name), "/TR", Runner.escape(action)]
+        
+        when typeOf(trigger) != "nil" {
+            triggerArgs = Trigger.toArgs(trigger)
+            get a in triggerArgs {
+                push(args, a)
+            }
+        }
+        
+        // Handle options
+        when typeOf(options) == "dictionary" {
+            when options["runLevel"] == "highest" {
+                push(args, "/RL")
+                push(args, "HIGHEST")
+            }
+            when options["user"] {
+                push(args, "/RU")
+                push(args, Runner.escape(options["user"]))
+                when options["password"] {
+                    push(args, "/RP")
+                    push(args, Runner.escape(options["password"]))
+                }
+            }
+        }
+        
+        // Force overwrite if exists
+        push(args, "/F")
+        
+        give Runner.run(args)
+    }
+    
+    // Deletes a task by name.
+    task delete(name) {
+        args = ["/Delete", "/TN", Runner.escape(name), "/F"]
+        give Runner.run(args)
+    }
+    
+    // Runs a task by name.
+    task runTask(name) {
+        args = ["/Run", "/TN", Runner.escape(name)]
+        give Runner.run(args)
+    }
+    
+    // Ends a running task by name.
+    task endTask(name) {
+        args = ["/End", "/TN", Runner.escape(name)]
+        give Runner.run(args)
+    }
+    
+    // Queries information about a task by name.
+    // Returns a ScheduledTask instance, or throws TaskNotFoundError.
+    task query(name) {
+        args = ["/Query", "/TN", Runner.escape(name), "/FO", "CSV"]
+        
+        output = Runner.run(args)
+        
+        // Parse using native CSV library
+        records = csv.parse(output)
+        when len(records) > 0 {
+            give ScheduledTask(self, records[0])
+        }
+        
+        throw TaskNotFoundError(name)
+    }
+}

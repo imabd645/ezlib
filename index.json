@@ -1153,6 +1153,25 @@
       ],
       "description": "SQLite for EZ over pure FFI -- prepared statements, transactions, migrations. No C++.",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "taskschd",
+      "folder": "eztaskschd",
+      "latest": "1.1.0",
+      "versions": [
+        {
+          "version": "1.1.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "eztaskschd",
+          "dependencies": {
+            "os": "1.0.0",
+            "csv": "1.0.0"
+          }
+        }
+      ],
+      "description": "Production-ready Windows Task Scheduler library for EZ.",
+      "author": "Antigravity"
     }
   ]
 }
