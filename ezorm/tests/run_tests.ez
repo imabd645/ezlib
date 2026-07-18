@@ -1,0 +1,374 @@
+# ============================================================================
+# EZ ORM — Test Suite
+#
+# Run with:   ez orm/tests/run_tests.ez
+#
+# Section 1 is pure logic and needs no database.
+# Section 2 exercises the SQLite driver end to end and is skipped when
+# sqlite3.dll is not available.
+# ============================================================================
+
+use "orm/sql.ez"
+use "orm/errors.ez"
+use "orm/column.ez"
+use "orm/engine.ez"
+use "orm/query.ez"
+use "orm/session.ez"
+use "orm/drivers/sqlite.ez"
+
+passed = 0
+failed = 0
+failures = []
+
+task check(name, cond) {
+    when cond {
+        passed = passed + 1
+    } other {
+        failed = failed + 1
+        push(failures, name)
+        out "  FAIL: " + name
+    }
+}
+
+task checkEq(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    } other {
+        failed = failed + 1
+        push(failures, name)
+        out "  FAIL: " + name + " — expected <" + str(expected) + "> got <" + str(actual) + ">"
+    }
+}
+
+## Asserts that running `body` throws.
+task checkThrows(name, body) {
+    threw = false
+    try {
+        body()
+    } catch e {
+        threw = true
+    }
+    check(name, threw)
+}
+
+out "== Section 1: SQL helpers =="
+
+# ── quoteIdent ────────────────────────────────────────────────────
+checkEq("quoteIdent sqlite", quoteIdent("order", "sqlite"), "\"order\"")
+checkEq("quoteIdent mysql", quoteIdent("order", "mysql"), "`order`")
+# quoteIdent rejects anything that is not a plain identifier rather than
+# attempting to escape it, so a quote-bearing name never reaches the SQL.
+checkThrows("quoteIdent rejects embedded quote", | | { quoteIdent("a\"b", "sqlite") })
+checkThrows("quoteIdent rejects backtick", | | { quoteIdent("a`b", "mysql") })
+checkThrows("quoteIdent rejects semicolon", | | { quoteIdent("a;DROP TABLE t", "sqlite") })
+checkThrows("quoteIdent rejects empty", | | { quoteIdent("", "sqlite") })
+
+# ── isPlainIdent ──────────────────────────────────────────────────
+check("isPlainIdent accepts normal", isPlainIdent("user_id"))
+check("isPlainIdent accepts leading underscore", isPlainIdent("_x1"))
+check("isPlainIdent rejects leading digit", not isPlainIdent("1abc"))
+check("isPlainIdent rejects space", not isPlainIdent("a b"))
+check("isPlainIdent rejects semicolon", not isPlainIdent("a;DROP"))
+check("isPlainIdent rejects empty", not isPlainIdent(""))
+check("isPlainIdent rejects nil", not isPlainIdent(nil))
+
+# ── escapeLiteral ─────────────────────────────────────────────────
+checkEq("escapeLiteral doubles quote", escapeLiteral("O'Brien"), "'O''Brien'")
+
+# ── splitPlaceholders ─────────────────────────────────────────────
+# Regression: the old scanner counted every '?' including ones inside string
+# literals, shifting all later parameters by one.
+r1 = splitPlaceholders("SELECT * FROM t WHERE a = ? AND b = ?")
+checkEq("scanner counts plain placeholders", r1["count"], 2)
+
+r2 = splitPlaceholders("SELECT * FROM t WHERE title = 'what?' AND a = ?")
+checkEq("scanner ignores ? inside single quotes", r2["count"], 1)
+
+r3 = splitPlaceholders("SELECT * FROM t WHERE a = ? -- trailing ? comment")
+checkEq("scanner ignores ? in line comment", r3["count"], 1)
+
+r4 = splitPlaceholders("SELECT /* ? block ? */ * FROM t WHERE a = ?")
+checkEq("scanner ignores ? in block comment", r4["count"], 1)
+
+r5 = splitPlaceholders("SELECT * FROM t WHERE a = 'it''s ok?' AND b = ?")
+checkEq("scanner handles doubled quote escape", r5["count"], 1)
+
+r6 = splitPlaceholders("SELECT * FROM \"we?ird\" WHERE a = ?")
+checkEq("scanner ignores ? in quoted identifier", r6["count"], 1)
+
+r7 = splitPlaceholders("SELECT 1")
+checkEq("scanner handles zero placeholders", r7["count"], 0)
+checkEq("segments is count+1", len(r7["segments"]), 1)
+
+# ── checkArity ────────────────────────────────────────────────────
+checkThrows("checkArity rejects too few params", |
+    | { checkArity("a = ?", [], 1) })
+checkThrows("checkArity rejects too many params", |
+    | { checkArity("a = ?", [1, 2], 1) })
+
+# ── coerceValue ───────────────────────────────────────────────────
+checkEq("coerce int from string", coerceValue("42", "integer"), 42)
+checkEq("coerce float from string", coerceValue("1.5", "float"), 1.5)
+checkEq("coerce bool from 1", coerceValue(1, "bool"), true)
+checkEq("coerce bool from 0", coerceValue(0, "bool"), false)
+checkEq("coerce bool from \"1\"", coerceValue("1", "bool"), true)
+checkEq("coerce bool from \"t\"", coerceValue("t", "bool"), true)
+checkEq("coerce nil stays nil", coerceValue(nil, "integer"), nil)
+checkEq("coerce string passthrough", coerceValue("hi", "string"), "hi")
+
+out "== Section 2: Column DDL =="
+
+c1 = Column("integer", primaryKey=true, autoIncrement=true)
+checkEq("pk autoincrement sqlite", c1.toSQL("sqlite"), "INTEGER PRIMARY KEY AUTOINCREMENT")
+checkEq("pk autoincrement postgres", c1.toSQL("postgres"), "SERIAL PRIMARY KEY")
+
+c2 = Column("string", nullable=false)
+checkEq("string not null sqlite", c2.toSQL("sqlite"), "TEXT NOT NULL")
+checkEq("string not null mysql", c2.toSQL("mysql"), "VARCHAR(255) NOT NULL")
+
+# Regression: a string default containing an apostrophe used to produce broken
+# (and injectable) DDL.
+c3 = Column("string", default="O'Brien")
+checkEq("string default is escaped", c3.toSQL("sqlite"), "TEXT DEFAULT 'O''Brien'")
+
+c4 = Column("bool", default=true)
+checkEq("bool default postgres", c4.toSQL("postgres"), "BOOLEAN DEFAULT TRUE")
+checkEq("bool default sqlite", c4.toSQL("sqlite"), "INTEGER DEFAULT 1")
+
+# Regression: date/datetime used to fall through to TEXT on every dialect.
+c5 = Column("datetime")
+checkEq("datetime postgres", c5.toSQL("postgres"), "TIMESTAMP")
+checkEq("datetime mysql", c5.toSQL("mysql"), "DATETIME")
+
+checkThrows("unknown column type is rejected", | | { Column("wibble").toSQL("sqlite") })
+checkThrows("missing column type is rejected", | | { Column(nil) })
+
+out "== Section 3: SQLite integration =="
+
+# Models used by the integration tests.
+model TUser {
+    init() {
+        self.id     = Column("integer", primaryKey=true, autoIncrement=true)
+        self.name   = Column("string", nullable=false)
+        self.age    = Column("integer")
+        self.active = Column("bool", default=true)
+    }
+}
+
+model TPost {
+    init() {
+        self.id      = Column("integer", primaryKey=true, autoIncrement=true)
+        self.title   = Column("string", nullable=false, index=true)
+        self.user_id = Column("integer", foreignKey="TUser.id")
+    }
+}
+
+# A model whose column name is a SQL reserved word.
+model TOrder {
+    init() {
+        self.id    = Column("integer", primaryKey=true, autoIncrement=true)
+        self.order = Column("integer")
+        self.group = Column("string")
+    }
+}
+
+# Never registered — used to assert a clear error from query().
+model TGhost {
+    init() {
+        self.id = Column("integer", primaryKey=true)
+    }
+}
+
+# Invalid schemas, used to assert registration-time validation.
+model TNoPk {
+    init() {
+        self.name = Column("string")
+    }
+}
+
+model TNoCols {
+    init() {
+        self.name = "not a column"
+    }
+}
+
+driverOk = true
+engine = nil
+try {
+    engine = Engine(SQLiteDriver(":memory:"))
+} catch e {
+    driverOk = false
+    out "  SKIP: SQLite driver unavailable (" + str(e) + ")"
+}
+
+when driverOk {
+    checkEq("engine resolves dialect", engine.dialect, "sqlite")
+
+    engine.register(TUser)
+    engine.register(TPost)
+    engine.register(TOrder)
+    engine.createAll()
+
+    session = Session(engine)
+
+    # ── Insert + autoincrement pk ─────────────────────────────────
+    u = TUser()
+    u.name = "Abdullah"
+    u.age = 30
+    session.add(u)
+    session.commit()
+    check("insert assigns autoincrement pk", u.id != nil and typeOf(u.id) != "instance")
+
+    # ── Regression: add() twice must not insert twice ─────────────
+    u2 = TUser()
+    u2.name = "Dup"
+    session.add(u2)
+    session.add(u2)
+    session.commit()
+    checkEq("duplicate add inserts once", session.query(TUser).filter("name", "=", "Dup").count(), 1)
+
+    # ── Query + type coercion ─────────────────────────────────────
+    found = session.query(TUser).filter("name", "=", "Abdullah").first()
+    check("first() returns an instance", found != nil)
+    checkEq("integer column round-trips as integer", found.age, 30)
+    # Regression: a bool column used to read back as SQLite's 0/1.
+    checkEq("bool column round-trips as boolean", found.active, true)
+
+    # ── Regression: first() must not mutate the query ─────────────
+    q = session.query(TUser)
+    q.first()
+    check("first() does not pin LIMIT 1", len(q.all()) >= 2)
+
+    # ── Regression: count() must ignore limit/order ───────────────
+    qc = session.query(TUser).limit(1).orderBy("name", "DESC")
+    checkEq("count ignores LIMIT", qc.count(), 2)
+
+    # ── Identifier injection is rejected ──────────────────────────
+    checkThrows("orderBy rejects unknown column", | | {
+        session.query(TUser).orderBy("id; DROP TABLE TUser--")
+    })
+    checkThrows("orderBy rejects bad direction", | | {
+        session.query(TUser).orderBy("id", "ASC; DROP TABLE TUser--")
+    })
+    checkThrows("filter rejects unknown column", | | {
+        session.query(TUser).filter("1=1 OR 1=1--", "=", 1)
+    })
+    checkThrows("filter rejects unknown operator", | | {
+        session.query(TUser).filter("age", "; DROP TABLE", 1)
+    })
+
+    # ── Values containing quotes are safe ─────────────────────────
+    tricky = TUser()
+    tricky.name = "Robert'); DROP TABLE TUser;--"
+    session.add(tricky)
+    session.commit()
+    checkEq("quote-laden value stored verbatim",
+        session.query(TUser).filter("name", "=", "Robert'); DROP TABLE TUser;--").count(), 1)
+
+    # ── IN / IS NULL operators ────────────────────────────────────
+    checkEq("IN operator", session.query(TUser).filter("name", "IN", ["Abdullah", "Dup"]).count(), 2)
+    check("filterNull works", session.query(TUser).filterNull("age", true).count() >= 1)
+
+    # ── Update path ───────────────────────────────────────────────
+    found.age = 31
+    session.add(found)
+    session.commit()
+    refetched = session.get(TUser, found.id)
+    checkEq("update persists", refetched.age, 31)
+
+    # ── Bulk update / delete guards ───────────────────────────────
+    checkThrows("unfiltered delete is refused", | | { session.query(TUser).delete() })
+    checkThrows("unfiltered update is refused", | | { session.query(TUser).update({"age": 1}) })
+
+    n = session.query(TUser).filter("name", "=", "Dup").delete()
+    checkEq("filtered delete reports rows", n, 1)
+
+    # ── Regression: begin() then commit() must not double-BEGIN ───
+    ok = true
+    try {
+        session.begin()
+        b = TUser()
+        b.name = "InTx"
+        session.add(b)
+        session.commit()
+    } catch e {
+        ok = false
+        out "    (" + str(e) + ")"
+    }
+    check("explicit begin + commit does not double-BEGIN", ok)
+    checkEq("explicit transaction committed", session.query(TUser).filter("name", "=", "InTx").count(), 1)
+
+    # ── Rollback discards ─────────────────────────────────────────
+    session.begin()
+    r = TUser()
+    r.name = "Rolled"
+    session.add(r)
+    session.rollback()
+    checkEq("rollback discards staged rows", session.query(TUser).filter("name", "=", "Rolled").count(), 0)
+
+    # ── Batch insert ──────────────────────────────────────────────
+    batch = []
+    repeat i = 0 to 49 {
+        bu = TUser()
+        bu.name = "batch" + str(i)
+        push(batch, bu)
+    }
+    session.addAll(batch)
+    session.commit()
+    checkEq("batch insert wrote every row", session.query(TUser).filter("name", "LIKE", "batch%").count(), 50)
+
+    # ── Reserved-word identifiers are quoted ──────────────────────
+    o = TOrder()
+    o.order = 5
+    o.group = "g"
+    session.add(o)
+    session.commit()
+    checkEq("reserved-word columns work", session.query(TOrder).filter("order", "=", 5).count(), 1)
+
+    # ── Regression: multi-statement SQL is reported, not silent ───
+    checkThrows("multi-statement execute is rejected", | | {
+        engine.driver.execute("SELECT 1; SELECT 2", [])
+    })
+
+    # ── Regression: parameter arity mismatch is caught ────────────
+    checkThrows("arity mismatch is caught", | | {
+        engine.driver.query("SELECT * FROM TUser WHERE name = ? AND age = ?", ["x"])
+    })
+
+    # ── Unregistered model is a clear error ───────────────────────
+    # (TGhost / TNoPk / TNoCols are declared at the top of this file.)
+    checkThrows("unregistered model is rejected", | | { session.query(TGhost) })
+
+    # ── Schema validation ─────────────────────────────────────────
+    checkThrows("model without primary key is rejected", | | { engine.register(TNoPk) })
+    checkThrows("model without columns is rejected", | | { engine.register(TNoCols) })
+
+    # ── Re-registering the same class is a no-op, not an error ────
+    reregOk = true
+    try {
+        engine.register(TUser)
+    } catch e {
+        reregOk = false
+    }
+    check("re-registering the same model is a no-op", reregOk)
+
+    # ── Bad table name is rejected ────────────────────────────────
+    checkThrows("invalid table name is rejected", | | {
+        engine.register(TGhost, {"table": "users; DROP TABLE TUser--"})
+    })
+
+    session.close()
+    engine.close()
+}
+
+out ""
+out "================================"
+out "passed: " + str(passed)
+out "failed: " + str(failed)
+when failed > 0 {
+    out "--------------------------------"
+    get f in failures {
+        out "  - " + f
+    }
+}
+out "================================"

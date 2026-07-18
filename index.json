@@ -526,8 +526,15 @@
         "migration"
       ],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.0.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezorm",
+          "dependencies": {}
+        },
         {
           "version": "1.2.0",
           "main": "orm.ez",

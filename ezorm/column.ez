@@ -3,13 +3,21 @@
 # Defines column schema for model-to-table mapping
 # ============================================================================
 
+use "orm/sql.ez"
+use "orm/errors.ez"
+
 export model Column {
-    init(type, primaryKey=false, autoIncrement=false, unique=false, nullable=true, default=nil, foreignKey=nil) {
+    init(type, primaryKey=false, autoIncrement=false, unique=false, nullable=true, default=nil, foreignKey=nil, index=false) {
         when primaryKey == nil { primaryKey = false }
         when autoIncrement == nil { autoIncrement = false }
         when unique == nil { unique = false }
         when nullable == nil { nullable = true }
-        
+        when index == nil { index = false }
+
+        when type == nil or type == "" {
+            throw SchemaError("Column requires a type, e.g. Column(\"integer\").")
+        }
+
         self.type = type
         self.primaryKey = primaryKey
         self.autoIncrement = autoIncrement
@@ -17,6 +25,7 @@ export model Column {
         self.nullable = nullable
         self.default = default
         self.foreignKey = foreignKey
+        self.index = index
         self._isColumn = true
     }
 
@@ -24,16 +33,31 @@ export model Column {
         give "Column(" + self.type + ")"
     }
 
-    task toSQL() {
-        t = self._mapType()
+    task toSQL(dialect="sqlite") {
+        when dialect == nil { dialect = "sqlite" }
+
+        # Postgres auto-increment uses the SERIAL pseudo-type instead of INTEGER
+        when dialect == "postgres" and self.autoIncrement {
+            parts = ["SERIAL"]
+            when self.primaryKey { push(parts, "PRIMARY KEY") }
+            give join(parts, " ")
+        }
+
+        t = self._mapType(dialect)
         parts = [t]
 
         when self.primaryKey {
             push(parts, "PRIMARY KEY")
         }
+
         when self.autoIncrement {
-            push(parts, "AUTOINCREMENT")
+            when dialect == "sqlite" {
+                push(parts, "AUTOINCREMENT")
+            } other when dialect == "mysql" {
+                push(parts, "AUTO_INCREMENT")
+            }
         }
+
         when self.unique and not self.primaryKey {
             push(parts, "UNIQUE")
         }
@@ -41,8 +65,19 @@ export model Column {
             push(parts, "NOT NULL")
         }
         when self.default != nil {
-            when type(self.default) == "string" {
-                push(parts, "DEFAULT '" + self.default + "'")
+            # A string default used to be concatenated raw, so a value containing
+            # an apostrophe produced broken (and injectable) DDL. escapeLiteral
+            # quotes and doubles any embedded quote.
+            when typeOf(self.default) == "string" {
+                push(parts, "DEFAULT " + escapeLiteral(self.default))
+            } other when typeOf(self.default) == "bool" {
+                when dialect == "postgres" {
+                    when self.default { push(parts, "DEFAULT TRUE") }
+                    other { push(parts, "DEFAULT FALSE") }
+                } other {
+                    when self.default { push(parts, "DEFAULT 1") }
+                    other { push(parts, "DEFAULT 0") }
+                }
             } other {
                 push(parts, "DEFAULT " + str(self.default))
             }
@@ -51,23 +86,48 @@ export model Column {
         give join(parts, " ")
     }
 
-    task _mapType() {
+    task _mapType(dialect) {
         t = lower(self.type)
         when t == "integer" or t == "int" {
+            when dialect == "postgres" { give "INTEGER" }
+            when dialect == "mysql" { give "INT" }
+            give "INTEGER"
+        }
+        when t == "bigint" or t == "long" {
+            when dialect == "mysql" { give "BIGINT" }
+            when dialect == "postgres" { give "BIGINT" }
             give "INTEGER"
         }
         when t == "string" or t == "text" or t == "str" {
+            when dialect == "mysql" { give "VARCHAR(255)" } # Default for MySQL to support indexing properly
             give "TEXT"
         }
         when t == "float" or t == "real" or t == "double" or t == "number" {
+            when dialect == "mysql" { give "DOUBLE" }
+            when dialect == "postgres" { give "DOUBLE PRECISION" }
             give "REAL"
         }
         when t == "bool" or t == "boolean" {
+            when dialect == "postgres" { give "BOOLEAN" }
+            when dialect == "mysql" { give "TINYINT(1)" }
             give "INTEGER"
         }
         when t == "blob" or t == "bytes" {
+            when dialect == "postgres" { give "BYTEA" }
             give "BLOB"
         }
-        give "TEXT"
+        # Date/time types were previously unmapped and silently fell through to
+        # TEXT on every dialect, losing native date semantics and indexing.
+        when t == "date" {
+            when dialect == "sqlite" { give "TEXT" }
+            give "DATE"
+        }
+        when t == "datetime" or t == "timestamp" {
+            when dialect == "postgres" { give "TIMESTAMP" }
+            when dialect == "mysql" { give "DATETIME" }
+            give "TEXT"
+        }
+
+        throw SchemaError("Unknown column type '" + self.type + "'. Supported: integer, bigint, string, float, bool, blob, date, datetime.")
     }
 }

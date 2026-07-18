@@ -4,30 +4,41 @@
 # ============================================================================
 
 use "orm/errors.ez"
+use "orm/sql.ez"
 
 export model SQLiteDriver {
-    init(path) {
+    init(path, busyTimeoutMs=5000, cacheSize=64) {
+        # Every driver must declare its dialect; the engine reads this to pick
+        # type mappings and identifier quoting. Its absence here used to make
+        # the engine fall back to sqlite by accident rather than by design.
+        self.dialect = "sqlite"
+
         # Load SQLite DLL
         self._lib = os_load_lib("sqlite3.dll")
-        when self._lib == 0 or type(self._lib) == "nil" {
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
             self._lib = os_load_lib("libsqlite3-0.dll")
         }
-        when self._lib == 0 or type(self._lib) == "nil" {
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
             self._lib = os_load_lib("dlls\\libsqlite3-0.dll")
         }
-        when self._lib == 0 or type(self._lib) == "nil" {
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
             throw DriverError("sqlite3.dll or libsqlite3-0.dll not found. Place it in your project or system PATH.")
         }
 
         # ── Core API ────────────────────────────────────────────────
         self._openApi        = os_get_func(self._lib, "sqlite3_open")
-        self._closeApi       = os_get_func(self._lib, "sqlite3_close")
+        self._closeApi       = os_get_func(self._lib, "sqlite3_close_v2")
+        when self._closeApi == 0 or typeOf(self._closeApi) == "nil" {
+            # close_v2 arrived in SQLite 3.7.14; fall back on older builds.
+            self._closeApi   = os_get_func(self._lib, "sqlite3_close")
+        }
         self._prepare        = os_get_func(self._lib, "sqlite3_prepare_v2")
         self._step           = os_get_func(self._lib, "sqlite3_step")
         self._finalize       = os_get_func(self._lib, "sqlite3_finalize")
         self._reset          = os_get_func(self._lib, "sqlite3_reset")
         self._clearBindings  = os_get_func(self._lib, "sqlite3_clear_bindings")
         self._errmsg         = os_get_func(self._lib, "sqlite3_errmsg")
+        self._busyTimeout    = os_get_func(self._lib, "sqlite3_busy_timeout")
 
         # ── Bind API ───────────────────────────────────────────────
         self._bindText       = os_get_func(self._lib, "sqlite3_bind_text")
@@ -35,6 +46,7 @@ export model SQLiteDriver {
         self._bindDouble     = os_get_func(self._lib, "sqlite3_bind_double")
         self._bindBlob       = os_get_func(self._lib, "sqlite3_bind_blob")
         self._bindNull       = os_get_func(self._lib, "sqlite3_bind_null")
+        self._bindParamCount = os_get_func(self._lib, "sqlite3_bind_parameter_count")
 
         # ── Column API ─────────────────────────────────────────────
         self._columnCount    = os_get_func(self._lib, "sqlite3_column_count")
@@ -50,6 +62,14 @@ export model SQLiteDriver {
         self._lastInsertRowid = os_get_func(self._lib, "sqlite3_last_insert_rowid")
         self._changesApi      = os_get_func(self._lib, "sqlite3_changes")
 
+        # Prepared-statement cache: sqlite3_prepare_v2 parses and plans the SQL
+        # on every call, and an ORM issues the same handful of statements over
+        # and over. Cached statements are reset and re-bound instead.
+        self._cache = {}
+        self._cacheOrder = []
+        self._cacheSize = cacheSize
+        self._handle = 0
+
         # ── Open Database ──────────────────────────────────────────
         outPtr = os_alloc(8)
         rc = os_call(self._openApi, "int", path, outPtr)
@@ -61,6 +81,12 @@ export model SQLiteDriver {
             throw DriverError("Failed to open database '" + path + "': " + msg)
         }
 
+        # Wait rather than failing instantly when another connection holds the
+        # write lock. Without this, any concurrent writer gets SQLITE_BUSY.
+        when self._busyTimeout != 0 and typeOf(self._busyTimeout) != "nil" {
+            os_call(self._busyTimeout, "int", self._handle, busyTimeoutMs)
+        }
+
         # Enable WAL mode for better concurrent performance
         self.execute("PRAGMA journal_mode=WAL", [])
         # Enable foreign keys
@@ -70,28 +96,33 @@ export model SQLiteDriver {
     # ── Driver Interface ──────────────────────────────────────────
 
     task execute(sql, params) {
-        stmt = self._prepareStmt(sql)
-        self._bindParams(stmt, params)
-
-        rc = os_call(self._step, "int", stmt)
-        when rc != 101 and rc != 100 {
-            msg = self._getError()
-            os_call(self._finalize, "int", stmt)
-            throw DriverError("Execute failed: " + msg)
+        stmt = self._acquire(sql)
+        try {
+            self._bindParams(stmt, params)
+            rc = os_call(self._step, "int", stmt)
+            when rc != 101 and rc != 100 {
+                msg = self._getError()
+                throw DriverError("Execute failed for SQL '" + sql + "': " + msg)
+            }
+        } finally {
+            self._release(sql, stmt)
         }
-        os_call(self._finalize, "int", stmt)
     }
 
     task query(sql, params) {
-        stmt = self._prepareStmt(sql)
-        self._bindParams(stmt, params)
-
+        stmt = self._acquire(sql)
         results = []
-        while self._stepRow(stmt) {
-            row = self._readRow(stmt)
-            push(results, row)
+        try {
+            self._bindParams(stmt, params)
+            while self._stepRow(stmt) {
+                push(results, self._readRow(stmt))
+            }
+        } finally {
+            # Previously the finalize sat after the loop, so a mid-iteration
+            # error leaked the statement — and with it an open read
+            # transaction, which under WAL blocks checkpointing indefinitely.
+            self._release(sql, stmt)
         }
-        os_call(self._finalize, "int", stmt)
         give results
     }
 
@@ -116,16 +147,91 @@ export model SQLiteDriver {
     }
 
     task close() {
-        when self._handle {
+        when self._handle != 0 {
+            # sqlite3_close refuses to close while any statement is still
+            # live, so the cache must be drained first.
+            self._flushCache()
             os_call(self._closeApi, "int", self._handle)
             self._handle = 0
         }
     }
 
+    # ── Statement Cache ───────────────────────────────────────────
+
+    ## Returns a ready-to-bind statement for this SQL, preparing it only on a
+    ## cache miss. The statement is REMOVED from the cache while in use, so a
+    ## re-entrant call with the same SQL prepares a second one rather than
+    ## sharing (and corrupting) a statement that is mid-iteration.
+    task _acquire(sql) {
+        when has_key(self._cache, sql) {
+            stmt = self._cache[sql]
+            dictRemove(self._cache, sql)
+            idx = indexOf(self._cacheOrder, sql)
+            when idx != -1 {
+                remove(self._cacheOrder, idx)
+            }
+            os_call(self._reset, "int", stmt)
+            os_call(self._clearBindings, "int", stmt)
+            give stmt
+        }
+        give self._prepareStmt(sql)
+    }
+
+    ## Returns a statement to the cache, or finalizes it when the cache is full.
+    task _release(sql, stmt) {
+        when stmt == 0 { give nil }
+
+        when self._cacheSize <= 0 {
+            os_call(self._finalize, "int", stmt)
+            give nil
+        }
+
+        when has_key(self._cache, sql) {
+            # A re-entrant call already re-cached this SQL; finalize the spare
+            # rather than leaking it.
+            os_call(self._finalize, "int", stmt)
+            give nil
+        }
+
+        # Evict the oldest statement when at capacity.
+        when len(self._cacheOrder) >= self._cacheSize {
+            oldest = self._cacheOrder[0]
+            remove(self._cacheOrder, 0)
+            when has_key(self._cache, oldest) {
+                os_call(self._finalize, "int", self._cache[oldest])
+                dictRemove(self._cache, oldest)
+            }
+        }
+
+        os_call(self._reset, "int", stmt)
+        os_call(self._clearBindings, "int", stmt)
+        self._cache[sql] = stmt
+        push(self._cacheOrder, sql)
+    }
+
+    task _flushCache() {
+        get k in keys(self._cache) {
+            os_call(self._finalize, "int", self._cache[k])
+        }
+        self._cache = {}
+        self._cacheOrder = []
+    }
+
     # ── Internal Helpers ──────────────────────────────────────────
 
     task _prepareStmt(sql) {
+        # prepare_v2 compiles only the FIRST statement of a multi-statement
+        # string and silently ignores the rest — a data-integrity trap. The
+        # check is done in EZ rather than via the pzTail out-parameter, because
+        # pzTail points into the temporary buffer the FFI layer marshals this
+        # string into and is not guaranteed to stay valid after the call.
+        when hasMultipleStatements(sql) {
+            throw DriverError("Multiple SQL statements passed in one call; only the first would run. Split them into separate execute() calls. SQL: '" + sql + "'")
+        }
+
         stmtPtr = os_alloc(8)
+        os_write_uint64(stmtPtr, 0, 0)
+
         rc = os_call(self._prepare, "int", self._handle, sql, -1, stmtPtr, 0)
 
         when rc != 0 {
@@ -136,11 +242,32 @@ export model SQLiteDriver {
 
         handle = os_read_uint64(stmtPtr, 0)
         os_free(stmtPtr)
+
+        when handle == 0 {
+            throw DriverError("Statement compiled to nothing (empty or comment-only SQL): '" + sql + "'")
+        }
+
         give handle
     }
 
     task _bindParams(stmt, params) {
-        when params == nil or len(params) == 0 {
+        supplied = 0
+        when params != nil {
+            supplied = len(params)
+        }
+
+        # An unbound SQLite parameter silently binds as NULL, so a caller that
+        # passes too few values gets wrong results rather than an error. The
+        # statement itself is the authoritative placeholder count — more
+        # reliable than re-scanning the SQL text.
+        when self._bindParamCount != 0 and typeOf(self._bindParamCount) != "nil" {
+            expected = os_call(self._bindParamCount, "int", stmt)
+            when expected != supplied {
+                throw DriverError("SQL parameter mismatch: statement expects " + str(expected) + " placeholder(s) but " + str(supplied) + " value(s) supplied.")
+            }
+        }
+
+        when supplied == 0 {
             give nil
         }
 
@@ -150,16 +277,20 @@ export model SQLiteDriver {
             t = typeOf(val)
 
             when t == "string" {
+                # nBytes = -1 (read to NUL), destructor = -1 (SQLITE_TRANSIENT,
+                # i.e. SQLite copies the buffer before returning).
                 os_call(self._bindText, "int", stmt, idx, val, -1, -1)
             } other when t == "integer" {
                 os_call(self._bindInt, "int", stmt, idx, val)
             } other when t == "float" {
-                os_call(self._bindDouble, "float", stmt, idx, val)
+                # sqlite3_bind_double returns int, not double; declaring the
+                # return as "float" made the FFI layer read the wrong register.
+                os_call(self._bindDouble, "int", stmt, idx, val)
             } other when t == "buffer" {
                 os_call(self._bindBlob, "int", stmt, idx, val, len(val), -1)
             } other when t == "nil" {
                 os_call(self._bindNull, "int", stmt, idx)
-            } other when t == "boolean" {
+            } other when t == "bool" {
                 boolVal = 0
                 when val { boolVal = 1 }
                 os_call(self._bindInt, "int", stmt, idx, boolVal)
@@ -205,7 +336,7 @@ export model SQLiteDriver {
     }
 
     task _getError() {
-        when self._handle {
+        when self._handle != 0 {
             give os_call(self._errmsg, "string", self._handle)
         }
         give "Unknown error"

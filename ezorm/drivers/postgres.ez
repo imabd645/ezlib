@@ -1,0 +1,253 @@
+# ============================================================================
+# EZ ORM — PostgreSQL Driver (FFI)
+# ============================================================================
+
+# This used to be `use "errors.ez"`, which resolves relative to this file —
+# i.e. orm/drivers/errors.ez, a path that does not exist — so DriverError was
+# never defined and the driver could not load at all.
+use "orm/errors.ez"
+use "orm/sql.ez"
+
+export model PostgresDriver {
+    init(connectionString) {
+        self.dialect = "postgres"
+        self._lastChanges = 0
+
+        # Load PostgreSQL DLL
+        self._lib = os_load_lib("libpq.dll")
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
+            throw DriverError("libpq.dll not found. Place it in your project or system PATH.")
+        }
+
+        # ── Core API ────────────────────────────────────────────────
+        self._connectdb = os_get_func(self._lib, "PQconnectdb")
+        self._finish    = os_get_func(self._lib, "PQfinish")
+        self._status    = os_get_func(self._lib, "PQstatus")
+        self._errorMessage = os_get_func(self._lib, "PQerrorMessage")
+
+        self._exec       = os_get_func(self._lib, "PQexec")
+        self._resultStatus = os_get_func(self._lib, "PQresultStatus")
+        self._clear      = os_get_func(self._lib, "PQclear")
+        self._ntuples    = os_get_func(self._lib, "PQntuples")
+        self._nfields    = os_get_func(self._lib, "PQnfields")
+        self._fname      = os_get_func(self._lib, "PQfname")
+        self._getvalue   = os_get_func(self._lib, "PQgetvalue")
+        self._getisnull  = os_get_func(self._lib, "PQgetisnull")
+        self._ftype      = os_get_func(self._lib, "PQftype")
+        self._escapeLiteral = os_get_func(self._lib, "PQescapeLiteral")
+        self._freemem    = os_get_func(self._lib, "PQfreemem")
+        # PQcmdTuples reports the row count of the last INSERT/UPDATE/DELETE.
+        # changes() previously just returned 0, so Query.delete()/update()
+        # always reported zero rows affected on Postgres.
+        self._cmdTuples  = os_get_func(self._lib, "PQcmdTuples")
+
+        # ── Open Database ──────────────────────────────────────────
+        self._conn = os_call(self._connectdb, "ptr", connectionString)
+        when self._conn == 0 {
+            throw DriverError("Failed to allocate a PostgreSQL connection.")
+        }
+
+        status = os_call(self._status, "int", self._conn)
+        when status != 0 { # CONNECTION_OK is 0
+            msg = os_call(self._errorMessage, "string", self._conn)
+            os_call(self._finish, "int", self._conn)
+            self._conn = 0
+            throw DriverError("Failed to connect to PostgreSQL: " + msg)
+        }
+    }
+
+    # ── Driver Interface ──────────────────────────────────────────
+
+    task execute(sql, params) {
+        finalSql = self._interpolate(sql, params)
+        res = os_call(self._exec, "ptr", self._conn, finalSql)
+        when res == 0 {
+            throw DriverError("PQexec returned no result (connection lost?).")
+        }
+
+        status = os_call(self._resultStatus, "int", res)
+
+        # PGRES_COMMAND_OK = 1, PGRES_TUPLES_OK = 2
+        when status != 1 and status != 2 {
+            msg = os_call(self._errorMessage, "string", self._conn)
+            os_call(self._clear, "int", res)
+            throw DriverError("Execute failed for SQL '" + finalSql + "': " + msg)
+        }
+
+        # Must be read before the result is cleared.
+        self._lastChanges = self._readCmdTuples(res)
+        os_call(self._clear, "int", res)
+    }
+
+    task query(sql, params) {
+        finalSql = self._interpolate(sql, params)
+        res = os_call(self._exec, "ptr", self._conn, finalSql)
+        when res == 0 {
+            throw DriverError("PQexec returned no result (connection lost?).")
+        }
+
+        status = os_call(self._resultStatus, "int", res)
+        when status != 2 { # PGRES_TUPLES_OK
+            msg = os_call(self._errorMessage, "string", self._conn)
+            os_call(self._clear, "int", res)
+            throw DriverError("Query failed for SQL '" + finalSql + "': " + msg)
+        }
+
+        self._lastChanges = self._readCmdTuples(res)
+
+        results = []
+        rows = os_call(self._ntuples, "int", res)
+        cols = os_call(self._nfields, "int", res)
+
+        # Column names are fixed for the whole result — read them once instead
+        # of once per row.
+        colNames = []
+        repeat c = 0 to cols - 1 {
+            push(colNames, os_call(self._fname, "string", res, c))
+        }
+
+        colTypes = []
+        repeat c = 0 to cols - 1 {
+            push(colTypes, os_call(self._ftype, "int", res, c))
+        }
+
+        repeat r = 0 to rows - 1 {
+            row = {}
+            repeat c = 0 to cols - 1 {
+                name = colNames[c]
+                isNull = os_call(self._getisnull, "int", res, r, c)
+                when isNull != 0 {
+                    row[name] = nil
+                } other {
+                    val = os_call(self._getvalue, "string", res, r, c)
+                    typeOid = colTypes[c]
+
+                    # Common PostgreSQL OIDs
+                    # 20=int8, 21=int2, 23=int4
+                    # 700=float4, 701=float8, 1700=numeric
+                    # 16=bool
+                    #
+                    # These branches used to call int() and float(), neither of
+                    # which exists in EZ — the numeric builtin is num(). Any
+                    # numeric column would have raised "undefined function".
+                    when typeOid == 20 or typeOid == 21 or typeOid == 23 {
+                        val = num(val)
+                    } other when typeOid == 700 or typeOid == 701 or typeOid == 1700 {
+                        val = num(val)
+                    } other when typeOid == 16 {
+                        val = (val == "t")
+                    }
+
+                    row[name] = val
+                }
+            }
+            push(results, row)
+        }
+        os_call(self._clear, "int", res)
+        give results
+    }
+
+    task lastInsertId() {
+        # LASTVAL() returns the value most recently produced by a sequence in
+        # this session, which is the id of the row just inserted into a table
+        # with a SERIAL primary key. It raises if no sequence has been used
+        # yet, so the failure is contained rather than propagated.
+        try {
+            res = self.query("SELECT LASTVAL() AS lastval", [])
+            when len(res) > 0 {
+                give num(res[0]["lastval"])
+            }
+        } catch e {
+            give 0
+        }
+        give 0
+    }
+
+    task changes() {
+        give self._lastChanges
+    }
+
+    task begin() {
+        self.execute("BEGIN", [])
+    }
+
+    task commit() {
+        self.execute("COMMIT", [])
+    }
+
+    task rollback() {
+        self.execute("ROLLBACK", [])
+    }
+
+    task close() {
+        when self._conn != 0 {
+            os_call(self._finish, "int", self._conn)
+            self._conn = 0
+        }
+    }
+
+    # ── Internal Helpers ──────────────────────────────────────────
+
+    task _readCmdTuples(res) {
+        when self._cmdTuples == 0 or typeOf(self._cmdTuples) == "nil" {
+            give 0
+        }
+        s = os_call(self._cmdTuples, "string", res)
+        when s == nil or s == "" {
+            give 0
+        }
+        give num(s)
+    }
+
+    ## Substitutes bound values into the SQL.
+    ##
+    ## The previous scanner split on every '?' in the string, including ones
+    ## inside string literals and comments, which silently shifted every later
+    ## parameter by one. splitPlaceholders() is SQL-aware, and checkArity()
+    ## catches a count mismatch instead of reading past the end of the array.
+    task _interpolate(sql, params) {
+        scan = splitPlaceholders(sql)
+        checkArity(sql, params, scan["count"])
+
+        when scan["count"] == 0 {
+            give sql
+        }
+
+        segments = scan["segments"]
+        out = []
+        repeat i = 0 to scan["count"] - 1 {
+            push(out, segments[i])
+            push(out, self._literal(params[i]))
+        }
+        push(out, segments[scan["count"]])
+
+        give join(out, "")
+    }
+
+    ## Renders a single value as a PostgreSQL literal, using libpq's own
+    ## escaping routine for anything textual.
+    task _literal(val) {
+        when val == nil {
+            give "NULL"
+        }
+        when typeOf(val) == "integer" or typeOf(val) == "float" {
+            give str(val)
+        }
+        when typeOf(val) == "bool" {
+            when val { give "TRUE" }
+            give "FALSE"
+        }
+
+        s = str(val)
+        escapedPtr = os_call(self._escapeLiteral, "ptr", self._conn, s, len(s))
+        when escapedPtr != 0 {
+            escapedStr = os_read_string_ptr(escapedPtr)
+            os_call(self._freemem, "int", escapedPtr)
+            give escapedStr
+        }
+
+        # PQescapeLiteral only fails on allocation failure or a broken
+        # connection. Refuse rather than fall back to hand-rolled quoting.
+        throw DriverError("Failed to escape a value for PostgreSQL (connection may be closed).")
+    }
+}

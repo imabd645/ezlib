@@ -5,12 +5,17 @@
 
 use "orm/query.ez"
 use "orm/errors.ez"
+use "orm/sql.ez"
 
 export model Session {
     init(engine) {
         self.engine = engine
         self._pending_adds = []
         self._pending_deletes = []
+        # Depth of explicitly opened transactions. commit() used to issue an
+        # unconditional BEGIN, so begin() followed by commit() raised
+        # "cannot start a transaction within a transaction".
+        self._txDepth = 0
     }
 
     ## Starts a new query for the given model class.
@@ -19,28 +24,81 @@ export model Session {
     }
 
     ## Stages an instance for INSERT or UPDATE.
+    ## Staging the same instance twice is a no-op rather than two INSERTs.
     task add(instance) {
+        when instance == nil {
+            throw IntegrityError("Cannot add nil to a session.")
+        }
+        get existing in self._pending_adds {
+            when existing == instance {
+                give nil
+            }
+        }
         push(self._pending_adds, instance)
+    }
+
+    ## Stages every instance in an array.
+    task addAll(instances) {
+        get inst in instances {
+            self.add(inst)
+        }
     }
 
     ## Stages an instance for DELETE.
     task delete(instance) {
+        when instance == nil {
+            throw IntegrityError("Cannot delete nil.")
+        }
+        get existing in self._pending_deletes {
+            when existing == instance {
+                give nil
+            }
+        }
         push(self._pending_deletes, instance)
     }
 
-    ## Begins an explicit transaction.
-    task begin() {
-        self.engine.driver.begin()
+    ## Fetches a single instance by primary key, or nil.
+    task get(modelClass, pkValue) {
+        meta = self.engine.getMeta(modelClass)
+        give self.query(modelClass).filter(meta["pk"], "=", pkValue).first()
     }
 
-    ## Commits all staged operations. Wraps in a transaction if not already in one.
+    ## Begins an explicit transaction.
+    ## Nested calls are tracked rather than issuing a second BEGIN.
+    task begin() {
+        when self._txDepth == 0 {
+            self.engine.driver.begin()
+        }
+        self._txDepth = self._txDepth + 1
+    }
+
+    ## Commits all staged operations.
+    ## Opens a transaction only when one is not already open, so an explicit
+    ## begin() followed by commit() no longer double-BEGINs.
     task commit() {
-        self.engine.driver.begin()
+        ownsTx = self._txDepth == 0
+        when ownsTx {
+            self.engine.driver.begin()
+        }
+
         try {
             self._flush()
-            self.engine.driver.commit()
+            when ownsTx {
+                self.engine.driver.commit()
+            } other {
+                # An explicit begin() is being closed by this commit.
+                self._txDepth = self._txDepth - 1
+                when self._txDepth == 0 {
+                    self.engine.driver.commit()
+                }
+            }
         } catch e {
-            self.engine.driver.rollback()
+            try {
+                self.engine.driver.rollback()
+            } catch inner {
+                # Rollback failure must not mask the original error.
+            }
+            self._txDepth = 0
             self._clear()
             throw e
         }
@@ -48,12 +106,25 @@ export model Session {
 
     ## Rolls back the current transaction and clears staged operations.
     task rollback() {
-        self.engine.driver.rollback()
-        self._clear()
+        try {
+            self.engine.driver.rollback()
+        } finally {
+            self._txDepth = 0
+            self._clear()
+        }
     }
 
     ## Closes the session (and underlying connection if applicable).
     task close() {
+        # An open transaction at close time would otherwise be left dangling.
+        when self._txDepth > 0 {
+            try {
+                self.engine.driver.rollback()
+            } catch e {
+                # Best effort.
+            }
+            self._txDepth = 0
+        }
         self._clear()
         # Session does not own the engine, so we don't close the engine here.
     }
@@ -65,93 +136,163 @@ export model Session {
         self._pending_deletes = []
     }
 
+    ## True when a property still holds its Column definition, meaning the user
+    ## never assigned a value. hasattr replaces the old getattr-in-try/catch.
+    task _isUnset(val) {
+        when typeOf(val) != "instance" { give false }
+        give hasattr(val, "_isColumn")
+    }
+
     task _flush() {
+        # Inserts are grouped per model so they can go out as multi-row
+        # statements instead of one round trip per object.
+        inserts = {}
         get inst in self._pending_adds {
-            self._saveInstance(inst)
+            meta = self.engine.getMeta(inst.__class__)
+            when self._isUpdate(inst, meta) {
+                self._doUpdate(inst, meta)
+            } other {
+                key = meta["table"]
+                when not has_key(inserts, key) {
+                    inserts[key] = { "meta": meta, "rows": [] }
+                }
+                push(inserts[key]["rows"], inst)
+            }
         }
+
+        get key in keys(inserts) {
+            self._doInsertBatch(inserts[key]["meta"], inserts[key]["rows"])
+        }
+
         get inst in self._pending_deletes {
             self._deleteInstance(inst)
         }
         self._clear()
     }
 
-    task _saveInstance(instance) {
-        meta = self.engine.getMeta(instance.__class__)
-        pkName = meta["pk"]
-        
-        # Check if the primary key is set and is NOT a Column definition object
-        isUpdate = false
-        pkValue = getattr(instance, pkName)
-        
-        when pkValue != nil and typeOf(pkValue) != "instance" {
-            isUpdate = true
-        } other when typeOf(pkValue) == "instance" {
-            # Try to see if it's a Column marker
-            isCol = false
-            try { isCol = getattr(pkValue, "_isColumn") } catch e {}
-            when not isCol {
-                # It's an actual instance value serving as PK (rare but possible)
-                isUpdate = true
+    task _isUpdate(instance, meta) {
+        pkValue = getattr(instance, meta["pk"])
+        when pkValue == nil { give false }
+        when self._isUnset(pkValue) { give false }
+        give true
+    }
+
+    ## Returns the columns that carry a real value for this instance,
+    ## validating that every required column is present.
+    task _boundColumns(instance, meta) {
+        cols = []
+        get colInfo in meta["columns"] {
+            colName = colInfo["name"]
+            val = getattr(instance, colName)
+
+            when not self._isUnset(val) {
+                push(cols, colName)
+            } other {
+                # Unset and the database will not fill it in for us.
+                when not colInfo["autoIncrement"] and colInfo["default"] == nil and not colInfo["nullable"] {
+                    throw IntegrityError("Missing required value for column '" + colName + "' on insert into '" + meta["table"] + "'.")
+                }
             }
         }
-        
-        when isUpdate {
-            self._doUpdate(instance, meta)
-        } other {
-            self._doInsert(instance, meta)
+        give cols
+    }
+
+    ## Inserts a group of instances of the same model.
+    ## Rows sharing an identical column set are sent as a single multi-row
+    ## INSERT; previously every object cost its own prepare/step/finalize.
+    task _doInsertBatch(meta, instances) {
+        when len(instances) == 0 { give nil }
+
+        tableName = meta["table"]
+        dialect = self.engine.dialect
+        pkName = meta["pk"]
+
+        # Group by the exact set of bound columns — rows that leave different
+        # fields unset cannot share one statement.
+        groups = {}
+        order = []
+        get inst in instances {
+            cols = self._boundColumns(inst, meta)
+            sig = join(cols, "|")
+            when not has_key(groups, sig) {
+                groups[sig] = { "cols": cols, "rows": [] }
+                push(order, sig)
+            }
+            push(groups[sig]["rows"], inst)
+        }
+
+        get sig in order {
+            g = groups[sig]
+            cols = g["cols"]
+            rows = g["rows"]
+
+            when len(cols) == 0 {
+                # Nothing bound at all: let the database apply every default.
+                # MySQL spells this "() VALUES ()"; SQLite and Postgres use
+                # "DEFAULT VALUES".
+                emptySql = "INSERT INTO " + quoteIdent(tableName, dialect) + " DEFAULT VALUES"
+                when dialect == "mysql" {
+                    emptySql = "INSERT INTO " + quoteIdent(tableName, dialect) + " () VALUES ()"
+                }
+                get inst in rows {
+                    self.engine.driver.execute(emptySql, [])
+                    self._assignGeneratedPk(inst, meta)
+                }
+                skip
+            }
+
+            quotedCols = []
+            get c in cols {
+                push(quotedCols, quoteIdent(c, dialect))
+            }
+
+            marks = []
+            get c in cols {
+                push(marks, "?")
+            }
+            rowMark = "(" + join(marks, ", ") + ")"
+
+            # Auto-increment ids have to be read back per row, so batching is
+            # only safe when the driver can tell us each new id. Batch when the
+            # primary key was supplied explicitly; otherwise insert one at a
+            # time and capture lastInsertId() after each.
+            pkSupplied = contains(cols, pkName)
+
+            when pkSupplied and len(rows) > 1 {
+                allMarks = []
+                params = []
+                get inst in rows {
+                    push(allMarks, rowMark)
+                    get c in cols {
+                        push(params, getattr(inst, c))
+                    }
+                }
+                sql = "INSERT INTO " + quoteIdent(tableName, dialect) + " (" + join(quotedCols, ", ") + ") VALUES " + join(allMarks, ", ")
+                self.engine.driver.execute(sql, params)
+            } other {
+                sql = "INSERT INTO " + quoteIdent(tableName, dialect) + " (" + join(quotedCols, ", ") + ") VALUES " + rowMark
+                get inst in rows {
+                    params = []
+                    get c in cols {
+                        push(params, getattr(inst, c))
+                    }
+                    self.engine.driver.execute(sql, params)
+                    self._assignGeneratedPk(inst, meta)
+                }
+            }
         }
     }
 
-    task _doInsert(instance, meta) {
-        columns = meta["columns"]
-        tableName = meta["table"]
+    ## Copies a database-generated primary key back onto the instance.
+    task _assignGeneratedPk(instance, meta) {
         pkName = meta["pk"]
-        
-        cols = []
-        vals = []
-        placeholders = []
-        
-        get colInfo in columns {
-            colName = colInfo["name"]
-            val = getattr(instance, colName)
-            
-            # Skip if it's still a Column definition (meaning it wasn't set by the user)
-            isCol = false
-            when typeOf(val) == "instance" {
-                try { isCol = getattr(val, "_isColumn") } catch e {}
-            }
-            
-            # If it's a column definition, only skip if it's auto-incrementing or has a default
-            # If it's required (not nullable) and has no default, and the DB doesn't auto-gen it, this will fail at DB level.
-            when not isCol {
-                push(cols, colName)
-                push(vals, val)
-                push(placeholders, "?")
-            } other {
-                # Ensure we skip auto-increment primary keys
-                when not colInfo["autoIncrement"] and colInfo["default"] == nil and not colInfo["nullable"] {
-                    throw IntegrityError("Missing required value for column '" + colName + "' on insert.")
-                }
-            }
-        }
-        
-        sql = "INSERT INTO " + tableName + " (" + join(cols, ", ") + ") VALUES (" + join(placeholders, ", ") + ")"
-        self.engine.driver.execute(sql, vals)
-        
-        # Populate auto-increment primary key if we just inserted
         pkValue = getattr(instance, pkName)
-        isCol = false
-        when typeOf(pkValue) == "instance" {
-            try { isCol = getattr(pkValue, "_isColumn") } catch e {}
-        }
-        
-        when isCol {
-            # Find the PK column info
-            get c in columns {
-                when c["name"] == pkName and c["autoIncrement"] {
-                    newId = self.engine.driver.lastInsertId()
-                    setattr(instance, pkName, newId)
-                }
+        when not self._isUnset(pkValue) { give nil }
+
+        get c in meta["columns"] {
+            when c["name"] == pkName and c["autoIncrement"] {
+                setattr(instance, pkName, self.engine.driver.lastInsertId())
+                give nil
             }
         }
     }
@@ -160,29 +301,25 @@ export model Session {
         columns = meta["columns"]
         tableName = meta["table"]
         pkName = meta["pk"]
+        dialect = self.engine.dialect
         pkValue = getattr(instance, pkName)
-        
+
         setParts = []
         vals = []
-        
+
         get colInfo in columns {
             colName = colInfo["name"]
             when colName != pkName {
                 val = getattr(instance, colName)
-                isCol = false
-                when typeOf(val) == "instance" {
-                    try { isCol = getattr(val, "_isColumn") } catch e {}
-                }
-                
-                when not isCol {
-                    push(setParts, colName + " = ?")
+                when not self._isUnset(val) {
+                    push(setParts, quoteIdent(colName, dialect) + " = ?")
                     push(vals, val)
                 }
             }
         }
-        
+
         when len(setParts) > 0 {
-            sql = "UPDATE " + tableName + " SET " + join(setParts, ", ") + " WHERE " + pkName + " = ?"
+            sql = "UPDATE " + quoteIdent(tableName, dialect) + " SET " + join(setParts, ", ") + " WHERE " + quoteIdent(pkName, dialect) + " = ?"
             push(vals, pkValue)
             self.engine.driver.execute(sql, vals)
         }
@@ -192,18 +329,14 @@ export model Session {
         meta = self.engine.getMeta(instance.__class__)
         tableName = meta["table"]
         pkName = meta["pk"]
+        dialect = self.engine.dialect
         pkValue = getattr(instance, pkName)
-        
-        when pkValue != nil {
-            isCol = false
-            when typeOf(pkValue) == "instance" {
-                try { isCol = getattr(pkValue, "_isColumn") } catch e {}
-            }
-            
-            when not isCol {
-                sql = "DELETE FROM " + tableName + " WHERE " + pkName + " = ?"
-                self.engine.driver.execute(sql, [pkValue])
-            }
+
+        when pkValue == nil or self._isUnset(pkValue) {
+            throw IntegrityError("Cannot delete an instance of '" + instance.__class__.__name__ + "' with no primary key value.")
         }
+
+        sql = "DELETE FROM " + quoteIdent(tableName, dialect) + " WHERE " + quoteIdent(pkName, dialect) + " = ?"
+        self.engine.driver.execute(sql, [pkValue])
     }
 }

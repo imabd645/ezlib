@@ -105,29 +105,35 @@ engine.close()
 ### Column
 
 ```ez
-Column(type, primaryKey=false, autoIncrement=false, unique=false, nullable=true, default=nil, foreignKey=nil)
+Column(type, primaryKey=false, autoIncrement=false, unique=false, nullable=true, default=nil, foreignKey=nil, index=false)
 ```
 
 | Parameter       | Type    | Default | Description |
 |-----------------|---------|---------|-------------|
-| `type`          | string  | —       | Logical column type. See type mapping below. |
-| `primaryKey`    | bool    | `false` | Marks this column as the table's primary key. Exactly one column per model should set this. |
+| `type`          | string  | —       | Logical column type. See type mapping below. An unrecognised type raises `SchemaError`. |
+| `primaryKey`    | bool    | `false` | Marks this column as the table's primary key. Exactly one column per model may set this. |
 | `autoIncrement` | bool    | `false` | Adds `AUTOINCREMENT`. Only meaningful alongside `primaryKey=true` on an `integer` column. When set, the ORM populates the field automatically after `INSERT`. |
 | `unique`        | bool    | `false` | Adds a `UNIQUE` constraint. Ignored if `primaryKey` is also `true` (redundant). |
 | `nullable`      | bool    | `true`  | If `false`, adds `NOT NULL`. Ignored if `primaryKey` is also `true`. |
-| `default`       | any     | `nil`   | Adds a `DEFAULT` clause. Strings are automatically quoted. |
-| `foreignKey`    | string  | `nil`   | References another model's column, in `"ModelName.column"` format (e.g. `"User.id"`). |
+| `default`       | any     | `nil`   | Adds a `DEFAULT` clause. String defaults are quoted and any embedded apostrophe is escaped; booleans render per dialect. |
+| `foreignKey`    | string  | `nil`   | References another model's column, in `"ModelName.column"` format (e.g. `"User.id"`). A malformed reference raises `SchemaError` instead of being silently dropped. |
+| `index`         | bool    | `false` | Creates a secondary index on this column during `createAll()`. |
 
 **Type mapping** (case-insensitive):
 
-| You write                          | SQL column type |
-|-------------------------------------|------------------|
-| `"integer"`, `"int"`                | `INTEGER` |
-| `"string"`, `"text"`, `"str"`       | `TEXT` |
-| `"float"`, `"real"`, `"double"`, `"number"` | `REAL` |
-| `"bool"`, `"boolean"`               | `INTEGER` (0/1) |
-| `"blob"`, `"bytes"`                 | `BLOB` |
-| *(anything else)*                   | `TEXT` (fallback) |
+| You write                          | SQLite | MySQL | PostgreSQL |
+|-------------------------------------|--------|-------|------------|
+| `"integer"`, `"int"`                | `INTEGER` | `INT` | `INTEGER` |
+| `"bigint"`, `"long"`                | `INTEGER` | `BIGINT` | `BIGINT` |
+| `"string"`, `"text"`, `"str"`       | `TEXT` | `VARCHAR(255)` | `TEXT` |
+| `"float"`, `"real"`, `"double"`, `"number"` | `REAL` | `DOUBLE` | `DOUBLE PRECISION` |
+| `"bool"`, `"boolean"`               | `INTEGER` (0/1) | `TINYINT(1)` | `BOOLEAN` |
+| `"blob"`, `"bytes"`                 | `BLOB` | `BLOB` | `BYTEA` |
+| `"date"`                            | `TEXT` | `DATE` | `DATE` |
+| `"datetime"`, `"timestamp"`         | `TEXT` | `DATETIME` | `TIMESTAMP` |
+| *(anything else)*                   | raises `SchemaError` | | |
+
+Values are coerced back to the declared type on read, so a `bool` column reads as `true`/`false` rather than SQLite's `0`/`1` or MySQL's `"0"`/`"1"`.
 
 ---
 
@@ -141,13 +147,15 @@ Engine(driver)
 
 | Method | Signature | Description |
 |--------|-----------|--------------|
-| `register` | `register(modelClass, options={})` | Introspects `modelClass`'s `Column` definitions and registers it. `options["table"]` overrides the default table name (which is otherwise the model's class name). Throws `SchemaError` if there are no columns or no primary key. |
-| `createAll` | `createAll()` | Runs `CREATE TABLE IF NOT EXISTS` for every registered model, including foreign key constraints. |
-| `dropAll` | `dropAll()` | Runs `DROP TABLE IF EXISTS` for every registered model. |
-| `getMeta` | `getMeta(modelClass)` | Returns the internal schema metadata dictionary (`table`, `columns`, `pk`, `foreignKeys`) for a registered model. Throws `SchemaError` if the model isn't registered. |
+| `register` | `register(modelClass, options={})` | Introspects `modelClass`'s `Column` definitions and registers it. `options["table"]` overrides the default table name (otherwise the class name). Throws `SchemaError` if there are no columns, no primary key, more than one primary key, or if a different model is already registered under the same name. Re-registering the same class is a no-op. |
+| `createAll` | `createAll()` | Runs `CREATE TABLE IF NOT EXISTS` for every registered model, plus any requested indexes. Tables are created in foreign-key dependency order. |
+| `dropAll` | `dropAll()` | Runs `DROP TABLE IF EXISTS` for every registered model, in reverse dependency order (children before parents). |
+| `getMeta` | `getMeta(modelClass)` | Returns the internal schema metadata dictionary (`table`, `columns`, `pk`, `foreignKeys`, `indexes`) for a registered model. Throws `SchemaError` if the model isn't registered. |
 | `close` | `close()` | Closes the underlying driver connection. |
 
-**Registration order matters for foreign keys:** register the *referenced* model before the model that references it, so `createAll()` can resolve the referenced table name correctly.
+`Engine` exposes the resolved SQL dialect as `engine.dialect`, read from the driver's required `dialect` property.
+
+**Registration order for foreign keys:** register the *referenced* model before the model that references it — `createAll()` raises `SchemaError` if a foreign key names an unregistered model. Creation *order* is then sorted automatically by dependency, so you don't need to worry about which table gets created first.
 
 ---
 
@@ -162,12 +170,16 @@ Session(engine)
 | Method | Signature | Description |
 |--------|-----------|--------------|
 | `query` | `query(modelClass)` | Returns a new `Query` for the given model. |
-| `add` | `add(instance)` | Stages an instance for INSERT (if its primary key is unset) or UPDATE (if it's already set). Nothing is written until `commit()`. |
-| `delete` | `delete(instance)` | Stages an instance for DELETE by its primary key. |
-| `begin` | `begin()` | Explicitly starts a transaction on the underlying driver. |
-| `commit` | `commit()` | Flushes all staged adds/deletes as INSERT/UPDATE/DELETE statements, wrapped in a transaction. Rolls back and clears staged operations automatically if any statement throws. |
+| `get` | `get(modelClass, pkValue)` | Fetches a single instance by primary key, or `nil`. |
+| `add` | `add(instance)` | Stages an instance for INSERT (if its primary key is unset) or UPDATE (if it's already set). Staging the same instance twice is a no-op. Nothing is written until `commit()`. |
+| `addAll` | `addAll(instances)` | Stages every instance in an array. |
+| `delete` | `delete(instance)` | Stages an instance for DELETE by its primary key. Throws `IntegrityError` if the instance has no primary key value. |
+| `begin` | `begin()` | Explicitly starts a transaction. Nesting is tracked, so `begin()` followed by `commit()` works correctly. |
+| `commit` | `commit()` | Flushes all staged adds/deletes, wrapped in a transaction (opening one only if none is already open). Rolls back and clears staged operations automatically if any statement throws. |
 | `rollback` | `rollback()` | Rolls back the current transaction and clears any staged operations. |
-| `close` | `close()` | Clears staged operations. Does **not** close the engine/driver — sessions don't own the connection. |
+| `close` | `close()` | Rolls back any open transaction and clears staged operations. Does **not** close the engine/driver — sessions don't own the connection. |
+
+**Batching:** at `commit()`, pending inserts are grouped by model and by which columns are set, and rows sharing a column set go out as a single multi-row `INSERT` — rather than one round trip per object. Rows whose primary key is database-generated are inserted individually so each generated id can be read back.
 
 **Insert vs. update detection:** `add()` doesn't immediately decide; the decision happens at `commit()` time, based on whether the instance's primary-key field currently holds a real value or is still an unset `Column` placeholder.
 
@@ -179,14 +191,21 @@ Produced via `session.query(ModelClass)`. All builder methods except the termina
 
 | Method | Signature | Returns | Description |
 |--------|-----------|---------|--------------|
-| `filter` | `filter(field, op, value)` or `filter(field, value)` | `Query` | Adds a `WHERE` condition. Two-argument form defaults the operator to `"="`. Supports any SQL comparison operator string (`"="`, `"!="`, `">"`, `">="`, `"<"`, `"<="`, `"LIKE"`, etc.). Multiple `filter()` calls are combined with `AND`. |
-| `orderBy` | `orderBy(field, direction="ASC")` | `Query` | Adds an `ORDER BY` clause. Call multiple times for multi-column sorts. |
+| `filter` | `filter(field, op, value)` or `filter(field, value)` | `Query` | Adds a `WHERE` condition. Two-argument form defaults the operator to `"="`. Multiple `filter()` calls are combined with `AND`. `field` must name a column the model declares, and `op` must be one of `=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `IS`, `IS NOT` — anything else raises `SchemaError`. `IN`/`NOT IN` take an array and expand to one bound placeholder per element. |
+| `filterNull` | `filterNull(field, isNull=true)` | `Query` | Adds `field IS NULL` (or `IS NOT NULL`). |
+| `orderBy` | `orderBy(field, direction="ASC")` | `Query` | Adds an `ORDER BY` clause. Call multiple times for multi-column sorts. `direction` must be `ASC` or `DESC`. |
 | `limit` | `limit(n)` | `Query` | Adds a `LIMIT`. |
 | `offset` | `offset(n)` | `Query` | Adds an `OFFSET`. |
-| `all` | `all()` | array of instances | Executes the query and hydrates matching rows into model instances. |
-| `first` | `first()` | instance or `nil` | Executes with an implicit `LIMIT 1` and returns the first match, or `nil`. |
-| `count` | `count()` | integer | Executes a `COUNT(*)` with the same filters applied. |
-| `delete` | `delete()` | integer | Executes a bulk `DELETE` matching the current filters, and returns the number of affected rows. |
+| `clone` | `clone()` | `Query` | Returns an independent copy, so a partially built query can be reused as a base for several queries. |
+| `all` | `all()` | array of instances | Executes the query and hydrates matching rows into model instances, coercing each value to its declared column type. |
+| `first` | `first()` | instance or `nil` | Returns the first match, or `nil`. Runs against a clone, so it does **not** leave `LIMIT 1` attached to the query. |
+| `exists` | `exists()` | boolean | True when at least one row matches. |
+| `count` | `count()` | integer | Executes a `COUNT(*)` with the same filters. `ORDER BY`/`LIMIT`/`OFFSET` are deliberately not applied. |
+| `update` | `update(values)` | integer | Bulk `UPDATE` of the given `{column: value}` dict for matching rows. Requires at least one filter. |
+| `delete` | `delete()` | integer | Bulk `DELETE` matching the current filters; returns rows affected. **Requires at least one filter** — an unfiltered call raises `IntegrityError`. |
+| `deleteAll` | `deleteAll()` | integer | Deletes every row in the table. The explicit form of an unfiltered delete. |
+
+> **Identifier safety.** Field names, operators and sort directions are validated against the model's schema and a fixed keyword list rather than being concatenated into the SQL. Passing a `sort` value straight from an HTTP query string is therefore safe: an unknown column raises `SchemaError` instead of injecting SQL. Values are always sent as bound parameters.
 
 **Example:**
 
@@ -206,11 +225,17 @@ recent_adults = session.query(User)
 The default driver, implemented over SQLite's C API via FFI.
 
 ```ez
-SQLiteDriver(path)
+SQLiteDriver(path, busyTimeoutMs=5000, cacheSize=64)
 ```
 
 - Automatically enables `PRAGMA journal_mode=WAL` and `PRAGMA foreign_keys=ON` on connect.
 - Looks for `sqlite3.dll`, then `libsqlite3-0.dll`, then `dlls\libsqlite3-0.dll`, in that order.
+- Sets `sqlite3_busy_timeout` so a concurrent writer waits instead of failing immediately with `SQLITE_BUSY`.
+- Keeps an LRU cache of up to `cacheSize` prepared statements. Because the ORM issues the same handful of statements repeatedly, this avoids re-parsing and re-planning each one. Pass `cacheSize=0` to disable.
+- Uses real parameter binding (`sqlite3_bind_*`), not string interpolation.
+- Rejects multi-statement SQL: `prepare_v2` would compile only the first statement and silently skip the rest, so passing `"SELECT 1; SELECT 2"` raises `DriverError` instead.
+
+Statements are finalized in a `finally`, so a mid-iteration error cannot leak a statement handle (which under WAL would otherwise hold a read transaction open and block checkpointing).
 
 | Method | Description |
 |--------|-------------|
@@ -221,7 +246,32 @@ SQLiteDriver(path)
 | `begin()` / `commit()` / `rollback()` | Transaction control. |
 | `close()` | Closes the connection handle. |
 
-You can swap in your own driver for a different backend by implementing this same method set — `Engine` and `Session` only depend on this interface, not on SQLite specifically.
+You can swap in your own driver for a different backend by implementing this same method set — `Engine` and `Session` only depend on this interface, not on SQLite specifically. A custom driver **must** also expose a `dialect` property (`"sqlite"`, `"mysql"`, or `"postgres"`); `Engine` raises `DriverError` without it.
+
+---
+
+### MySQLDriver / PostgresDriver
+
+```ez
+MySQLDriver(host, user, password, dbname, port=3306, charset="utf8mb4")
+PostgresDriver(connectionString)
+```
+
+`MySQLDriver` loads `libmysql.dll` or `libmariadb.dll`; `PostgresDriver` loads `libpq.dll`.
+
+Both accept the same `?` placeholder syntax as the SQLite driver. Internally they escape values with the vendor's own routine (`mysql_real_escape_string`, `PQescapeLiteral`) and splice them in, locating placeholders with a SQL-aware scanner that ignores any `?` inside string literals, quoted identifiers, and comments. A mismatch between placeholder count and supplied parameters raises `DriverError`.
+
+`MySQLDriver` pins the connection charset (default `utf8mb4`) before running any statement, because `mysql_real_escape_string` escapes according to the connection's charset and is not safe on an unknown one. It refuses to connect if the charset cannot be set.
+
+---
+
+## Testing
+
+```
+ez orm/tests/run_tests.ez
+```
+
+The suite covers the SQL helpers and DDL generation with no database required, then runs an end-to-end SQLite section against an in-memory database (skipped automatically if `sqlite3.dll` is unavailable). It includes regression tests for identifier injection, placeholder scanning, transaction nesting, `count()`/`first()` isolation, batch inserts, and reserved-word column names.
 
 ---
 
@@ -280,11 +330,13 @@ session.commit()
 
 ## Known Limitations
 
-- **Filtering on `nil`:** `.filter(field, nil)` currently compiles to `field = ?` with a bound NULL parameter. Per SQL semantics, `x = NULL` never evaluates true — so this does **not** match NULL rows the way you'd expect from `IS NULL`. If you need to query for NULLs, do so with a raw driver call until this is addressed.
-- **`begin()` + `commit()` together:** calling `session.begin()` explicitly and then `session.commit()` will attempt to start a second transaction on top of the first, which SQLite rejects. Use one or the other for a given unit of work — either call `begin()`/`commit()` around raw operations, or just call `add()`/`delete()` followed by `commit()` and let it manage the transaction itself.
-- **`ORDER BY` / `LIMIT` / `OFFSET` on bulk `delete()`:** chaining `.orderBy()`, `.limit()`, or `.offset()` before `.delete()` produces SQL that plain SQLite doesn't accept on `DELETE` statements. Use `.filter()` alone to scope bulk deletes.
+- **Models must be constructible with no arguments.** The engine builds a throwaway instance to read your `Column` definitions, so every parameter of a model's `init()` must be optional. A model written as `init(name, age)` cannot be registered — assign those fields after construction instead. Registering such a model raises a `SchemaError` explaining this rather than failing obscurely.
 - **No relationship loading:** foreign keys are schema-level only; there's no `.join()` or eager/lazy relationship loading yet.
-- **No migrations:** `createAll()`/`dropAll()` are the only schema operations — there's no incremental migration support for evolving an existing table's columns.
+- **No identity map or dirty tracking:** mutating a fetched instance does nothing until you `session.add()` it again, and fetching the same row twice yields two independent instances.
+- **No migrations:** `createAll()`/`dropAll()` are the only schema operations. `createAll()` uses `CREATE TABLE IF NOT EXISTS`, so changing a model does **not** alter an existing table — the schema silently drifts. Drop and recreate, or manage migrations yourself.
+- **No composite primary keys:** exactly one `Column` per model may set `primaryKey=true`.
+- **MySQL/PostgreSQL bind by escaped interpolation**, not server-side prepared statements. Values go through the vendor's own escaper (`mysql_real_escape_string` on a charset-pinned connection, `PQescapeLiteral`) and placeholders are located with a SQL-aware scanner, so this is safe — but native `mysql_stmt_*` / `PQexecParams` binding would be better still. **SQLite uses real parameter binding.**
+- **MySQL/PostgreSQL drivers are less exercised than SQLite.** The test suite covers SQLite end to end; the other two are covered only by the shared SQL-helper tests.
 
 ---
 

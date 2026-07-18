@@ -1,0 +1,252 @@
+# ============================================================================
+# EZ ORM — Shared SQL Utilities
+# Identifier quoting, SQL-aware placeholder scanning, and value coercion.
+# Used by the engine, the query builder, and every driver so that all three
+# agree on escaping rules.
+# ============================================================================
+
+use "orm/errors.ez"
+
+## Quotes an SQL identifier (table or column name) for the given dialect.
+## Prevents reserved words (order, group, key, ...) from breaking generated SQL
+## and stops an identifier from terminating its own quoting.
+export task quoteIdent(name, dialect="sqlite") {
+    when name == nil or name == "" {
+        throw SchemaError("Empty SQL identifier.")
+    }
+
+    # Identifiers in this ORM always originate from model definitions, so
+    # anything outside [A-Za-z_][A-Za-z0-9_]* is a bug rather than a value to
+    # be escaped. Rejecting is safer than trying to escape our way out.
+    when not isPlainIdent(name) {
+        throw SchemaError("Illegal SQL identifier: '" + str(name) + "'. Identifiers must match [A-Za-z_][A-Za-z0-9_]*.")
+    }
+
+    when dialect == "mysql" {
+        # MySQL quotes with backticks; a literal backtick is doubled.
+        give "`" + replace(name, "`", "``") + "`"
+    }
+    # SQLite and PostgreSQL both use double quotes; a literal quote is doubled.
+    give "\"" + replace(name, "\"", "\"\"") + "\""
+}
+
+## Validates that an identifier is a plain, safe SQL name.
+## Returns true only for [A-Za-z_][A-Za-z0-9_]* — the shape every column and
+## table produced by this ORM has.
+export task isPlainIdent(name) {
+    when name == nil { give false }
+    when typeOf(name) != "string" { give false }
+    when len(name) == 0 { give false }
+
+    first = substring(name, 0, 1)
+    ok = (first >= "a" and first <= "z") or (first >= "A" and first <= "Z") or first == "_"
+    when not ok { give false }
+
+    repeat i = 1 to len(name) - 1 {
+        c = substring(name, i, 1)
+        isAlpha = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+        isDigit = c >= "0" and c <= "9"
+        when not (isAlpha or isDigit or c == "_") {
+            give false
+        }
+    }
+    give true
+}
+
+## Escapes a string for use inside a single-quoted SQL literal.
+## Only used for DDL defaults, where no parameter binding is available.
+## Value binding always goes through the driver, never through this.
+export task escapeLiteral(s) {
+    give "'" + replace(str(s), "'", "''") + "'"
+}
+
+## Splits a SQL string on its '?' placeholders, ignoring any '?' that appears
+## inside a string literal, a quoted identifier, or a comment.
+##
+## The original implementation split on every '?', so a query such as
+##     SELECT * FROM t WHERE title = 'what?'
+## consumed a parameter for the '?' inside the literal and silently shifted
+## every subsequent parameter by one.
+##
+## Returns { "segments": [...], "count": n } where segments has exactly
+## count + 1 entries, so the caller can interleave escaped values between them.
+export task splitPlaceholders(sql) {
+    segments = []
+    count = 0
+    lastIdx = 0
+    i = 0
+    n = len(sql)
+
+    while i < n {
+        c = substring(sql, i, 1)
+
+        when c == "'" or c == "\"" or c == "`" {
+            # Skip over a quoted run. Doubling the quote character escapes it,
+            # which is why we re-enter the run instead of stopping at the first
+            # closing quote.
+            quote = c
+            i = i + 1
+            while i < n {
+                cc = substring(sql, i, 1)
+                when cc == quote {
+                    # A doubled quote is an escaped quote, not a terminator.
+                    when i + 1 < n and substring(sql, i + 1, 1) == quote {
+                        i = i + 2
+                    } other {
+                        i = i + 1
+                        escape
+                    }
+                } other when cc == "\\" and quote != "`" {
+                    # Backslash escapes (MySQL-style) consume the next char.
+                    i = i + 2
+                } other {
+                    i = i + 1
+                }
+            }
+        } other when c == "-" and i + 1 < n and substring(sql, i + 1, 1) == "-" {
+            # Line comment: -- ... to end of line
+            while i < n and substring(sql, i, 1) != "\n" {
+                i = i + 1
+            }
+        } other when c == "/" and i + 1 < n and substring(sql, i + 1, 1) == "*" {
+            # Block comment: /* ... */
+            i = i + 2
+            while i + 1 < n {
+                when substring(sql, i, 1) == "*" and substring(sql, i + 1, 1) == "/" {
+                    i = i + 2
+                    escape
+                }
+                i = i + 1
+            }
+        } other when c == "?" {
+            push(segments, substring(sql, lastIdx, i - lastIdx))
+            count = count + 1
+            i = i + 1
+            lastIdx = i
+        } other {
+            i = i + 1
+        }
+    }
+
+    push(segments, substring(sql, lastIdx, n - lastIdx))
+    give {
+        "segments": segments,
+        "count": count
+    }
+}
+
+## True when the SQL contains more than one statement, ignoring semicolons
+## inside string literals, quoted identifiers and comments, and ignoring a
+## single trailing semicolon.
+##
+## Drivers use this instead of SQLite's pzTail out-parameter: pzTail points
+## into the temporary buffer the FFI layer marshals the EZ string into, which
+## is not guaranteed to outlive the call.
+export task hasMultipleStatements(sql) {
+    i = 0
+    n = len(sql)
+    seenSemicolon = false
+
+    while i < n {
+        c = substring(sql, i, 1)
+
+        when c == "'" or c == "\"" or c == "`" {
+            quote = c
+            i = i + 1
+            while i < n {
+                cc = substring(sql, i, 1)
+                when cc == quote {
+                    when i + 1 < n and substring(sql, i + 1, 1) == quote {
+                        i = i + 2
+                    } other {
+                        i = i + 1
+                        escape
+                    }
+                } other when cc == "\\" and quote != "`" {
+                    i = i + 2
+                } other {
+                    i = i + 1
+                }
+            }
+        } other when c == "-" and i + 1 < n and substring(sql, i + 1, 1) == "-" {
+            while i < n and substring(sql, i, 1) != "\n" {
+                i = i + 1
+            }
+        } other when c == "/" and i + 1 < n and substring(sql, i + 1, 1) == "*" {
+            i = i + 2
+            while i + 1 < n {
+                when substring(sql, i, 1) == "*" and substring(sql, i + 1, 1) == "/" {
+                    i = i + 2
+                    escape
+                }
+                i = i + 1
+            }
+        } other when c == ";" {
+            seenSemicolon = true
+            i = i + 1
+        } other {
+            # Any non-blank content after a semicolon means a second statement.
+            when seenSemicolon and c != " " and c != "\n" and c != "\r" and c != "\t" {
+                give true
+            }
+            i = i + 1
+        }
+    }
+
+    give false
+}
+
+## Verifies the parameter array matches the placeholder count.
+## Catches the silent out-of-range read the drivers used to do.
+export task checkArity(sql, params, count) {
+    supplied = 0
+    when params != nil {
+        supplied = len(params)
+    }
+    when supplied != count {
+        throw DriverError("SQL parameter mismatch: " + str(count) + " placeholder(s) but " + str(supplied) + " value(s) supplied. SQL: " + sql)
+    }
+}
+
+## Coerces a raw database value to the EZ type declared by the column.
+## Drivers that can only return strings (MySQL) and storage classes that lose
+## type information (SQLite has no BOOLEAN) both route through this so a model
+## field holds the type the user declared.
+export task coerceValue(val, declaredType) {
+    when val == nil { give nil }
+    when declaredType == nil { give val }
+
+    t = lower(declaredType)
+
+    when t == "bool" or t == "boolean" {
+        # SQLite gives 0/1, MySQL gives "0"/"1", Postgres gives a real bool.
+        when typeOf(val) == "bool" { give val }
+        when typeOf(val) == "string" {
+            lv = lower(val)
+            give lv == "1" or lv == "t" or lv == "true" or lv == "yes"
+        }
+        give num(val) != 0
+    }
+
+    when t == "integer" or t == "int" {
+        when typeOf(val) == "string" { give num(val) }
+        when typeOf(val) == "bool" {
+            when val { give 1 }
+            give 0
+        }
+        give val
+    }
+
+    when t == "float" or t == "real" or t == "double" or t == "number" {
+        when typeOf(val) == "string" { give num(val) }
+        give val
+    }
+
+    when t == "string" or t == "text" or t == "str" {
+        when typeOf(val) == "string" { give val }
+        give str(val)
+    }
+
+    # blob / datetime / unknown types pass through untouched.
+    give val
+}

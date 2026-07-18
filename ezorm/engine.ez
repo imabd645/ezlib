@@ -5,11 +5,31 @@
 
 use "orm/column.ez"
 use "orm/errors.ez"
+use "orm/sql.ez"
 
 export model Engine {
     init(driver) {
+        when driver == nil {
+            throw DriverError("Engine requires a driver instance.")
+        }
         self.driver = driver
         self._registry = {}
+        self.dialect = self._resolveDialect(driver)
+    }
+
+    ## Determines the SQL dialect from the driver.
+    ## Previously this was a getattr() wrapped in try/catch that silently
+    ## degraded to sqlite (or to nil, if getattr returns nil rather than
+    ## throwing) — meaning a Postgres schema could be generated with SQLite
+    ## types and nobody would notice. hasattr() makes the check explicit.
+    task _resolveDialect(driver) {
+        when hasattr(driver, "dialect") {
+            d = getattr(driver, "dialect")
+            when d != nil and d != "" {
+                give d
+            }
+        }
+        throw DriverError("Driver does not declare a 'dialect' property. Every driver must set self.dialect (\"sqlite\", \"mysql\" or \"postgres\") in its init().")
     }
 
     ## Registers a model class with the engine.
@@ -24,53 +44,81 @@ export model Engine {
             tableName = options["table"]
         }
 
-        # Create temporary instance to evaluate Column objects in init()
-        tmp = modelClass()
-        
+        when not isPlainIdent(tableName) {
+            throw SchemaError("Invalid table name '" + str(tableName) + "'. Use letters, digits and underscore only.")
+        }
+
+        # A model name may only be registered once. The registry is keyed by
+        # name, so two models called User in different modules used to silently
+        # overwrite one another and route queries to the wrong table.
+        when has_key(self._registry, modelName) {
+            existing = self._registry[modelName]
+            when existing["class"] != modelClass {
+                throw SchemaError("A different model named '" + modelName + "' is already registered (table '" + existing["table"] + "'). Model names must be unique per engine; pass options {\"table\": ...} and rename one of the classes.")
+            }
+            give nil
+        }
+
+        # Create temporary instance to evaluate Column objects in init().
+        # This is why every ORM model must be constructible with no arguments:
+        # the schema lives on the instance, so the engine has to build one to
+        # read it. Surface that as a clear error rather than a raw crash.
+        tmp = nil
+        try {
+            tmp = modelClass()
+        } catch e {
+            throw SchemaError("Could not instantiate model '" + modelName + "' with no arguments. ORM models must have an init() whose parameters are all optional, because the engine builds a throwaway instance to read the Column definitions. Move required constructor arguments to plain assignment after construction.")
+        }
+
         # Iterate over instance properties
         props = properties(tmp)
         columns = []
         pkColumn = nil
         foreignKeys = []
+        indexes = []
 
         get propName in props {
             # Retrieve the evaluated Column object from the instance
             col = getattr(tmp, propName)
 
-            
-            # Check if this property is a Column definition
-            when typeOf(col) == "instance" {
-                isCol = false
-                try {
-                    isCol = getattr(col, "_isColumn")
-                } catch e {
-                    # Not a column, skip
+            # Check if this property is a Column definition.
+            # hasattr replaces the old try/catch probe: it is a direct lookup
+            # instead of raising and swallowing an exception per property.
+            when typeOf(col) == "instance" and hasattr(col, "_isColumn") {
+                when not isPlainIdent(propName) {
+                    throw SchemaError("Invalid column name '" + propName + "' on model '" + modelName + "'.")
                 }
 
-                when isCol {
-                    colInfo = {
-                        "name": propName,
-                        "type": col.type,
-                        "primaryKey": col.primaryKey,
-                        "autoIncrement": col.autoIncrement,
-                        "unique": col.unique,
-                        "nullable": col.nullable,
-                        "default": col.default,
-                        "foreignKey": col.foreignKey,
-                        "sqlDef": col.toSQL()
-                    }
-                    push(columns, colInfo)
+                colInfo = {
+                    "name": propName,
+                    "type": col.type,
+                    "primaryKey": col.primaryKey,
+                    "autoIncrement": col.autoIncrement,
+                    "unique": col.unique,
+                    "nullable": col.nullable,
+                    "default": col.default,
+                    "foreignKey": col.foreignKey,
+                    "index": col.index,
+                    "sqlDef": col.toSQL(self.dialect)
+                }
+                push(columns, colInfo)
 
-                    when col.primaryKey {
-                        pkColumn = propName
+                when col.primaryKey {
+                    when pkColumn != nil {
+                        throw SchemaError("Model '" + modelName + "' declares more than one primary key ('" + pkColumn + "' and '" + propName + "'). Composite primary keys are not supported.")
                     }
+                    pkColumn = propName
+                }
 
-                    when col.foreignKey != nil {
-                        push(foreignKeys, {
-                            "column": propName,
-                            "ref": col.foreignKey
-                        })
-                    }
+                when col.index and not col.primaryKey and not col.unique {
+                    push(indexes, propName)
+                }
+
+                when col.foreignKey != nil {
+                    push(foreignKeys, {
+                        "column": propName,
+                        "ref": col.foreignKey
+                    })
                 }
             }
         }
@@ -89,24 +137,51 @@ export model Engine {
             "table": tableName,
             "columns": columns,
             "pk": pkColumn,
-            "foreignKeys": foreignKeys
+            "foreignKeys": foreignKeys,
+            "indexes": indexes
         }
     }
 
     ## Creates all registered tables in the database.
+    ## Tables are created in foreign-key dependency order so a child table is
+    ## never created before the parent it references.
     task createAll() {
-        get modelName in keys(self._registry) {
+        get modelName in self._orderedModels() {
             meta = self._registry[modelName]
             sql = self._buildCreateSQL(meta)
             self.driver.execute(sql, [])
+
+            get colName in meta["indexes"] {
+                idxName = "idx_" + meta["table"] + "_" + colName
+                target = " ON " + quoteIdent(meta["table"], self.dialect) + " (" + quoteIdent(colName, self.dialect) + ")"
+
+                when self.dialect == "mysql" {
+                    # MySQL has no CREATE INDEX ... IF NOT EXISTS, so a second
+                    # createAll() would fail. Swallow the duplicate-index error
+                    # and let anything else propagate.
+                    try {
+                        self.driver.execute("CREATE INDEX " + quoteIdent(idxName, self.dialect) + target, [])
+                    } catch e {
+                        when indexOf(str(e), "uplicate") == -1 and indexOf(str(e), "xists") == -1 {
+                            throw e
+                        }
+                    }
+                } other {
+                    self.driver.execute("CREATE INDEX IF NOT EXISTS " + quoteIdent(idxName, self.dialect) + target, [])
+                }
+            }
         }
     }
 
-    ## Drops all registered tables from the database.
+    ## Drops all registered tables from the database, children before parents.
     task dropAll() {
-        get modelName in keys(self._registry) {
-            meta = self._registry[modelName]
-            self.driver.execute("DROP TABLE IF EXISTS " + meta["table"], [])
+        ordered = self._orderedModels()
+        # Reverse dependency order: drop dependants before their targets.
+        i = len(ordered) - 1
+        while i >= 0 {
+            meta = self._registry[ordered[i]]
+            self.driver.execute("DROP TABLE IF EXISTS " + quoteIdent(meta["table"], self.dialect), [])
+            i = i - 1
         }
     }
 
@@ -126,6 +201,62 @@ export model Engine {
 
     # ── Internal SQL Builders ─────────────────────────────────────
 
+    ## Returns model names sorted so that every model appears after the models
+    ## it references via foreign key. Falls back to registration order for any
+    ## cycle (self-referencing tables are legal and must not hang).
+    task _orderedModels() {
+        ordered = []
+        visiting = {}
+        done = {}
+
+        names = keys(self._registry)
+        get name in names {
+            self._visitModel(name, ordered, visiting, done)
+        }
+        give ordered
+    }
+
+    task _visitModel(name, ordered, visiting, done) {
+        when has_key(done, name) { give nil }
+        # A cycle (or a self-reference) — stop descending and let the caller
+        # place this model; the FK constraint is still emitted in the DDL.
+        when has_key(visiting, name) { give nil }
+        when not has_key(self._registry, name) { give nil }
+
+        visiting[name] = true
+        meta = self._registry[name]
+        get fk in meta["foreignKeys"] {
+            parsed = self._parseRef(fk["ref"], name)
+            refModel = parsed["model"]
+            when refModel != name {
+                self._visitModel(refModel, ordered, visiting, done)
+            }
+        }
+        dictRemove(visiting, name)
+        done[name] = true
+        push(ordered, name)
+    }
+
+    ## Parses a "ModelName.column" foreign key reference.
+    ## The old version scanned for the LAST dot with no early exit and silently
+    ## dropped any reference without a dot, so a typo like "Userid" produced a
+    ## table with no constraint and no warning.
+    task _parseRef(ref, owningModel) {
+        when ref == nil or typeOf(ref) != "string" {
+            throw SchemaError("Foreign key on model '" + owningModel + "' must be a string of the form \"ModelName.column\".")
+        }
+
+        dotPos = indexOf(ref, ".")
+        when dotPos < 1 or dotPos >= len(ref) - 1 {
+            throw SchemaError("Malformed foreign key '" + ref + "' on model '" + owningModel + "'. Expected \"ModelName.column\".")
+        }
+
+        give {
+            "model": substring(ref, 0, dotPos),
+            "column": substring(ref, dotPos + 1, len(ref) - dotPos - 1)
+        }
+    }
+
     task _buildCreateSQL(meta) {
         tableName = meta["table"]
         columns = meta["columns"]
@@ -133,34 +264,26 @@ export model Engine {
 
         parts = []
         get col in columns {
-            push(parts, col["name"] + " " + col["sqlDef"])
+            push(parts, quoteIdent(col["name"], self.dialect) + " " + col["sqlDef"])
         }
 
         # Add foreign key constraints
         get fk in foreignKeys {
-            ref = fk["ref"]
-            # Parse "ModelName.column" format
-            dotPos = -1
-            repeat i = 0 to len(ref) - 1 {
-                when substring(ref, i, 1) == "." {
-                    dotPos = i
-                }
+            parsed = self._parseRef(fk["ref"], meta["table"])
+            refModel = parsed["model"]
+            refCol = parsed["column"]
+
+            # Look up the actual table name for the referenced model
+            refTable = refModel
+            when has_key(self._registry, refModel) {
+                refTable = self._registry[refModel]["table"]
+            } other {
+                throw SchemaError("Foreign key '" + fk["ref"] + "' references model '" + refModel + "', which is not registered. Register it before the model that references it.")
             }
 
-            when dotPos > 0 {
-                refModel = substring(ref, 0, dotPos)
-                refCol = substring(ref, dotPos + 1, len(ref) - dotPos - 1)
-
-                # Look up the actual table name for the referenced model
-                refTable = refModel
-                when has_key(self._registry, refModel) {
-                    refTable = self._registry[refModel]["table"]
-                }
-
-                push(parts, "FOREIGN KEY (" + fk["column"] + ") REFERENCES " + refTable + "(" + refCol + ")")
-            }
+            push(parts, "FOREIGN KEY (" + quoteIdent(fk["column"], self.dialect) + ") REFERENCES " + quoteIdent(refTable, self.dialect) + "(" + quoteIdent(refCol, self.dialect) + ")")
         }
 
-        give "CREATE TABLE IF NOT EXISTS " + tableName + " (\n    " + join(parts, ",\n    ") + "\n)"
+        give "CREATE TABLE IF NOT EXISTS " + quoteIdent(tableName, self.dialect) + " (\n    " + join(parts, ",\n    ") + "\n)"
     }
 }

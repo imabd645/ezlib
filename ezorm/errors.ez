@@ -3,8 +3,13 @@
 # Base exceptions for ORM error handling
 # ============================================================================
 
+# Each subclass now delegates to its parent's init via super() instead of
+# re-assigning self.message directly. The built-in Exception base records the
+# message itself, so bypassing it left the base half-initialised.
+
 export model ORMError extends Exception {
     init(message) {
+        super(message)
         self.message = message
     }
 
@@ -13,9 +18,11 @@ export model ORMError extends Exception {
     }
 }
 
+## Raised when a value violates a database or model constraint
+## (missing required column, duplicate key, failed foreign key).
 export model IntegrityError extends ORMError {
     init(message) {
-        self.message = message
+        super(message)
     }
 
     task toString() {
@@ -23,9 +30,11 @@ export model IntegrityError extends ORMError {
     }
 }
 
+## Raised for model/schema definition problems detected before any SQL runs
+## (no primary key, unknown column, unregistered model, bad identifier).
 export model SchemaError extends ORMError {
     init(message) {
-        self.message = message
+        super(message)
     }
 
     task toString() {
@@ -33,9 +42,11 @@ export model SchemaError extends ORMError {
     }
 }
 
+## Raised for failures originating in the database driver itself
+## (connection, prepare, bind, step, parameter arity).
 export model DriverError extends ORMError {
     init(message) {
-        self.message = message
+        super(message)
     }
 
     task toString() {

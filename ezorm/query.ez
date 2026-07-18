@@ -3,17 +3,90 @@
 # Chainable API for constructing and executing SQL queries
 # ============================================================================
 
+use "orm/errors.ez"
+use "orm/sql.ez"
+
 export model Query {
     init(session, modelClass) {
         self.session = session
         self.modelClass = modelClass
         self.meta = session.engine.getMeta(modelClass)
         self.tableName = self.meta["table"]
-        
+        self.dialect = session.engine.dialect
+
         self._filters = []
         self._orderings = []
         self._limit = nil
         self._offset = nil
+    }
+
+    # ── Safety ────────────────────────────────────────────────────
+
+    ## Operators permitted in a WHERE clause. Anything outside this set is
+    ## rejected rather than concatenated into the SQL.
+    task _allowedOps() {
+        give ["=", "!=", "<>", "<", "<=", ">", ">=", "LIKE", "NOT LIKE", "IN", "NOT IN", "IS", "IS NOT"]
+    }
+
+    ## Validates a field name against the model's registered columns.
+    ##
+    ## Field names and operators used to be concatenated straight into the SQL
+    ## while only values were bound, so a field taken from user input (a `sort`
+    ## query parameter, say) was a direct injection vector. Every identifier now
+    ## has to match a column this model actually declares.
+    task _checkField(field) {
+        get c in self.meta["columns"] {
+            when c["name"] == field {
+                give field
+            }
+        }
+        throw SchemaError("Unknown column '" + str(field) + "' on model '" + self.modelClass.__name__ + "'. Known columns: " + join(self._columnNames(), ", "))
+    }
+
+    task _columnNames() {
+        names = []
+        get c in self.meta["columns"] {
+            push(names, c["name"])
+        }
+        give names
+    }
+
+    task _checkOp(op) {
+        upper_op = upper(str(op))
+        get allowed in self._allowedOps() {
+            when allowed == upper_op {
+                give upper_op
+            }
+        }
+        throw SchemaError("Unsupported SQL operator '" + str(op) + "'. Allowed: " + join(self._allowedOps(), ", "))
+    }
+
+    ## Returns the declared type for a column, for hydration coercion.
+    task _typeOfColumn(name) {
+        get c in self.meta["columns"] {
+            when c["name"] == name {
+                give c["type"]
+            }
+        }
+        give nil
+    }
+
+    # ── Building ──────────────────────────────────────────────────
+
+    ## Returns an independent copy of this query.
+    ## The builder methods mutate in place, so cloning is what lets a partially
+    ## built query be reused as the base for several different queries.
+    task clone() {
+        q = Query(self.session, self.modelClass)
+        get f in self._filters {
+            push(q._filters, f)
+        }
+        get o in self._orderings {
+            push(q._orderings, o)
+        }
+        q._limit = self._limit
+        q._offset = self._offset
+        give q
     }
 
     ## Adds a WHERE clause.
@@ -21,91 +94,188 @@ export model Query {
     task filter(field, op_or_val, val=nil) {
         op = "="
         value = op_or_val
-        
+
         when val != nil {
             op = op_or_val
             value = val
         }
-        
+
+        checkedField = self._checkField(field)
+        checkedOp = self._checkOp(op)
+
+        # IN / NOT IN take a list and expand to one placeholder per element.
+        when checkedOp == "IN" or checkedOp == "NOT IN" {
+            when typeOf(value) != "array" {
+                throw SchemaError("Operator " + checkedOp + " expects an array of values.")
+            }
+            when len(value) == 0 {
+                throw SchemaError("Operator " + checkedOp + " requires a non-empty array.")
+            }
+        }
+
         push(self._filters, {
-            "field": field,
-            "op": op,
+            "field": checkedField,
+            "op": checkedOp,
             "value": value
+        })
+        give self
+    }
+
+    ## Adds a "field IS NULL" / "field IS NOT NULL" clause.
+    task filterNull(field, isNull=true) {
+        checkedField = self._checkField(field)
+        op = "IS NOT NULL"
+        when isNull { op = "IS NULL" }
+        push(self._filters, {
+            "field": checkedField,
+            "op": op,
+            "value": nil,
+            "noParam": true
         })
         give self
     }
 
     ## Adds an ORDER BY clause.
     task orderBy(field, direction="ASC") {
+        checkedField = self._checkField(field)
+
+        # Direction was previously interpolated raw, so orderBy(f, "ASC; DROP
+        # TABLE x--") was injectable. Only the two legal keywords are accepted.
+        dir = upper(str(direction))
+        when dir != "ASC" and dir != "DESC" {
+            throw SchemaError("Sort direction must be ASC or DESC, got '" + str(direction) + "'.")
+        }
+
         push(self._orderings, {
-            "field": field,
-            "direction": direction
+            "field": checkedField,
+            "direction": dir
         })
         give self
     }
 
     ## Adds a LIMIT clause.
     task limit(n) {
-        self._limit = n
+        self._limit = self._checkInt(n, "limit")
         give self
     }
 
     ## Adds an OFFSET clause.
     task offset(n) {
-        self._offset = n
+        self._offset = self._checkInt(n, "offset")
         give self
     }
 
+    task _checkInt(n, what) {
+        when n == nil { give nil }
+        when typeOf(n) != "integer" and typeOf(n) != "float" {
+            throw SchemaError(what + "() expects a number, got " + typeOf(n) + ".")
+        }
+        when n < 0 {
+            throw SchemaError(what + "() must not be negative.")
+        }
+        give n
+    }
+
+    # ── Execution ─────────────────────────────────────────────────
+
     ## Executes the query and returns an array of model instances.
     task all() {
-        res = self._buildSQL("SELECT *")
-        sql = res["sql"]
-        params = res["params"]
-        
-        rows = self.session.engine.driver.query(sql, params)
+        res = self._buildSQL("SELECT *", true)
+        rows = self.session.engine.driver.query(res["sql"], res["params"])
         instances = []
-        
+
         get row in rows {
-            inst = self._hydrate(row)
-            push(instances, inst)
+            push(instances, self._hydrate(row))
         }
-        
+
         give instances
     }
 
     ## Executes the query and returns the first instance, or nil if none found.
+    ## Uses a clone so that calling first() does not permanently pin LIMIT 1
+    ## onto this query object.
     task first() {
-        self.limit(1)
-        res = self.all()
+        q = self.clone()
+        q._limit = 1
+        res = q.all()
         when len(res) > 0 {
             give res[0]
         }
         give nil
     }
 
+    ## Returns true when at least one row matches.
+    task exists() {
+        give self.first() != nil
+    }
+
     ## Executes a COUNT(*) query and returns the integer result.
+    ## ORDER BY / LIMIT / OFFSET are deliberately not applied: they are
+    ## meaningless (or actively wrong) for an aggregate, and the previous
+    ## version inherited them from the shared builder.
     task count() {
-        res = self._buildSQL("SELECT COUNT(*)")
-        sql = res["sql"]
-        params = res["params"]
-        
-        rows = self.session.engine.driver.query(sql, params)
+        res = self._buildSQL("SELECT COUNT(*) AS ez_count", false)
+        rows = self.session.engine.driver.query(res["sql"], res["params"])
         when len(rows) > 0 {
             row = rows[0]
-            # Get the first value in the dictionary
+            when has_key(row, "ez_count") {
+                give num(row["ez_count"])
+            }
+            # Defensive: some drivers fold identifiers to a different case.
             get k in keys(row) {
-                give row[k]
+                give num(row[k])
             }
         }
         give 0
     }
 
     ## Executes a bulk DELETE for all rows matching the query filters.
+    ## Requires at least one filter: an unfiltered bulk delete wipes the table,
+    ## which should never be an accident. Use deleteAll() to mean it.
     task delete() {
-        res = self._buildSQL("DELETE")
-        sql = res["sql"]
-        params = res["params"]
-        
+        when len(self._filters) == 0 {
+            throw IntegrityError("Refusing to run an unfiltered DELETE on '" + self.tableName + "'. Add a filter, or call deleteAll() if you really mean to empty the table.")
+        }
+        give self._runDelete()
+    }
+
+    ## Deletes every row in the table.
+    task deleteAll() {
+        give self._runDelete()
+    }
+
+    task _runDelete() {
+        # ORDER BY / LIMIT are not portable in DELETE (SQLite needs a compile
+        # flag, Postgres rejects them outright), so they are never emitted.
+        res = self._buildSQL("DELETE", false)
+        self.session.engine.driver.execute(res["sql"], res["params"])
+        give self.session.engine.driver.changes()
+    }
+
+    ## Applies a bulk UPDATE to all matching rows. values is a dict of
+    ## column name → new value.
+    task update(values) {
+        when values == nil or len(keys(values)) == 0 {
+            throw SchemaError("update() requires at least one column to set.")
+        }
+        when len(self._filters) == 0 {
+            throw IntegrityError("Refusing to run an unfiltered UPDATE on '" + self.tableName + "'. Add a filter first.")
+        }
+
+        setParts = []
+        params = []
+        get k in keys(values) {
+            checked = self._checkField(k)
+            push(setParts, quoteIdent(checked, self.dialect) + " = ?")
+            push(params, values[k])
+        }
+
+        where = self._buildWhere()
+        sql = "UPDATE " + quoteIdent(self.tableName, self.dialect) + " SET " + join(setParts, ", ") + where["sql"]
+        get p in where["params"] {
+            push(params, p)
+        }
+
         self.session.engine.driver.execute(sql, params)
         give self.session.engine.driver.changes()
     }
@@ -113,56 +283,96 @@ export model Query {
     # ── Internal Helpers ──────────────────────────────────────────
 
     ## Converts a database row dictionary into a model instance.
+    ## Values are coerced to the declared column type so that a bool column
+    ## reads back as true/false rather than SQLite's 0/1 or MySQL's "0"/"1".
     task _hydrate(row) {
         inst = self.modelClass()
         get colInfo in self.meta["columns"] {
             colName = colInfo["name"]
             when has_key(row, colName) {
-                # Overwrite the Column definition with the actual data value
-                setattr(inst, colName, row[colName])
+                setattr(inst, colName, coerceValue(row[colName], colInfo["type"]))
             }
         }
         give inst
     }
 
-    ## Builds the SQL string and parameter array.
-    task _buildSQL(base) {
-        sql = base + " FROM " + self.tableName
+    ## Builds the WHERE fragment and its bound parameters.
+    task _buildWhere() {
+        when len(self._filters) == 0 {
+            give { "sql": "", "params": [] }
+        }
+
+        parts = []
         params = []
-        
-        # WHERE clauses
-        when len(self._filters) > 0 {
-            sql += " WHERE "
-            filterParts = []
-            get f in self._filters {
-                push(filterParts, f["field"] + " " + f["op"] + " ?")
+        get f in self._filters {
+            field = quoteIdent(f["field"], self.dialect)
+            op = f["op"]
+
+            when has_key(f, "noParam") {
+                push(parts, field + " " + op)
+            } other when op == "IN" or op == "NOT IN" {
+                marks = []
+                get v in f["value"] {
+                    push(marks, "?")
+                    push(params, v)
+                }
+                push(parts, field + " " + op + " (" + join(marks, ", ") + ")")
+            } other {
+                push(parts, field + " " + op + " ?")
                 push(params, f["value"])
             }
-            sql += join(filterParts, " AND ")
         }
-        
-        # ORDER BY clauses
-        when len(self._orderings) > 0 {
-            sql += " ORDER BY "
-            orderParts = []
-            get o in self._orderings {
-                push(orderParts, o["field"] + " " + o["direction"])
+
+        give {
+            "sql": " WHERE " + join(parts, " AND "),
+            "params": params
+        }
+    }
+
+    ## Builds the SQL string and parameter array.
+    ## withOrdering controls whether ORDER BY / LIMIT / OFFSET are appended —
+    ## aggregates and DELETE must not carry them.
+    task _buildSQL(base, withOrdering) {
+        sql = base + " FROM " + quoteIdent(self.tableName, self.dialect)
+        params = []
+
+        where = self._buildWhere()
+        sql += where["sql"]
+        get p in where["params"] {
+            push(params, p)
+        }
+
+        when withOrdering {
+            when len(self._orderings) > 0 {
+                orderParts = []
+                get o in self._orderings {
+                    push(orderParts, quoteIdent(o["field"], self.dialect) + " " + o["direction"])
+                }
+                sql += " ORDER BY " + join(orderParts, ", ")
             }
-            sql += join(orderParts, ", ")
+
+            when self._limit != nil {
+                sql += " LIMIT ?"
+                push(params, self._limit)
+            }
+
+            # OFFSET without LIMIT is a syntax error in SQLite and MySQL (but
+            # legal in Postgres), so a dialect-appropriate sentinel limit is
+            # supplied when only an offset was requested.
+            when self._offset != nil {
+                when self._limit == nil {
+                    when self.dialect == "sqlite" {
+                        sql += " LIMIT -1"
+                    } other when self.dialect == "mysql" {
+                        sql += " LIMIT 18446744073709551615"
+                    }
+                    # Postgres accepts a bare OFFSET, so nothing is added.
+                }
+                sql += " OFFSET ?"
+                push(params, self._offset)
+            }
         }
-        
-        # LIMIT
-        when self._limit != nil {
-            sql += " LIMIT ?"
-            push(params, self._limit)
-        }
-        
-        # OFFSET
-        when self._offset != nil {
-            sql += " OFFSET ?"
-            push(params, self._offset)
-        }
-        
+
         give {
             "sql": sql,
             "params": params

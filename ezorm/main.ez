@@ -2,21 +2,50 @@
 # EZ ORM
 # Production-Quality Database Object-Relational Mapper
 # ============================================================================
+#
+# Every import below is spelled "orm/<file>.ez". Paths resolve relative to the
+# importing file first, so the previously mixed styles ("errors.ez" here,
+# "orm/errors.ez" there) resolved differently depending on which file did the
+# importing — which is what left the MySQL and PostgreSQL drivers unable to
+# find DriverError.
 
 # Re-export core exceptions
-use "errors.ez"
+use "orm/errors.ez"
+
+# Shared SQL helpers (identifier quoting, placeholder scanning, coercion)
+use "orm/sql.ez"
 
 # Re-export schema definition
-use "column.ez"
+use "orm/column.ez"
 
 # Re-export core ORM abstractions
-use "engine.ez"
-use "query.ez"
-use "session.ez"
+use "orm/engine.ez"
+use "orm/query.ez"
+use "orm/session.ez"
 
-# Re-export default driver (SQLite via FFI)
-use "drivers/sqlite.ez"
+# Re-export every driver. The MySQL and PostgreSQL drivers were previously not
+# imported here at all, so they were unreachable from the package entry point.
+use "orm/drivers/sqlite.ez"
+use "orm/drivers/mysql.ez"
+use "orm/drivers/postgres.ez"
 
-# For users to define models, they simply declare properties using Column()
-# and then register the model with the Engine.
-
+# ── Defining models ─────────────────────────────────────────────────────────
+#
+# Declare columns as properties in init(), then register the model:
+#
+#     model User {
+#         init() {
+#             self.id    = Column("integer", primaryKey=true, autoIncrement=true)
+#             self.name  = Column("string", nullable=false)
+#             self.email = Column("string", unique=true, index=true)
+#         }
+#     }
+#
+#     engine = Engine(SQLiteDriver("app.db"))
+#     engine.register(User)
+#     engine.createAll()
+#
+# IMPORTANT: a model's init() must be callable with no arguments. The engine
+# builds a throwaway instance to read the Column definitions, so any required
+# constructor parameter makes the model unregisterable. Assign such values
+# after construction instead.

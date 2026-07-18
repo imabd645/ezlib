@@ -1,6 +1,6 @@
- {
+{
     "name": "orm",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "Production-grade SQLAlchemy-style ORM for EZ",
     "author": "EZ Team",
     "entry": "main.ez"

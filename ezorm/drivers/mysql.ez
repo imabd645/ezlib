@@ -1,0 +1,227 @@
+# ============================================================================
+# EZ ORM — MySQL Driver (FFI)
+# ============================================================================
+
+# This used to be `use "errors.ez"`, which resolves relative to this file —
+# i.e. orm/drivers/errors.ez, a path that does not exist — so DriverError was
+# never defined and the driver could not load at all.
+use "orm/errors.ez"
+use "orm/sql.ez"
+
+export model MySQLDriver {
+    init(host, user, password, dbname, port=3306, charset="utf8mb4") {
+        self.dialect = "mysql"
+
+        # Load MySQL DLL
+        self._lib = os_load_lib("libmysql.dll")
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
+            self._lib = os_load_lib("libmariadb.dll")
+        }
+        when self._lib == 0 or typeOf(self._lib) == "nil" {
+            throw DriverError("libmysql.dll or libmariadb.dll not found. Place it in your project or system PATH.")
+        }
+
+        # ── Core API ────────────────────────────────────────────────
+        self._init       = os_get_func(self._lib, "mysql_init")
+        self._connect    = os_get_func(self._lib, "mysql_real_connect")
+        self._close      = os_get_func(self._lib, "mysql_close")
+        self._queryApi   = os_get_func(self._lib, "mysql_query")
+        self._store      = os_get_func(self._lib, "mysql_store_result")
+        self._fetch_row  = os_get_func(self._lib, "mysql_fetch_row")
+        self._num_fields = os_get_func(self._lib, "mysql_num_fields")
+        self._fetch_field_direct = os_get_func(self._lib, "mysql_fetch_field_direct")
+        self._fetch_lengths = os_get_func(self._lib, "mysql_fetch_lengths")
+        self._free_res   = os_get_func(self._lib, "mysql_free_result")
+        self._error      = os_get_func(self._lib, "mysql_error")
+        self._insert_id  = os_get_func(self._lib, "mysql_insert_id")
+        self._affected   = os_get_func(self._lib, "mysql_affected_rows")
+        self._escape     = os_get_func(self._lib, "mysql_real_escape_string")
+        self._setCharset = os_get_func(self._lib, "mysql_set_character_set")
+
+        # ── Open Database ──────────────────────────────────────────
+        self._conn = os_call(self._init, "ptr", 0)
+        when self._conn == 0 {
+            throw DriverError("Failed to initialize MySQL structure.")
+        }
+
+        res = os_call(self._connect, "ptr", self._conn, host, user, password, dbname, port, 0, 0)
+        when res == 0 {
+            msg = os_call(self._error, "string", self._conn)
+            os_call(self._close, "int", self._conn)
+            self._conn = 0
+            throw DriverError("Failed to connect to MySQL: " + msg)
+        }
+
+        # mysql_real_escape_string escapes according to the CONNECTION's
+        # character set. Leaving it unset means escaping can be bypassed on
+        # multi-byte charsets such as GBK/SJIS, where a crafted value makes the
+        # escaping backslash part of a valid multi-byte character. Pinning the
+        # connection to utf8mb4 closes that.
+        when self._setCharset != 0 and typeOf(self._setCharset) != "nil" {
+            rc = os_call(self._setCharset, "int", self._conn, charset)
+            when rc != 0 {
+                msg = os_call(self._error, "string", self._conn)
+                throw DriverError("Failed to set MySQL connection charset to '" + charset + "': " + msg + ". Escaping is not safe without a known charset.")
+            }
+        } other {
+            throw DriverError("mysql_set_character_set is unavailable in this client library; refusing to continue because value escaping would not be charset-safe.")
+        }
+    }
+
+    # ── Driver Interface ──────────────────────────────────────────
+
+    task execute(sql, params) {
+        finalSql = self._interpolate(sql, params)
+        rc = os_call(self._queryApi, "int", self._conn, finalSql)
+
+        when rc != 0 {
+            msg = os_call(self._error, "string", self._conn)
+            throw DriverError("Execute failed for SQL '" + finalSql + "': " + msg)
+        }
+
+        # A statement that returns rows must have its result set drained even
+        # when the caller ignores it, or the connection stays "out of sync".
+        res = os_call(self._store, "ptr", self._conn)
+        when res != 0 {
+            os_call(self._free_res, "int", res)
+        }
+    }
+
+    task query(sql, params) {
+        finalSql = self._interpolate(sql, params)
+        rc = os_call(self._queryApi, "int", self._conn, finalSql)
+
+        when rc != 0 {
+            msg = os_call(self._error, "string", self._conn)
+            throw DriverError("Query failed for SQL '" + finalSql + "': " + msg)
+        }
+
+        res = os_call(self._store, "ptr", self._conn)
+        when res == 0 {
+            # Either it was not a row-returning statement, or it failed.
+            when os_call(self._num_fields, "int", self._conn) == 0 {
+                give []
+            }
+            msg = os_call(self._error, "string", self._conn)
+            throw DriverError("Failed to store result: " + msg)
+        }
+
+        results = []
+        cols = os_call(self._num_fields, "int", res)
+
+        # Read column names once.
+        colNames = []
+        repeat c = 0 to cols - 1 {
+            fieldPtr = os_call(self._fetch_field_direct, "ptr", res, c)
+            # MYSQL_FIELD begins with `char *name`.
+            namePtr = os_read_uint64(fieldPtr, 0)
+            push(colNames, os_read_string_ptr(namePtr))
+        }
+
+        rowPtr = os_call(self._fetch_row, "ptr", res)
+        while rowPtr != 0 {
+            row = {}
+            repeat c = 0 to cols - 1 {
+                # rowPtr is an array of char*
+                valPtr = os_read_uint64(rowPtr, c * 8)
+                when valPtr == 0 {
+                    row[colNames[c]] = nil
+                } other {
+                    # MySQL's text protocol hands back every column as a
+                    # string. Rather than guessing at MYSQL_FIELD struct
+                    # offsets to recover the type, values are restored at the
+                    # ORM layer: Query._hydrate() coerces each column to the
+                    # type the model declared (see sql.ez coerceValue), which
+                    # is portable and needs no pointer arithmetic.
+                    row[colNames[c]] = os_read_string_ptr(valPtr)
+                }
+            }
+            push(results, row)
+            rowPtr = os_call(self._fetch_row, "ptr", res)
+        }
+
+        os_call(self._free_res, "int", res)
+        give results
+    }
+
+    task lastInsertId() {
+        give os_call(self._insert_id, "int", self._conn)
+    }
+
+    task changes() {
+        give os_call(self._affected, "int", self._conn)
+    }
+
+    task begin() {
+        self.execute("START TRANSACTION", [])
+    }
+
+    task commit() {
+        self.execute("COMMIT", [])
+    }
+
+    task rollback() {
+        self.execute("ROLLBACK", [])
+    }
+
+    task close() {
+        when self._conn != 0 {
+            os_call(self._close, "int", self._conn)
+            self._conn = 0
+        }
+    }
+
+    # ── Internal Helpers ──────────────────────────────────────────
+
+    ## Substitutes bound values into the SQL.
+    ##
+    ## The previous scanner split on every '?' in the string, including ones
+    ## inside string literals and comments, which silently shifted every later
+    ## parameter by one. splitPlaceholders() is SQL-aware, and checkArity()
+    ## catches a count mismatch instead of reading past the end of the array.
+    task _interpolate(sql, params) {
+        scan = splitPlaceholders(sql)
+        checkArity(sql, params, scan["count"])
+
+        when scan["count"] == 0 {
+            give sql
+        }
+
+        segments = scan["segments"]
+        out = []
+        repeat i = 0 to scan["count"] - 1 {
+            push(out, segments[i])
+            push(out, self._literal(params[i]))
+        }
+        push(out, segments[scan["count"]])
+
+        give join(out, "")
+    }
+
+    ## Renders a single value as a MySQL literal, using the client library's
+    ## charset-aware escaping routine for anything textual.
+    task _literal(val) {
+        when val == nil {
+            give "NULL"
+        }
+        when typeOf(val) == "integer" or typeOf(val) == "float" {
+            give str(val)
+        }
+        when typeOf(val) == "bool" {
+            when val { give "1" }
+            give "0"
+        }
+
+        s = str(val)
+        # mysql_real_escape_string(mysql, to, from, length)
+        # The destination buffer must hold 2*length+1 bytes in the worst case.
+        bufferPtr = os_alloc(len(s) * 2 + 1)
+        try {
+            os_call(self._escape, "int", self._conn, bufferPtr, s, len(s))
+            escapedStr = os_read_string_ptr(bufferPtr)
+            give "'" + escapedStr + "'"
+        } finally {
+            os_free(bufferPtr)
+        }
+    }
+}
