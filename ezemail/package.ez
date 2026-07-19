@@ -1,8 +1,9 @@
 {
     "name": "email",
-    "version": "1.1.0",
-    "description": "Standard SMTP and SMTPS email sending library for the EZ Programming Language. Supports secure connection upgrades, HTML body formatting, and Google App Passwords.",
+    "version": "2.0.0",
+    "description": "Production-ready SMTP email library for EZ. Supports plain, HTML, attachments, CC/BCC, and multiple recipients over pure libcurl FFI.",
     "author": "imabd645",
     "main": "main.ez",
-    "repository": "https://github.com/imabd645/ezlib"
+    "repository": "https://github.com/imabd645/ezlib",
+    "dependencies": {}
 }

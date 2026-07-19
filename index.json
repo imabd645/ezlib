@@ -803,13 +803,20 @@
     {
       "name": "email",
       "folder": "ezemail",
-      "description": "Standard SMTP and SMTPS email sending library for the EZ Programming Language. Supports secure connection upgrades, HTML body formatting, and Google App Passwords.",
+      "description": "Production-ready SMTP email library for EZ. Supports plain, HTML, attachments, CC/BCC, and multiple recipients over pure libcurl FFI.",
       "author": "imabd645",
       "license": "MIT",
       "keywords": [],
       "repository": "https://github.com/imabd645/ezlib",
-      "latest": "1.1.0",
+      "latest": "2.0.0",
       "versions": [
+        {
+          "version": "2.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezemail",
+          "dependencies": {}
+        },
         {
           "version": "1.1.0",
           "main": "main.ez",
