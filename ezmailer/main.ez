@@ -1,0 +1,61 @@
+// ============================================================================
+// mailer -- High-Level Mailer for EZ
+//
+//   use "mailer"
+//
+//   // Provider preset + template + send
+//   client = Providers.gmail("me@gmail.com", "app-pass")
+//   html   = Template.render("emails/welcome.html", {"name": "Alice"})
+//   client.send(
+//       Message()
+//           .from("me@gmail.com")
+//           .to("alice@example.com")
+//           .subject("Welcome!")
+//           .html(html)
+//           .attach("welcome_guide.pdf")
+//   )
+//
+//   // Connection pool for bulk sending
+//   pool = createPool("smtp.gmail.com", 587, "me@gmail.com", "pass", 3)
+//   pool.sendAll(messages)
+//
+// This file is the public surface only. The work lives in src/:
+//
+//   src/errors.ez     MailerError, PoolExhaustedError, TemplateError
+//   src/template.ez   {{ key }} HTML template rendering
+//   src/pool.ez       ConnectionPool (reuse SMTP clients across sends)
+//   src/providers.ez  One-liner presets: Gmail, SendGrid, Mailgun, SES, Outlook
+//
+// This package depends on the email package for SmtpClient and Message.
+// ============================================================================
+
+use "email"
+use "src/errors.ez"
+use "src/template.ez"
+use "src/pool.ez"
+use "src/providers.ez"
+
+// Creates a ConnectionPool for reusing SMTP connections across bulk sends.
+//
+//   pool = createPool("smtp.gmail.com", 587, "me@gmail.com", "pass", 5)
+//   pool.sendAll(messages)
+//
+export task createPool(server, port, username, password, maxSize = 5) {
+    give ConnectionPool(server, port, username, password, maxSize)
+}
+
+// Sends a transactional email by rendering an HTML template file and
+// delivering it via a provider preset.
+//
+//   mailer.sendTemplate(
+//       Providers.gmail("me@gmail.com", "app-pass"),
+//       Message().from("me@gmail.com").to("alice@example.com").subject("Welcome!"),
+//       "emails/welcome.html",
+//       {"name": "Alice", "confirm_url": "https://app.com/confirm/abc"}
+//   )
+//
+export task sendTemplate(client, msg, templatePath, vars) {
+    html = Template.render(templatePath, vars)
+    msg.html(html)
+    give client.send(msg)
+}

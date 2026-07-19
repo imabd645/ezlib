@@ -1,0 +1,138 @@
+// ============================================================================
+// test_mailer.ez -- Test Suite for the mailer package
+//
+// Tests that can run without real SMTP credentials:
+//   1. Template.renderString — placeholder injection
+//   2. Template.render — file-based rendering + TemplateError
+//   3. Providers — returns SmtpClient instances
+//   4. ConnectionPool — checkout/checkin, status, PoolExhaustedError
+// ============================================================================
+use "mailer"
+
+passes = 0
+fails  = 0
+
+task check(name, got, expected) {
+    when got == expected {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  got='" + str(got) + "' expected='" + str(expected) + "'"
+    }
+}
+
+task check_throws(name, needle, fn) {
+    threw = false
+    msg   = ""
+    try { fn() } catch (e) {
+        threw = true
+        when typeOf(e) == "instance" { msg = e.toString() } other { msg = str(e) }
+    }
+    when not threw {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected a throw, got none"
+    } other when len(needle) > 0 and len(split(msg, needle)) < 2 {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  threw but message lacked '" + needle + "': " + msg
+    } other {
+        passes = passes + 1
+        out "  [PASS] " + name
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+out "=== 1. Template Engine (renderString) ==="
+
+html = Template.renderString(
+    "<h1>Hello, {{ name }}!</h1><p>Your code is {{code}}.</p>",
+    {"name": "Alice", "code": "ABC123"}
+)
+check("renders {{ name }}",   len(split(html, "Alice")) > 1,   true)
+check("renders {{code}}",     len(split(html, "ABC123")) > 1,  true)
+check("removes placeholder",  len(split(html, "{{ name }}")) < 2, true)
+
+// Unknown key is left as-is (not an error)
+html2 = Template.renderString("Hello {{ unknown }}!", {"name": "Bob"})
+check("unknown key left", len(split(html2, "{{ unknown }}")) > 1, true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+out ""
+out "=== 2. Template File Rendering ==="
+
+// Write a temp template for testing
+writeFile("_test_template.html", "<p>Hi {{ name }}, your order #{{ order }} is ready.</p>")
+
+rendered = Template.render("_test_template.html", {"name": "Bob", "order": "9999"})
+check("file template: name",  len(split(rendered, "Bob")) > 1,  true)
+check("file template: order", len(split(rendered, "9999")) > 1, true)
+
+// Cleanup temp template
+try { deleteFile("_test_template.html") } catch (e) {}
+
+check_throws("TemplateError on missing file", "TemplateError", || {
+    Template.render("_nonexistent_template_12345.html", {})
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+out ""
+out "=== 3. Provider Presets ==="
+
+gClient = Providers.gmail("test@gmail.com", "fakepass")
+check("gmail returns client",   typeOf(gClient) == "instance", true)
+check("gmail server correct",   gClient.server, "smtp.gmail.com")
+check("gmail port correct",     gClient.port,   587)
+
+sgClient = Providers.sendgrid("SG.fakekey")
+check("sendgrid server",  sgClient.server,   "smtp.sendgrid.net")
+check("sendgrid username", sgClient.username, "apikey")
+
+mgClient = Providers.mailgun("mg.myapp.com", "key-xxx")
+check("mailgun server",   mgClient.server,   "smtp.mailgun.org")
+check("mailgun username", mgClient.username, "postmaster@mg.myapp.com")
+
+sesClient = Providers.ses("AKID", "secret", "us-east-1")
+check("ses server", sesClient.server, "email-smtp.us-east-1.amazonaws.com")
+
+olClient = Providers.outlook("me@outlook.com", "pass")
+check("outlook server", olClient.server, "smtp-mail.outlook.com")
+
+// ─────────────────────────────────────────────────────────────────────────────
+out ""
+out "=== 4. Connection Pool ==="
+
+pool = createPool("smtp.gmail.com", 587, "user@gmail.com", "pass", 2)
+
+status = pool.status()
+check("pool total=2",      status["total"],     2)
+check("pool available=2",  status["available"], 2)
+check("pool in_use=0",     status["in_use"],    0)
+
+// Checkout both slots manually (internal test)
+idx0 = pool._checkout()
+check("checkout slot 0", idx0, 0)
+status2 = pool.status()
+check("after checkout available=1", status2["available"], 1)
+check("after checkout in_use=1",    status2["in_use"],    1)
+
+idx1 = pool._checkout()
+check("checkout slot 1", idx1, 1)
+status3 = pool.status()
+check("pool fully in use", status3["available"], 0)
+
+// Pool exhausted
+check_throws("PoolExhaustedError when full", "PoolExhaustedError", || {
+    pool._checkout()
+})
+
+// Return slots
+pool._checkin(idx0)
+pool._checkin(idx1)
+status4 = pool.status()
+check("after checkin available=2", status4["available"], 2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+out ""
+out "============================================"
+out "Results: " + str(passes) + " passed, " + str(fails) + " failed"
+out "============================================"

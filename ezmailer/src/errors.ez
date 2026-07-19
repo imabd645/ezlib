@@ -1,0 +1,28 @@
+// ============================================================================
+// mailer / errors.ez -- Mailer-level Exceptions
+// ============================================================================
+
+// Base mailer error.
+export model MailerError {
+    init(message) { self.message = str(message) }
+    task toString() { give "MailerError: " + self.message }
+}
+
+// Thrown when the connection pool is exhausted and no handle is available.
+export model PoolExhaustedError {
+    init(maxSize) {
+        self.maxSize = maxSize
+        self.message = "All " + str(maxSize) + " SMTP connections are in use. Try again later or increase pool size."
+    }
+    task toString() { give "PoolExhaustedError: " + self.message }
+}
+
+// Thrown when an HTML template file cannot be found or rendered.
+export model TemplateError {
+    init(templatePath, reason) {
+        self.templatePath = str(templatePath)
+        self.reason       = str(reason)
+        self.message      = "Template '" + self.templatePath + "' failed: " + self.reason
+    }
+    task toString() { give "TemplateError: " + self.message }
+}

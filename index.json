@@ -1179,6 +1179,24 @@
       ],
       "description": "Production-ready Windows Task Scheduler library for EZ.",
       "author": "Abdullah Masood"
+    },
+    {
+      "name": "mailer",
+      "folder": "ezmailer",
+      "latest": "1.0.0",
+      "versions": [
+        {
+          "version": "1.0.0",
+          "main": "main.ez",
+          "url": "https://github.com/imabd645/ezlib/archive/refs/heads/main.zip",
+          "subfolder": "ezmailer",
+          "dependencies": {
+            "email": "2.0.0"
+          }
+        }
+      ],
+      "description": "High-level mailer for EZ. HTML templates, connection pooling, and provider presets for Gmail, SendGrid, Mailgun, AWS SES, and Outlook.",
+      "author": "Antigravity"
     }
   ]
 }
