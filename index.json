@@ -1196,7 +1196,7 @@
         }
       ],
       "description": "High-level mailer for EZ. HTML templates, connection pooling, and provider presets for Gmail, SendGrid, Mailgun, AWS SES, and Outlook.",
-      "author": "Antigravity"
+      "author": "Abdullah Masood"
     }
   ]
 }
