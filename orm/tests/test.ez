@@ -1,0 +1,14 @@
+use "orm"
+
+engine=Engine(SQLiteDriver("app.db"))
+
+
+model User
+{
+   init()
+   {
+    }    
+}
+
+engine.register(User)
+engine.createAll()

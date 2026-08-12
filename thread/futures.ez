@@ -1,0 +1,192 @@
+// ============================================================================
+// thread — Working with futures
+//
+// The interpreter provides the core operations natively:
+//
+//     spawn(fn, args...)   start work on another thread -> future
+//     await(f) / sync(f)   wait for one future
+//     awaitAll(futures)    wait for all, results in order
+//     awaitAny(futures)    wait for the FIRST to settle
+//     cancel(f)            cancel a future
+//     wait(ms)             sleep
+//
+// This file only adds what the interpreter does not have. Wrappers that merely
+// renamed a builtin have been removed:
+//
+//     all(futures)   -> awaitAll(futures)
+//     race(futures)  -> awaitAny(futures)
+//     sleep(ms)      -> wait(ms)
+//     delay(ms)      -> wait(ms)
+//
+// The old `race` spawned a monitor thread per future and spun on `wait(1)`;
+// native awaitAny blocks on the futures themselves.
+// ============================================================================
+use "errors.ez"
+
+// Awaits every future and reports each outcome instead of throwing on the
+// first failure. Returns [{ok, value, error}, ...] in the order given.
+//
+// Not the same as awaitAll: awaitAll propagates the first error and you lose
+// the results that did succeed.
+export task allSettled(futures) {
+    results = []
+    get f in futures {
+        try {
+            v = await(f)
+            push(results, {"ok": true, "value": v, "error": nil})
+        } catch (e) {
+            push(results, {"ok": false, "value": nil, "error": errorText(e)})
+        }
+    }
+    give results
+}
+
+// First future to succeed. Failures are ignored unless every future fails, in
+// which case AllFailedError carries all of them.
+//
+// Distinct from native awaitAny, which returns the first future to SETTLE --
+// if that one failed, awaitAny fails. Use awaitAny for "whichever finishes
+// first", any() for "whichever works first".
+//
+// Implementation note: the obvious design is one watcher thread per future,
+// each awaiting its future and reporting the outcome down a channel. Do not do
+// that here. A worker that awaits a FAILING future and then sends on a channel
+// does not reliably deliver to a main thread waiting on that same channel --
+// the message only shows up once the worker is awaited directly. Every wait in
+// this file therefore happens on the calling thread, where a failed await
+// throws promptly and predictably. isDone() makes that cheap: it is a
+// non-blocking flag check, so the loop below never blocks on a future that has
+// not finished, and it settles each one the instant it is ready.
+export task any(futures) {
+    n = len(futures)
+    when n == 0 {
+        throw ThreadError("any() needs at least one future")
+    }
+
+    handled = []
+    i = 0
+    while i < n {
+        push(handled, false)
+        i = i + 1
+    }
+
+    errors = []
+    while true {
+        i = 0
+        get f in futures {
+            when not handled[i] and isDone(f) {
+                handled[i] = true
+                try {
+                    give await(f)
+                } catch (e) {
+                    push(errors, errorText(e))
+                }
+            }
+            i = i + 1
+        }
+        when len(errors) >= n {
+            throw AllFailedError("all " + str(n) + " futures failed", errors)
+        }
+        wait(1)
+    }
+}
+
+// Waits for `future`, giving up after `ms`.
+//
+// Note the underlying work is not cancelled -- it keeps running; only the wait
+// ends.
+export task withTimeout(future, ms) {
+    deadline = clock() + ms
+    // isDone() is a non-blocking check, so this waits without committing to a
+    // blocking await that could outlast the deadline. See the note on any()
+    // for why no watcher thread is used.
+    while not isDone(future) {
+        when clock() >= deadline {
+            throw TimeoutError("timed out after " + str(ms) + "ms")
+        }
+        wait(1)
+    }
+    // Finished: await on THIS thread, so a failure throws here rather than
+    // escaping on a worker.
+    give await(future)
+}
+
+// Runs fn() on another thread, throwing TimeoutError if it takes too long.
+export task timeoutFn(fn, ms) {
+    give withTimeout(spawn(fn), ms)
+}
+
+// A future you complete by hand. Useful for bridging a callback into the
+// future world.
+//
+//     d = deferred()
+//     spawn(| | { wait(50) give d.resolve(9) })
+//     await(d.future)
+export model Deferred {
+    init() {
+        self._ch = Channel()
+        self.settled = false
+        ch = self._ch
+        self.future = spawn(| | {
+            r = ch.receive()
+            when r["ok"] { give r["value"] }
+            throw ThreadError(str(r["error"]))
+        })
+    }
+
+    task resolve(value) {
+        when self.settled { give self }
+        self.settled = true
+        self._ch.send({"ok": true, "value": value, "error": nil})
+        give self
+    }
+
+    task reject(err) {
+        when self.settled { give self }
+        self.settled = true
+        self._ch.send({"ok": false, "value": nil, "error": errorText(err)})
+        give self
+    }
+}
+
+export task deferred() { give Deferred() }
+
+// Calls fn() until it returns without throwing, up to maxAttempts, pausing
+// delayMs between tries. Re-throws the last error if none succeed.
+export task retry(fn, maxAttempts=3, delayMs=0) {
+    when maxAttempts < 1 {
+        throw ThreadError("retry() needs at least 1 attempt")
+    }
+    attempt = 0
+    while true {
+        attempt = attempt + 1
+        try {
+            give fn()
+        } catch (e) {
+            when attempt >= maxAttempts {
+                throw e
+            }
+            when delayMs > 0 { wait(delayMs) }
+        }
+    }
+}
+
+// retry with the pause doubling each time -- the usual shape for talking to a
+// service that is rate limiting or restarting.
+export task retryBackoff(fn, maxAttempts=5, baseDelayMs=50, maxDelayMs=5000) {
+    attempt = 0
+    delay = baseDelayMs
+    while true {
+        attempt = attempt + 1
+        try {
+            give fn()
+        } catch (e) {
+            when attempt >= maxAttempts {
+                throw e
+            }
+            wait(delay)
+            delay = delay * 2
+            when delay > maxDelayMs { delay = maxDelayMs }
+        }
+    }
+}

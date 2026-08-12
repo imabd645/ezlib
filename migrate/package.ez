@@ -1,0 +1,11 @@
+{
+  "name": "migrate",
+  "version": "1.0.0",
+  "description": "Schema migrations for EZ. Ordered up/down steps, a migration ledger, transactional application and drift detection.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["migrate", "migration", "schema", "database", "orm", "ddl"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "orm": "^1.1.0" }
+}

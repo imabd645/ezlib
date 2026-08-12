@@ -1,0 +1,122 @@
+# ============================================================================
+# yaml — test suite
+#   ez test.ez
+# ============================================================================
+
+use "yaml"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) {
+        PASS = PASS + 1
+    }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+# Structural comparison. Written against EZ literals rather than JSON text
+# because backtick strings interpolate {...}, so a literal JSON expectation
+# would be parsed as a template.
+task checkVal(label, actual, expected) {
+    check(label, to_json(actual), to_json(expected))
+}
+
+out "yaml tests"
+
+# ── scalars ─────────────────────────────────────────────────────────────────
+check("integer", YAML.parse("n: 42")["n"], 42)
+check("integer type", typeOf(YAML.parse("n: 42")["n"]), "integer")
+check("float", YAML.parse("n: 3.5")["n"], 3.5)
+check("negative", YAML.parse("n: -7")["n"], -7)
+check("exponent", YAML.parse("n: 1e3")["n"], 1000)
+check("bool true", YAML.parse("b: true")["b"], true)
+check("bool yes", YAML.parse("b: yes")["b"], true)
+check("bool off", YAML.parse("b: off")["b"], false)
+check("null word", YAML.parse("v: null")["v"], nil)
+check("null tilde", YAML.parse("v: ~")["v"], nil)
+check("empty is null", YAML.parse("v:")["v"], nil)
+check("plain string", YAML.parse("s: hello world")["s"], "hello world")
+
+# Quoting decides the type -- this is the distinction that makes ports and
+# version numbers survive a config round-trip.
+check("quoted number stays string", typeOf(YAML.parse(`s: "8080"`)["s"]), "string")
+check("quoted bool stays string", typeOf(YAML.parse(`s: "true"`)["s"]), "string")
+check("single quotes", YAML.parse("s: 'raw'")["s"], "raw")
+check("escaped quote", YAML.parse("s: 'it''s'")["s"], "it's")
+check("digits then letters", YAML.parse("s: 12abc")["s"], "12abc")
+# Built with chr(34) so the backslash-n reaches YAML as two characters; an EZ
+# string literal would turn it into a real newline before the parser saw it.
+Q = chr(34)
+check("newline escape", YAML.parse("s: " + Q + "a\\nb" + Q)["s"], "a" + NL + "b")
+
+# ── comments ────────────────────────────────────────────────────────────────
+check("trailing comment", YAML.parse("n: 1 # note")["n"], 1)
+check("hash inside quotes", YAML.parse(`s: "a # b"`)["s"], "a # b")
+check("hash without space kept", YAML.parse("s: a#b")["s"], "a#b")
+check("full-line comment", YAML.parse("# c" + NL + "n: 1")["n"], 1)
+
+# ── structure ───────────────────────────────────────────────────────────────
+checkVal("nested map", YAML.parse("a:" + NL + "  b:" + NL + "    c: 1"),
+         { "a": { "b": { "c": 1 } } })
+checkVal("sequence", YAML.parse("- 1" + NL + "- 2"), [1, 2])
+checkVal("seq of maps",
+         YAML.parse("u:" + NL + "  - n: a" + NL + "    v: 1" + NL + "  - n: b" + NL + "    v: 2"),
+         { "u": [{ "n": "a", "v": 1 }, { "n": "b", "v": 2 }] })
+checkVal("seq of seqs", YAML.parse("m:" + NL + "  - [1, 2]" + NL + "  - [3, 4]"),
+         { "m": [[1, 2], [3, 4]] })
+checkVal("flow seq", YAML.parse("l: [1, two, true]"), { "l": [1, "two", true] })
+checkVal("flow map", YAML.parse("m: {a: 1, b: two}"), { "m": { "a": 1, "b": "two" } })
+checkVal("nested flow", YAML.parse("m: [[1, 2], 3]"), { "m": [[1, 2], 3] })
+checkVal("empty flow seq", YAML.parse("l: []"), { "l": [] })
+
+# A colon inside a value must not split the line.
+check("url value", YAML.parse("u: http://a.b/c")["u"], "http://a.b/c")
+check("comma in flow string", YAML.parse(`l: ["a,b"]`)["l"][0], "a,b")
+
+# ── block scalars ───────────────────────────────────────────────────────────
+check("literal block", YAML.parse("t: |" + NL + "  a" + NL + "  b")["t"], "a" + NL + "b" + NL)
+check("literal strip", YAML.parse("t: |-" + NL + "  a" + NL + "  b")["t"], "a" + NL + "b")
+check("folded block", YAML.parse("t: >" + NL + "  a" + NL + "  b")["t"], "a b" + NL)
+
+# ── round trip ──────────────────────────────────────────────────────────────
+task roundTrips(label, value) {
+    back = YAML.parse(YAML.stringify(value))
+    check(label, to_json(back), to_json(value))
+}
+roundTrips("rt scalars", { "a": 1, "b": "two", "c": true, "d": nil })
+roundTrips("rt nested", { "x": { "y": { "z": [1, 2, 3] } } })
+roundTrips("rt seq of maps", { "u": [{ "n": "a" }, { "n": "b" }] })
+roundTrips("rt tricky strings", { "a": "true", "b": "8080", "c": "has: colon", "d": "#hash" })
+roundTrips("rt empty containers", { "a": {}, "b": [] })
+roundTrips("rt multiline", { "t": "line1" + NL + "line2" })
+roundTrips("rt multiline trailing", { "t": "a" + NL + "b" + NL })
+roundTrips("rt multiline many", { "t": "a" + NL + NL + NL })
+
+
+# ── errors ──────────────────────────────────────────────────────────────────
+task throws(label, source) {
+    try {
+        YAML.parse(source)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("bad mapping line", "just text without colon" + NL + "a: 1")
+throws("tab indentation", "a:" + NL + chr(9) + "b: 1")
+throws("unterminated flow", "l: [1, 2")
+
+check("isValid true", YAML.isValid("a: 1"), true)
+check("isValid false", YAML.isValid("- a" + NL + "bad"), false)
+check("parseOr fallback", YAML.parseOr("- a" + NL + "bad", "fb"), "fb")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

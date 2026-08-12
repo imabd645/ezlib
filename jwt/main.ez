@@ -1,0 +1,351 @@
+# ============================================================================
+# EZ Standard Library: JWT (JSON Web Tokens) — RFC 7519
+#
+# Supports HS256 / HS384 / HS512, full registered-claim validation, clock-skew
+# leeway and an algorithm allow-list.
+#
+#   token = JWT.encode({"sub": "u1"}, secret, {"expiresIn": 3600})
+#   claims = JWT.decode(token, secret)                  # throws on any problem
+#   res    = JWT.verify(token, secret)                  # never throws
+#   head   = JWT.peek(token)                            # NO verification
+#
+# Requires: ezcrypto
+# ============================================================================
+use "crypto"
+
+# ── Error prefixes ───────────────────────────────────────────────────────────
+# Every throw starts with one of these so a caller can tell an expired token
+# (retry after refresh) from a forged one (reject the request) without parsing
+# free text. Check with `indexOf(str(e), JWT_EXPIRED) == 0`.
+export JWT_MALFORMED   = "jwt/malformed: "
+export JWT_ALGORITHM   = "jwt/algorithm: "
+export JWT_SIGNATURE   = "jwt/signature: "
+export JWT_EXPIRED     = "jwt/expired: "
+export JWT_NOT_YET     = "jwt/not-yet-valid: "
+export JWT_CLAIM       = "jwt/claim: "
+
+# Algorithms this library will produce or accept. `none` is deliberately absent:
+# accepting it lets anyone strip the signature and forge any payload.
+_JWT_ALGS = ["HS256", "HS384", "HS512"]
+
+# ── Internals ────────────────────────────────────────────────────────────────
+
+# Current time as UNIX SECONDS. DateTime().timestamp() is milliseconds, and JWT
+# claims are seconds -- mixing the two makes every exp look ~1000x in the future.
+task _jwtNow() {
+    give floor(DateTime().timestamp() / 1000)
+}
+
+task _jwtSignHex(alg, secret, signingInput) {
+    when alg == "HS256" { give HMAC.sha256(secret, signingInput) }
+    when alg == "HS384" { give HMAC.sha384(secret, signingInput) }
+    when alg == "HS512" { give HMAC.sha512(secret, signingInput) }
+    throw JWT_ALGORITHM + "unsupported algorithm '" + str(alg) + "'"
+}
+
+task _jwtSignature(alg, secret, signingInput) {
+    give b64url_encode(hex_to_bytes(_jwtSignHex(alg, secret, signingInput)))
+}
+
+# Length-independent comparison.
+#
+# `a == b` on strings returns as soon as two bytes differ, so the time it takes
+# leaks how much of a forged signature was correct -- enough, over many tries, to
+# reconstruct a valid one byte by byte. This always walks the full length.
+task _jwtSecureEquals(a, b) {
+    sa = str(a)
+    sb = str(b)
+    diff = len(sa) ^ len(sb)
+    n = len(sa)
+    when len(sb) < n { n = len(sb) }
+    repeat i = 0 to n - 1 {
+        diff = diff | (ord(substr(sa, i, 1)) ^ ord(substr(sb, i, 1)))
+    }
+    give diff == 0
+}
+
+# EZ has TWO numeric types, and typeOf() never returns "number": an integer
+# literal comes back as "integer", while the same value round-tripped through
+# parse_json comes back as "float". Any claim check must accept both.
+task _jwtIsNum(v) {
+    t = typeOf(v)
+    give t == "integer" or t == "float"
+}
+
+task _jwtIsIn(value, list) {
+    get v in list {
+        when v == value { give true }
+    }
+    give false
+}
+
+task _jwtOpt(options, key, fallback) {
+    when typeOf(options) != "dictionary" { give fallback }
+    when not has_key(options, key) { give fallback }
+    v = options[key]
+    when typeOf(v) == "nil" { give fallback }
+    give v
+}
+
+# A claim that must be a number to mean anything. A token carrying
+# `"exp": "soon"` must be rejected, not silently treated as no expiry.
+task _jwtNumClaim(claims, key) {
+    when not has_key(claims, key) { give nil }
+    v = claims[key]
+    when _jwtIsNum(v) { give v }
+    throw JWT_CLAIM + "'" + key + "' must be numeric, got " + typeOf(v)
+}
+
+export model JWT {
+    # ── encode ──────────────────────────────────────────────────────────────
+    #
+    # options (all optional):
+    #   alg        "HS256" (default) | "HS384" | "HS512"
+    #   expiresIn  seconds from now -> exp
+    #   notBefore  seconds from now -> nbf
+    #   issuer / audience / subject / jwtid  -> iss / aud / sub / jti
+    #   noTimestamp  true to omit the automatic iat
+    #   header     extra header fields (alg/typ cannot be overridden)
+    static task encode(payload, secret, options = nil) {
+        when typeOf(payload) != "dictionary" {
+            throw JWT_CLAIM + "payload must be a dictionary, got " + typeOf(payload)
+        }
+        when typeOf(secret) != "string" or len(secret) == 0 {
+            throw JWT_SIGNATURE + "secret must be a non-empty string"
+        }
+
+        alg = str(_jwtOpt(options, "alg", "HS256"))
+        when not _jwtIsIn(alg, _JWT_ALGS) {
+            throw JWT_ALGORITHM + "unsupported algorithm '" + alg + "'"
+        }
+
+        # Copy so the caller's dictionary is never mutated.
+        claims = {}
+        get k in keys(payload) { claims[k] = payload[k] }
+
+        now = _jwtNow()
+        when not _jwtOpt(options, "noTimestamp", false) {
+            when not has_key(claims, "iat") { claims["iat"] = now }
+        }
+
+        expiresIn = _jwtOpt(options, "expiresIn", nil)
+        when _jwtIsNum(expiresIn) { claims["exp"] = now + expiresIn }
+
+        notBefore = _jwtOpt(options, "notBefore", nil)
+        when _jwtIsNum(notBefore) { claims["nbf"] = now + notBefore }
+
+        issuer = _jwtOpt(options, "issuer", nil)
+        when typeOf(issuer) != "nil" { claims["iss"] = issuer }
+        audience = _jwtOpt(options, "audience", nil)
+        when typeOf(audience) != "nil" { claims["aud"] = audience }
+        subject = _jwtOpt(options, "subject", nil)
+        when typeOf(subject) != "nil" { claims["sub"] = subject }
+        jwtid = _jwtOpt(options, "jwtid", nil)
+        when typeOf(jwtid) != "nil" { claims["jti"] = jwtid }
+
+        header = {}
+        extra = _jwtOpt(options, "header", nil)
+        when typeOf(extra) == "dictionary" {
+            get k in keys(extra) { header[k] = extra[k] }
+        }
+        # alg and typ are set last: a caller-supplied header must never be able
+        # to disagree with the algorithm actually used to sign.
+        header["alg"] = alg
+        header["typ"] = "JWT"
+
+        signingInput = b64url_encode(to_json(header)) + "." + b64url_encode(to_json(claims))
+        give signingInput + "." + _jwtSignature(alg, secret, signingInput)
+    }
+
+    # ── decode (verifying) ──────────────────────────────────────────────────
+    #
+    # Verifies the signature, then the registered claims. Throws on any failure.
+    #
+    # options (all optional):
+    #   algorithms  allow-list, default ["HS256","HS384","HS512"]
+    #   leeway      seconds of clock skew tolerated on exp/nbf/iat, default 0
+    #   issuer / audience / subject   required values
+    #   maxAge      seconds; rejects a token whose iat is older than this
+    #   ignoreExpiration / ignoreNotBefore   true to skip that check
+    static task decode(token, secret, options = nil) {
+        when typeOf(token) != "string" {
+            throw JWT_MALFORMED + "token must be a string, got " + typeOf(token)
+        }
+        parts = split(token, ".")
+        when len(parts) != 3 {
+            throw JWT_MALFORMED + "expected 3 dot-separated parts, got " + str(len(parts))
+        }
+        when len(parts[0]) == 0 or len(parts[1]) == 0 {
+            throw JWT_MALFORMED + "header and payload must not be empty"
+        }
+        when len(parts[2]) == 0 {
+            # An empty signature is the `alg: none` forgery in its usual form.
+            throw JWT_SIGNATURE + "token carries no signature"
+        }
+
+        header = {}
+        # The failure is recorded and thrown AFTER the try, never from inside the
+        # catch: a `throw` in a catch block is currently fatal when the call
+        # happens inside a web handler -- see Test/test_rethrow_in_handler.ez.
+        headerBad = false
+        try { header = parse_json(b64url_decode(parts[0])) }
+        catch (e) { headerBad = true }
+        when headerBad { throw JWT_MALFORMED + "header is not valid JSON" }
+        when typeOf(header) != "dictionary" {
+            throw JWT_MALFORMED + "header is not a JSON object"
+        }
+
+        allowed = _jwtOpt(options, "algorithms", _JWT_ALGS)
+        when typeOf(allowed) != "array" { allowed = [str(allowed)] }
+
+        when not has_key(header, "alg") { throw JWT_ALGORITHM + "header has no 'alg'" }
+        alg = str(header["alg"])
+        # Checked BEFORE verifying, so an attacker cannot pick the algorithm.
+        when not _jwtIsIn(alg, allowed) {
+            throw JWT_ALGORITHM + "algorithm '" + alg + "' is not allowed"
+        }
+        when not _jwtIsIn(alg, _JWT_ALGS) {
+            throw JWT_ALGORITHM + "unsupported algorithm '" + alg + "'"
+        }
+
+        signingInput = parts[0] + "." + parts[1]
+        when not _jwtSecureEquals(parts[2], _jwtSignature(alg, secret, signingInput)) {
+            throw JWT_SIGNATURE + "signature verification failed"
+        }
+
+        claims = {}
+        claimsBad = false
+        try { claims = parse_json(b64url_decode(parts[1])) }
+        catch (e) { claimsBad = true }
+        when claimsBad { throw JWT_MALFORMED + "payload is not valid JSON" }
+        when typeOf(claims) != "dictionary" {
+            throw JWT_MALFORMED + "payload is not a JSON object"
+        }
+
+        JWT._validateClaims(claims, options)
+        give claims
+    }
+
+    # ── verify: same checks, no throw ───────────────────────────────────────
+    # Returns { "valid": bool, "claims": dict|nil, "error": string|nil }.
+    # Useful on a request path where a failure is an expected outcome.
+    static task verify(token, secret, options = nil) {
+        try {
+            claims = JWT.decode(token, secret, options)
+            give { "valid": true, "claims": claims, "error": nil }
+        } catch (e) {
+            give { "valid": false, "claims": nil, "error": str(e) }
+        }
+    }
+
+    # ── peek: read WITHOUT verifying ────────────────────────────────────────
+    # For inspecting a token you have not authenticated -- reading `iss` to pick
+    # a key, or logging. Never trust these claims for an access decision.
+    static task peek(token) {
+        parts = split(str(token), ".")
+        when len(parts) < 2 { throw JWT_MALFORMED + "expected at least 2 parts" }
+        header = {}
+        claims = {}
+        # Recorded, then thrown after the try -- see the note in decode().
+        bad = ""
+        try { header = parse_json(b64url_decode(parts[0])) }
+        catch (e) { bad = "header" }
+        try { claims = parse_json(b64url_decode(parts[1])) }
+        catch (e) { when len(bad) == 0 { bad = "payload" } }
+        when len(bad) > 0 { throw JWT_MALFORMED + bad + " is not valid JSON" }
+        give { "header": header, "payload": claims }
+    }
+
+    # True when exp has passed. Does not verify the signature.
+    static task isExpired(token, leeway = 0) {
+        p = JWT.peek(token)
+        claims = p["payload"]
+        when not has_key(claims, "exp") { give false }
+        exp = claims["exp"]
+        when not _jwtIsNum(exp) { give true }
+        give _jwtNow() - leeway >= exp
+    }
+
+    # Seconds until exp; negative once past, nil when the token never expires.
+    static task expiresIn(token) {
+        p = JWT.peek(token)
+        claims = p["payload"]
+        when not has_key(claims, "exp") { give nil }
+        exp = claims["exp"]
+        when not _jwtIsNum(exp) { give nil }
+        give exp - _jwtNow()
+    }
+
+    # ── claim validation ────────────────────────────────────────────────────
+    static task _validateClaims(claims, options) {
+        now    = _jwtNow()
+        leeway = _jwtOpt(options, "leeway", 0)
+        when not _jwtIsNum(leeway) { leeway = 0 }
+
+        when not _jwtOpt(options, "ignoreExpiration", false) {
+            exp = _jwtNumClaim(claims, "exp")
+            when _jwtIsNum(exp) {
+                when now - leeway >= exp {
+                    throw JWT_EXPIRED + "token expired at " + str(exp) + " (now " + str(now) + ")"
+                }
+            }
+        }
+
+        when not _jwtOpt(options, "ignoreNotBefore", false) {
+            nbf = _jwtNumClaim(claims, "nbf")
+            when _jwtIsNum(nbf) {
+                when now + leeway < nbf {
+                    throw JWT_NOT_YET + "token not valid before " + str(nbf) + " (now " + str(now) + ")"
+                }
+            }
+        }
+
+        iat = _jwtNumClaim(claims, "iat")
+        maxAge = _jwtOpt(options, "maxAge", nil)
+        when _jwtIsNum(maxAge) {
+            when not _jwtIsNum(iat) {
+                throw JWT_CLAIM + "maxAge was requested but the token has no 'iat'"
+            }
+            when now - leeway >= iat + maxAge {
+                throw JWT_EXPIRED + "token older than maxAge (" + str(maxAge) + "s)"
+            }
+        }
+
+        wantIss = _jwtOpt(options, "issuer", nil)
+        when typeOf(wantIss) != "nil" {
+            when not has_key(claims, "iss") { throw JWT_CLAIM + "missing 'iss'" }
+            when str(claims["iss"]) != str(wantIss) {
+                throw JWT_CLAIM + "issuer mismatch: expected '" + str(wantIss) + "', got '" + str(claims["iss"]) + "'"
+            }
+        }
+
+        wantSub = _jwtOpt(options, "subject", nil)
+        when typeOf(wantSub) != "nil" {
+            when not has_key(claims, "sub") { throw JWT_CLAIM + "missing 'sub'" }
+            when str(claims["sub"]) != str(wantSub) {
+                throw JWT_CLAIM + "subject mismatch: expected '" + str(wantSub) + "', got '" + str(claims["sub"]) + "'"
+            }
+        }
+
+        wantAud = _jwtOpt(options, "audience", nil)
+        when typeOf(wantAud) != "nil" {
+            when not has_key(claims, "aud") { throw JWT_CLAIM + "missing 'aud'" }
+            # RFC 7519: aud is a string OR an array of strings. Accept a match
+            # against either shape.
+            tokenAud = claims["aud"]
+            matched = false
+            when typeOf(tokenAud) == "array" {
+                get a in tokenAud {
+                    when str(a) == str(wantAud) { matched = true }
+                }
+            } other {
+                matched = str(tokenAud) == str(wantAud)
+            }
+            when not matched {
+                throw JWT_CLAIM + "audience mismatch: expected '" + str(wantAud) + "'"
+            }
+        }
+
+        give true
+    }
+}

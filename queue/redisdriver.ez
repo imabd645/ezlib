@@ -1,0 +1,143 @@
+# ============================================================================
+# queue/redisdriver.ez — Redis-backed driver
+#
+# Jobs outlive the process that queued them, and several workers can share one
+# queue. Each job is stored as JSON in a Redis list; reserving pops from it.
+#
+# A reserved job is also written to a "processing" list so a worker that dies
+# mid-job leaves a trace rather than losing the work silently. Recovering
+# those is `recoverStalled()` -- deliberately manual, because automatically
+# re-running a job that may have half-completed is not always safe.
+# ============================================================================
+
+use "redis"
+
+export model RedisDriver {
+
+    init(client, prefix) {
+        self.redis = client
+        self.prefix = prefix
+    }
+
+    task listKey(queueName) { give self.prefix + ":" + queueName }
+    task delayedKey(queueName) { give self.prefix + ":" + queueName + ":delayed" }
+    task processingKey(queueName) { give self.prefix + ":" + queueName + ":processing" }
+    task failedKey() { give self.prefix + ":failed" }
+
+    task push(name, payload, options) {
+        id = str(self.redis.increment(self.prefix + ":id"))
+        job = {
+            "id": id,
+            "name": name,
+            "payload": payload,
+            "attempts": 0,
+            "availableAt": 0,
+            "queue": options["queue"]
+        }
+        when has_key(options, "delay") {
+            job["availableAt"] = clock() + (options["delay"] * 1000)
+            # Delayed jobs wait in their own list until promoted, so a worker
+            # never has to scan past them.
+            self.redis.listPush(self.delayedKey(options["queue"]), to_json(job))
+        }
+        other {
+            self.redis.listPush(self.listKey(options["queue"]), to_json(job))
+        }
+        give id
+    }
+
+    # Moves any due delayed jobs onto the main list.
+    task promoteDelayed(queueName) {
+        key = self.delayedKey(queueName)
+        now = clock()
+        total = self.redis.listLength(key)
+        moved = 0
+        repeat i = 1 to total {
+            raw = self.redis.listPopFront(key)
+            when raw == nil { escape }
+            job = parse_json(raw)
+            when job["availableAt"] <= now {
+                self.redis.listPush(self.listKey(queueName), raw)
+                moved = moved + 1
+            }
+            other { self.redis.listPush(key, raw) }
+        }
+        give moved
+    }
+
+    task reserve(queueName) {
+        self.promoteDelayed(queueName)
+        raw = self.redis.listPopFront(self.listKey(queueName))
+        when raw == nil { give nil }
+        job = parse_json(raw)
+        job["attempts"] = job["attempts"] + 1
+        self.redis.listPush(self.processingKey(queueName), to_json(job))
+        give job
+    }
+
+    task removeFromProcessing(job) {
+        key = self.processingKey(job["queue"])
+        total = self.redis.listLength(key)
+        repeat i = 1 to total {
+            raw = self.redis.listPopFront(key)
+            when raw == nil { escape }
+            when parse_json(raw)["id"] != job["id"] { self.redis.listPush(key, raw) }
+        }
+        give nil
+    }
+
+    task complete(job) {
+        self.removeFromProcessing(job)
+        give nil
+    }
+
+    task release(job, delaySeconds) {
+        self.removeFromProcessing(job)
+        job["availableAt"] = clock() + (delaySeconds * 1000)
+        when delaySeconds > 0 {
+            self.redis.listPush(self.delayedKey(job["queue"]), to_json(job))
+        }
+        other {
+            self.redis.listPush(self.listKey(job["queue"]), to_json(job))
+        }
+        give nil
+    }
+
+    task fail(job, reason) {
+        self.removeFromProcessing(job)
+        job["error"] = str(reason)
+        self.redis.listPush(self.failedKey(), to_json(job))
+        give nil
+    }
+
+    task size(queueName) { give self.redis.listLength(self.listKey(queueName)) }
+
+    task failedJobs() {
+        jobs = []
+        get raw in self.redis.listRange(self.failedKey(), 0, -1) {
+            push(jobs, parse_json(raw))
+        }
+        give jobs
+    }
+
+    task clear(queueName) {
+        self.redis.delete(self.listKey(queueName))
+        self.redis.delete(self.delayedKey(queueName))
+        give nil
+    }
+
+    # Jobs left in processing by a worker that died. Returns how many were
+    # put back. Call this on startup, not on a timer -- a job that is merely
+    # slow would otherwise be run twice.
+    task recoverStalled(queueName) {
+        key = self.processingKey(queueName)
+        recovered = 0
+        while true {
+            raw = self.redis.listPopFront(key)
+            when raw == nil { escape }
+            self.redis.listPush(self.listKey(queueName), raw)
+            recovered = recovered + 1
+        }
+        give recovered
+    }
+}

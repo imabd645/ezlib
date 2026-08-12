@@ -1,0 +1,146 @@
+# ============================================================================
+# table — test suite
+#   ez test.ez
+# ============================================================================
+
+use "table"
+use "color"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task linesOf(text) { give split(text, NL) }
+
+out "table tests"
+Color.enable()
+
+# ── structure ───────────────────────────────────────────────────────────────
+t = Table(["A", "B"])
+t.row(["1", "2"])
+rendered = t.render()
+lines = linesOf(rendered)
+# top rule, header, separator, one row, bottom rule
+check("line count", len(lines), 5)
+check("header present", contains(lines[1], "A"), true)
+check("row present", contains(lines[3], "1"), true)
+check("has top border", startsWith(lines[0], "┌"), true)
+check("has bottom border", startsWith(lines[4], "└"), true)
+
+# Every line must be the same width, or the box does not close.
+widths = []
+get line in lines { push(widths, visibleLength(line)) }
+sameWidth = true
+get w in widths { when w != widths[0] { sameWidth = false } }
+check("all lines equal width", sameWidth, true)
+
+check("no headers means no header row", len(linesOf(Table(nil).addRows([["x"]]).render())), 3)
+check("empty table renders empty", Table(nil).render(), "")
+
+# ── sizing ──────────────────────────────────────────────────────────────────
+# The column must fit its widest cell, header or body.
+wide = Table(["A"]).addRows([["longer value"]]).render()
+check("column fits widest cell", contains(wide, "longer value"), true)
+headerWide = Table(["a long header"]).addRows([["x"]]).render()
+check("column fits header", contains(headerWide, "a long header"), true)
+
+# Ragged rows are padded rather than breaking the box.
+ragged = Table(["A", "B", "C"]).addRows([["1"]]).render()
+raggedLines = linesOf(ragged)
+check("ragged row keeps width", visibleLength(raggedLines[1]), visibleLength(raggedLines[3]))
+
+# ── alignment ───────────────────────────────────────────────────────────────
+# widths() CAPS a column, it does not widen one -- so the column is sized by
+# a five-character header and the one-character cell is padded into it.
+left = Table(["12345"]).addRows([["x"]]).render()
+check("left aligned by default", contains(left, "x    "), true)
+right = Table(["12345"]).align(["right"]).addRows([["x"]]).render()
+check("right aligned", contains(right, "    x"), true)
+centre = Table(["12345"]).align(["center"]).addRows([["x"]]).render()
+check("centre aligned", contains(centre, "  x  "), true)
+
+# ── ANSI awareness ──────────────────────────────────────────────────────────
+# The whole reason this depends on `color`: a coloured cell is longer in bytes
+# than it looks, and padding by len() would leave the column ragged.
+coloured = Table(["A"]).addRows([[green("ab")], ["cd"]]).render()
+colLines = linesOf(coloured)
+check("coloured row width matches plain",
+      visibleLength(colLines[3]), visibleLength(colLines[4]))
+check("colour survives rendering", contains(coloured, chr(27)), true)
+check("cell text still there", contains(stripAnsi(coloured), "ab"), true)
+
+# ── truncation ──────────────────────────────────────────────────────────────
+cut = Table(["H"]).widths([5]).addRows([["abcdefghij"]]).render()
+check("truncates to the cap", contains(cut, "abcd…"), true)
+check("does not exceed the cap", visibleLength(linesOf(cut)[1]), visibleLength(linesOf(cut)[3]))
+check("short cell untouched", contains(Table(["H"]).widths([10]).addRows([["ab"]]).render(), "ab"), true)
+check("zero cap means unlimited",
+      contains(Table(["H"]).widths([0]).addRows([["abcdefghij"]]).render(), "abcdefghij"), true)
+
+# ── borders ─────────────────────────────────────────────────────────────────
+ascii1 = Table(["A"]).addRows([["1"]]).borders("ascii").render()
+check("ascii corners", startsWith(ascii1, "+"), true)
+check("ascii horizontal", contains(ascii1, "---"), true)
+check("ascii vertical", contains(ascii1, "|"), true)
+
+rounded = Table(["A"]).addRows([["1"]]).borders("rounded").render()
+check("rounded corner", startsWith(rounded, "╭"), true)
+
+double = Table(["A"]).addRows([["1"]]).borders("double").render()
+check("double corner", startsWith(double, "╔"), true)
+
+none1 = Table(["A"]).addRows([["1"]]).borders("none").render()
+check("none has no box characters", contains(none1, "│"), false)
+check("none still has content", contains(none1, "1"), true)
+
+# Markdown: no top or bottom rule, and a separator carrying alignment.
+md = Table(["A", "B"]).addRows([["1", "2"]]).borders("markdown").render()
+mdLines = linesOf(md)
+check("markdown line count", len(mdLines), 3)
+check("markdown header", startsWith(mdLines[0], "|"), true)
+check("markdown separator", contains(mdLines[1], "-"), true)
+check("markdown has no top rule", startsWith(md, "+"), false)
+mdRight = Table(["A"]).align(["right"]).addRows([["1"]]).borders("markdown").render()
+check("markdown alignment colon", contains(linesOf(mdRight)[1], ":"), true)
+
+# ── records ─────────────────────────────────────────────────────────────────
+records = [
+    { "name": "a", "qty": 1 },
+    { "name": "b", "qty": 2 }
+]
+r = Table(nil).fromRecords(records, ["name", "qty"]).render()
+check("records header", contains(r, "name"), true)
+check("records first row", contains(r, "a"), true)
+check("records second row", contains(r, "b"), true)
+# A record missing a field renders blank rather than failing.
+missing = Table(nil).fromRecords([{ "name": "a" }], ["name", "qty"]).render()
+check("missing field is blank", contains(missing, "a"), true)
+
+# ── values ──────────────────────────────────────────────────────────────────
+mixed = Table(["A"]).addRows([[42], [true], [nil], ["s"]]).render()
+check("number cell", contains(mixed, "42"), true)
+check("bool cell", contains(mixed, "true"), true)
+check("nil cell is blank", contains(stripAnsi(mixed), "nil"), false)
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+check("renderTable", contains(renderTable(["A"], [["1"]]), "A"), true)
+check("recordsTable", contains(recordsTable(records, ["name"]), "name"), true)
+
+# ── borders module ──────────────────────────────────────────────────────────
+check("borderStyle default is single", borderStyle("single")["topLeft"], "┌")
+check("borderStyle unknown falls back", borderStyle("nonsense")["topLeft"], "┌")
+check("isBorderless for none", isBorderless(borderStyle("none")), true)
+check("isBorderless false for ascii", isBorderless(borderStyle("ascii")), false)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

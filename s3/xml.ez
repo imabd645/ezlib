@@ -1,0 +1,96 @@
+# ============================================================================
+# s3/xml.ez — pulling values out of S3's responses
+#
+# S3 answers in XML. This is deliberately not a general XML parser: the `xml`
+# package is that, and depending on it to read four element names out of a
+# machine-generated document would be a dependency for nothing.
+#
+# The shapes here are fixed by the S3 API and have been for fifteen years:
+#
+#   <ListBucketResult><Contents><Key>…</Key><Size>…</Size></Contents>…
+#   <Error><Code>…</Code><Message>…</Message></Error>
+#
+# Anything more elaborate than that -- namespaces, attributes, CDATA -- does
+# not appear in them, and `unescape` handles the five entities that do.
+# ============================================================================
+
+# The text of the first <name>…</name>, or nil.
+export task firstTag(body, name) {
+    when body == nil { give nil }
+    open = "<" + name + ">"
+    close = "</" + name + ">"
+    start = indexOf(body, open)
+    when start < 0 { give nil }
+    from = start + len(open)
+    rest = substr(body, from, len(body) - from)
+    closeAt = indexOf(rest, close)
+    when closeAt < 0 { give nil }
+    give unescapeXml(substr(rest, 0, closeAt))
+}
+
+# The text of every <name>…</name>, in document order.
+export task allTags(body, name) {
+    found = []
+    when body == nil { give found }
+    open = "<" + name + ">"
+    close = "</" + name + ">"
+    rest = str(body)
+    while true {
+        start = indexOf(rest, open)
+        when start < 0 { give found }
+        from = start + len(open)
+        rest = substr(rest, from, len(rest) - from)
+        closeAt = indexOf(rest, close)
+        when closeAt < 0 { give found }
+        push(found, unescapeXml(substr(rest, 0, closeAt)))
+        rest = substr(rest, closeAt + len(close), len(rest) - closeAt - len(close))
+    }
+    give found
+}
+
+# Each <name>…</name> as a whole block, so the fields inside one entry can be
+# read together rather than by position across parallel lists -- which breaks
+# the moment one entry omits an optional field.
+export task blocks(body, name) {
+    found = []
+    when body == nil { give found }
+    open = "<" + name + ">"
+    close = "</" + name + ">"
+    rest = str(body)
+    while true {
+        start = indexOf(rest, open)
+        when start < 0 { give found }
+        from = start + len(open)
+        rest = substr(rest, from, len(rest) - from)
+        closeAt = indexOf(rest, close)
+        when closeAt < 0 { give found }
+        push(found, substr(rest, 0, closeAt))
+        rest = substr(rest, closeAt + len(close), len(rest) - closeAt - len(close))
+    }
+    give found
+}
+
+# `escape` is an EZ keyword, so these are named for what they escape.
+# &amp; must be decoded last, or an escaped ampersand would be decoded twice and
+# "&amp;lt;" would come out as "<".
+export task unescapeXml(text) {
+    body = str(text)
+    body = replace(body, "&quot;", "\"")
+    body = replace(body, "&apos;", "'")
+    body = replace(body, "&lt;", "<")
+    body = replace(body, "&gt;", ">")
+    give replace(body, "&amp;", "&")
+}
+
+export task escapeXml(text) {
+    body = replace(str(text), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    body = replace(body, "\"", "&quot;")
+    give replace(body, "'", "&apos;")
+}
+
+export task isErrorDocument(body) {
+    when body == nil or body == "" { give false }
+    give contains(body, "<Error>") or contains(body, "<Code>")
+}

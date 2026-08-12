@@ -1,0 +1,43 @@
+// ============================================================================
+// ezenv / errors.ez -- structured errors for the env package.
+//
+// Every failure carries an error type, a message, and (where applicable) the
+// line number and filename that caused it. Callers can branch on error["error"]
+// ("ParseError", "KeyError", "TypeError") rather than matching message text.
+// ============================================================================
+
+// Format a structured error into a readable one-liner for throw.
+export task format_env_error(e) {
+    when typeOf(e) != "dictionary" { give str(e) }
+    when not has_key(e, "error") { give str(e) }
+    s = "ezenv: " + e["error"] + ": " + e["message"]
+    when has_key(e, "line") { s = s + "  [line " + str(e["line"]) + "]" }
+    when has_key(e, "file") { s = s + "  [file: " + e["file"] + "]" }
+    give s
+}
+
+// Build and throw a ParseError -- malformed .env syntax.
+export task raise_parse_error(message, lineNum = nil, file = nil) {
+    e = { "error": "ParseError", "message": str(message) }
+    when typeOf(lineNum) != "nil" { e["line"] = lineNum }
+    when typeOf(file) != "nil" { e["file"] = file }
+    throw format_env_error(e)
+}
+
+// Build and throw a KeyError -- a required key was not found.
+export task raise_key_error(key) {
+    e = {
+        "error": "KeyError",
+        "message": "required environment variable '" + str(key) + "' is not set"
+    }
+    throw format_env_error(e)
+}
+
+// Build and throw a TypeError -- a value could not be coerced to the requested type.
+export task raise_type_error(key, targetType, rawValue) {
+    e = {
+        "error": "TypeError",
+        "message": "cannot coerce '" + str(key) + "' value '" + str(rawValue) + "' to " + str(targetType)
+    }
+    throw format_env_error(e)
+}

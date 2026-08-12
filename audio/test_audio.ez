@@ -1,0 +1,110 @@
+# ============================================================================
+# Audio package test suite — non-interactive.
+#
+# Plays a short system sound; no dialogs, no blocking waits.
+# ============================================================================
+use "audio"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=" + str(got) + " want=" + str(want)
+    }
+}
+
+SND = "C:\\Windows\\Media\\tada.wav"
+haveSound = File.exists(SND)
+
+out "== state before anything is opened =="
+checkEq("status", status(), "not open")
+check("isPlaying false", isPlaying() == false)
+check("isPaused false", isPaused() == false)
+checkEq("position", position(), -1)
+checkEq("current", typeOf(current()), "nil")
+checkEq("no tracks", len(tracks()), 0)
+
+out ""
+out "== a missing file is reported, not left to MCI =="
+check("play returns false", play("_no_such_audio_file.mp3") == false)
+check("lastError names the file", indexOf(lastError(), "_no_such_audio_file.mp3") != -1)
+check("playSound returns false", playSound("_no_such.wav") == false)
+
+out ""
+out "== volume clamps rather than failing =="
+check("above range accepted", typeOf(volume(999999)) == "bool")
+check("below range accepted", typeOf(volume(-100)) == "bool")
+
+out ""
+when not haveSound {
+    out "  (skipping playback: " + SND + " not present)"
+} other {
+    out "== playback =="
+    check("play starts", play(SND))
+    checkEq("status is playing", status(), "playing")
+    check("isPlaying", isPlaying())
+    check("length is known", length() > 0)
+    checkEq("current names the file", current(), SND)
+    checkEq("one track open", len(tracks()), 1)
+
+    wait(150)
+    check("position advances", position() >= 0)
+
+    check("pause", pause())
+    checkEq("status is paused", status(), "paused")
+    check("isPaused", isPaused())
+    check("resume", resume())
+    checkEq("status is playing again", status(), "playing")
+
+    check("seek", seek(50))
+    check("stop", stop())
+    checkEq("status after stop", status(), "not open")
+    checkEq("tracks empty after stop", len(tracks()), 0)
+
+    out ""
+    out "== paths containing spaces =="
+    # MCI reads an unquoted path as a filename plus flags, so anything under a
+    # folder with a space in it failed to open until the path was quoted.
+    COPY = "_audio test copy.wav"
+    src = File(SND, "rb")
+    data = src.readAll()
+    src.close()
+    dst = File(COPY, "wb")
+    dst.write(data)
+    dst.close()
+    check("opens a spaced path", play(COPY))
+    checkEq("status", status(), "playing")
+    stop()
+    File.remove(COPY)
+
+    out ""
+    out "== several tracks at once =="
+    check("track A starts", play(SND, false, "a"))
+    check("track B starts", play(SND, false, "b"))
+    checkEq("both open", len(tracks()), 2)
+    check("A is playing", isPlaying("a"))
+    check("B is playing", isPlaying("b"))
+    stop("a")
+    checkEq("A closed", status("a"), "not open")
+    check("B still playing", isPlaying("b"))
+    checkEq("stopAll closes the rest", stopAll(), 1)
+    checkEq("nothing left", len(tracks()), 0)
+
+    out ""
+    out "== playSound (WAV fast path) =="
+    check("playSound", playSound(SND))
+    wait(100)
+}
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

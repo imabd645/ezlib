@@ -1,0 +1,266 @@
+# ============================================================================
+# wa_qr.ez — QR code generation for WhatsApp Web pairing
+#
+# WhatsApp sends a QR code string (base64 ref + server pub key + timestamp)
+# separated by commas. We render it as ASCII art in the terminal using the
+# QR code symbol matrix algorithm.
+#
+# Depends on: wa_crypto.ez (wac_strToBytes, _wac_sliceBytes, Base64)
+# ============================================================================
+
+use "wa_crypto.ez"
+
+# ── QR Code Mode / Error Correction ──────────────────────────────────────────
+_QR_EC_L = 1   # Low — maximum data capacity
+
+# ── Galois Field GF(256) tables (for QR Reed-Solomon) ────────────────────────
+_GF_EXP = []
+_GF_LOG = []
+
+task _qr_initGF() {
+    repeat i = 0 to 255 {
+        push(_GF_EXP, 0)
+        push(_GF_LOG, 0)
+    }
+    x = 1
+    repeat i = 0 to 254 {
+        _GF_EXP[i] = x
+        _GF_LOG[x] = i
+        x = x * 2
+        when x > 255 { x = x ^ 285 }
+    }
+}
+_qr_initGF()
+
+task _gf_mul(a, b) {
+    when a == 0 or b == 0 { give 0 }
+    give _GF_EXP[(_GF_LOG[a] + _GF_LOG[b]) % 255]
+}
+
+task _gf_poly_mul(p, q) {
+    r = []
+    repeat i = 0 to len(p) + len(q) - 2 { push(r, 0) }
+    repeat i = 0 to len(p) - 1 {
+        repeat j = 0 to len(q) - 1 {
+            r[i + j] = r[i + j] ^ _gf_mul(p[i], q[j])
+        }
+    }
+    give r
+}
+
+task _gf_rs_generator(n) {
+    g = [1]
+    repeat i = 0 to n - 1 {
+        g = _gf_poly_mul(g, [1, _GF_EXP[i]])
+    }
+    give g
+}
+
+task _gf_rs_remainder(data, gen) {
+    msg = []
+    get b in data { push(msg, b) }
+    repeat i = 0 to len(gen) - 2 { push(msg, 0) }
+    repeat i = 0 to len(data) - 1 {
+        coeff = msg[i]
+        when coeff != 0 {
+            repeat j = 0 to len(gen) - 1 {
+                msg[i + j] = msg[i + j] ^ _gf_mul(gen[j], coeff)
+            }
+        }
+    }
+    give _wac_sliceBytes(msg, len(data), len(msg) - len(data))
+}
+
+# ── QR data encoding (byte mode, version 3, EC level L) ──────────────────────
+# Version 3 = 29×29 modules, handles up to 53 bytes in byte mode (EC-L)
+task _qr_encodeData(text) {
+    bytes = wac_strToBytes(text)
+    n     = len(bytes)
+
+    # Mode indicator: 0100 (byte mode) = 4
+    # Character count: 8 bits for version 3
+    bits = []
+
+    # Mode: 0100
+    push(bits, 0) push(bits, 1) push(bits, 0) push(bits, 0)
+
+    # Count: n in 8 bits
+    repeat b = 7 to 0 step -1 {
+        when b < 0 { b = 0 }
+        push(bits, (n >> b) & 1)
+    }
+
+    # Data bytes
+    get byte in bytes {
+        repeat b = 7 to 0 step -1 {
+            when b < 0 { b = 0 }
+            push(bits, (byte >> b) & 1)
+        }
+    }
+
+    # Terminator 0000
+    repeat i = 0 to 3 { push(bits, 0) }
+
+    # Pad to byte boundary
+    while len(bits) % 8 != 0 { push(bits, 0) }
+
+    # Pack bits to bytes
+    dataBytes = []
+    i = 0
+    while i < len(bits) {
+        b = 0
+        repeat j = 0 to 7 { b = (b << 1) | bits[i + j] }
+        push(dataBytes, b)
+        i = i + 8
+    }
+
+    # Pad to capacity: version 3-L = 53 data codewords (17 EC codewords)
+    capacity = 53
+    padBytes = [236, 17]
+    pi = 0
+    while len(dataBytes) < capacity {
+        push(dataBytes, padBytes[pi % 2])
+        pi = pi + 1
+    }
+
+    # Reed-Solomon error correction (17 EC codewords for v3-L)
+    gen = _gf_rs_generator(17)
+    ecBytes = _gf_rs_remainder(dataBytes, gen)
+
+    finalBytes = []
+    get b in dataBytes { push(finalBytes, b) }
+    get b in ecBytes   { push(finalBytes, b) }
+    give finalBytes
+}
+
+# ── Build a 29×29 QR module grid ─────────────────────────────────────────────
+task _qr_buildGrid(finalBytes) {
+    size = 29
+    # Initialize grid: nil = unset, true = dark, false = light
+    grid = []
+    repeat i = 0 to size - 1 {
+        row = []
+        repeat j = 0 to size - 1 { push(row, nil) }
+        push(grid, row)
+    }
+
+    # ── Place finder patterns (7×7) at 3 corners ─────────────────────────────
+    task placeFinder(r, c) {
+        repeat i = 0 to 6 {
+            repeat j = 0 to 6 {
+                dark = (i == 0 or i == 6 or j == 0 or j == 6 or (i >= 2 and i <= 4 and j >= 2 and j <= 4))
+                grid[r + i][c + j] = dark
+            }
+        }
+    }
+    placeFinder(0, 0)
+    placeFinder(0, size - 7)
+    placeFinder(size - 7, 0)
+
+    # Separators (light border around finders)
+    # Format info placeholders (dark module at 8,8)
+    grid[8][8] = true  # dark module always present in v3
+
+    # ── Timing patterns (alternating dark/light from finder to finder) ────────
+    repeat i = 8 to size - 9 {
+        grid[6][i] = (i % 2 == 0)
+        grid[i][6] = (i % 2 == 0)
+    }
+
+    # ── Alignment pattern at (22, 22) for version 3 ───────────────────────────
+    task placeAlign(r, c) {
+        repeat i = -2 to 2 {
+            repeat j = -2 to 2 {
+                dark = (i == -2 or i == 2 or j == -2 or j == 2 or (i == 0 and j == 0))
+                grid[r + i][c + j] = dark
+            }
+        }
+    }
+    placeAlign(22, 22)
+
+    # ── Place data bits (zigzag up/down pattern) ──────────────────────────────
+    bits = []
+    get byte in finalBytes {
+        repeat b = 7 to 0 step -1 {
+            when b < 0 { b = 0 }
+            push(bits, (byte >> b) & 1)
+        }
+    }
+
+    bitIdx  = 0
+    col     = size - 1
+    goingUp = true
+
+    while col >= 1 {
+        when col == 6 { col = col - 1 }
+
+        rowRange = []
+        when goingUp {
+            repeat r = size - 1 to 0 step -1 { push(rowRange, r) }
+        } other {
+            repeat r = 0 to size - 1 { push(rowRange, r) }
+        }
+
+        get row in rowRange {
+            repeat c = 0 to 1 {
+                actualCol = col - c
+                when grid[row][actualCol] == nil {
+                    when bitIdx < len(bits) {
+                        grid[row][actualCol] = bits[bitIdx] == 1
+                        bitIdx = bitIdx + 1
+                    } other {
+                        grid[row][actualCol] = false
+                    }
+                }
+            }
+        }
+        col     = col - 2
+        goingUp = not goingUp
+    }
+
+    # Apply mask pattern 0 (i+j % 2 == 0)
+    repeat r = 0 to size - 1 {
+        repeat c = 0 to size - 1 {
+            when (r + c) % 2 == 0 and grid[r][c] != nil {
+                grid[r][c] = not grid[r][c]
+            }
+        }
+    }
+
+    give grid
+}
+
+# ── Render QR grid as ASCII art in the terminal ───────────────────────────────
+export task waq_printQR(text) {
+    out "\n📱 Scan this QR code with WhatsApp:\n"
+
+    finalBytes = _qr_encodeData(text)
+    grid = _qr_buildGrid(finalBytes)
+    size = 29
+
+    # Print with 4-cell quiet zone
+    border = "█"
+    topBorder = ""
+    repeat i = 0 to size + 3 { topBorder = topBorder + "██" }
+    out topBorder
+
+    repeat r = 0 to size - 1 {
+        line = "████"
+        repeat c = 0 to size - 1 {
+            cell = grid[r][c]
+            when cell == true  { line = line + "  " }
+            other              { line = line + "██" }
+        }
+        line = line + "████"
+        out line
+    }
+
+    out topBorder
+    out "\n"
+}
+
+# ── Parse WhatsApp QR ref from server into printable string ──────────────────
+# WhatsApp QR payload format: "<ref>,<server_pub_key_b64>,<client_id_b64>"
+export task waq_buildQRContent(qrRef, serverPubKeyBytes, clientIdBytes) {
+    give qrRef + "," + Base64.encode(serverPubKeyBytes) + "," + Base64.encode(clientIdBytes)
+}

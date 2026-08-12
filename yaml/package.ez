@@ -1,0 +1,11 @@
+{
+  "name": "yaml",
+  "version": "1.0.0",
+  "description": "YAML parser and serialiser for EZ. Mappings, sequences, flow collections, block scalars, typed scalars and round-trip stringify.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["yaml", "config", "parser", "serialise", "settings"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

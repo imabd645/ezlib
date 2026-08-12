@@ -1,0 +1,243 @@
+# ============================================================================
+# cache — in-memory caching for EZ
+#
+#   use "cache"
+#
+#   c = Cache(300)                    # entries expire after 300 seconds
+#   c.set("user:1", record)
+#   record = c.get("user:1")          # nil once expired
+#
+#   # Compute-on-miss, the shape most caching actually takes:
+#   record = c.fetch("user:1", || loadUser(1))
+#
+# Expiry is checked on read rather than swept on a timer: EZ has no background
+# scheduler here, and a lazy check costs nothing until the key is asked for.
+# A bounded cache also evicts least-recently-used entries when it is full, so
+# a long-running server cannot grow without limit.
+# ============================================================================
+
+export model Cache {
+
+    # ttlSeconds: default lifetime, 0 for no expiry.
+    # maxEntries: 0 for unbounded.
+    init(ttlSeconds) {
+        self.ttl = ttlSeconds
+        self.maxEntries = 0
+        self.store = {}
+        self.order = []        # keys, least-recently-used first
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+    }
+
+    # Cap the number of entries. Beyond it, the least recently used is
+    # dropped. Returns the cache so it can be chained after construction.
+    task limit(maxEntries) {
+        self.maxEntries = maxEntries
+        self.evictOverflow()
+        give self
+    }
+
+    # ── internals ───────────────────────────────────────────────────────────
+
+    task isExpired(entry) {
+        when entry["expires"] == 0 { give false }
+        give clock() >= entry["expires"]
+    }
+
+    task touch(key) {
+        self.forget(key)
+        push(self.order, key)
+        give nil
+    }
+
+    task forget(key) {
+        remaining = []
+        get k in self.order {
+            when k != key { push(remaining, k) }
+        }
+        self.order = remaining
+        give nil
+    }
+
+    task evictOverflow() {
+        when self.maxEntries <= 0 { give nil }
+        while len(self.order) > self.maxEntries {
+            oldest = self.order[0]
+            self.forget(oldest)
+            when has_key(self.store, oldest) {
+                dictRemove(self.store, oldest)
+                self.evictions = self.evictions + 1
+            }
+        }
+        give nil
+    }
+
+    # ── operations ──────────────────────────────────────────────────────────
+
+    # Store a value using the cache's default TTL.
+    task set(key, value) {
+        give self.setFor(key, value, self.ttl)
+    }
+
+    # Store with a per-entry TTL in seconds; 0 means it never expires.
+    task setFor(key, value, ttlSeconds) {
+        expires = 0
+        when ttlSeconds > 0 { expires = clock() + ttlSeconds }
+        self.store[str(key)] = { "value": value, "expires": expires }
+        self.touch(str(key))
+        self.evictOverflow()
+        give value
+    }
+
+    # The value, or nil when absent or expired.
+    #
+    # nil is also a storable value, so use has() to tell "cached nil" from
+    # "not cached" -- or fetch(), which does not have the ambiguity.
+    task get(key) {
+        k = str(key)
+        when has_key(self.store, k) == false {
+            self.misses = self.misses + 1
+            give nil
+        }
+        entry = self.store[k]
+        when self.isExpired(entry) {
+            dictRemove(self.store, k)
+            self.forget(k)
+            self.misses = self.misses + 1
+            give nil
+        }
+        self.hits = self.hits + 1
+        self.touch(k)
+        give entry["value"]
+    }
+
+    # The value, or `fallback` when absent or expired.
+    task getOr(key, fallback) {
+        k = str(key)
+        when self.has(k) == false { give fallback }
+        give self.get(k)
+    }
+
+    # Is there a live entry? Expired entries are removed as a side effect,
+    # which is what keeps a read-only workload from leaking memory.
+    task has(key) {
+        k = str(key)
+        when has_key(self.store, k) == false { give false }
+        when self.isExpired(self.store[k]) {
+            dictRemove(self.store, k)
+            self.forget(k)
+            give false
+        }
+        give true
+    }
+
+    # Return the cached value, or call `producer`, store the result and
+    # return it. The single most useful operation on a cache, and the one
+    # that avoids the cached-nil ambiguity entirely.
+    task fetch(key, producer) {
+        k = str(key)
+        when self.has(k) {
+            self.hits = self.hits + 1
+            self.touch(k)
+            give self.store[k]["value"]
+        }
+        self.misses = self.misses + 1
+        value = producer()
+        self.setFor(k, value, self.ttl)
+        give value
+    }
+
+    # As fetch, with an explicit TTL for this entry.
+    task fetchFor(key, ttlSeconds, producer) {
+        k = str(key)
+        when self.has(k) {
+            self.hits = self.hits + 1
+            self.touch(k)
+            give self.store[k]["value"]
+        }
+        self.misses = self.misses + 1
+        value = producer()
+        self.setFor(k, value, ttlSeconds)
+        give value
+    }
+
+    task remove(key) {
+        k = str(key)
+        when has_key(self.store, k) == false { give false }
+        dictRemove(self.store, k)
+        self.forget(k)
+        give true
+    }
+
+    task clear() {
+        self.store = {}
+        self.order = []
+        give nil
+    }
+
+    # Live entries only; expired ones are dropped on the way past.
+    task keys() {
+        live = []
+        get k in self.order {
+            when self.has(k) { push(live, k) }
+        }
+        give live
+    }
+
+    task size() { give len(self.keys()) }
+
+    # Drop every expired entry now. Worth calling periodically in a long
+    # running process that writes many keys it never reads again.
+    task prune() {
+        removed = 0
+        get k in self.order {
+            when has_key(self.store, k) and self.isExpired(self.store[k]) {
+                dictRemove(self.store, k)
+                removed = removed + 1
+            }
+        }
+        remaining = []
+        get k in self.order {
+            when has_key(self.store, k) { push(remaining, k) }
+        }
+        self.order = remaining
+        give removed
+    }
+
+    # Hit rate and counters, for deciding whether the cache is earning its
+    # place.
+    task stats() {
+        total = self.hits + self.misses
+        rate = 0
+        when total > 0 { rate = self.hits / total }
+        give {
+            "hits": self.hits,
+            "misses": self.misses,
+            "evictions": self.evictions,
+            "size": self.size(),
+            "hitRate": rate
+        }
+    }
+
+    task resetStats() {
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+        give nil
+    }
+}
+
+# A cache with no expiry, sized by entry count alone.
+export task lruCache(maxEntries) {
+    c = Cache(0)
+    c.limit(maxEntries)
+    give c
+}
+
+# Wrap a single-argument task so repeated calls with the same argument are
+# served from cache. The classic memoise, useful for pure, expensive work.
+export task memoize(fn, ttlSeconds) {
+    store = Cache(ttlSeconds)
+    give |arg| store.fetch(str(arg), || fn(arg))
+}

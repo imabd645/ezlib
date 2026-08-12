@@ -1,0 +1,192 @@
+// ============================================================================
+// ezsocket / ffi.ez -- the only file that touches ws2_32.
+//
+// Everything above this layer works in EZ values. Keeping every os_call in one
+// place is what makes the rest of the library reviewable: if a bug involves a
+// raw pointer or a byte offset, it is in here.
+// ============================================================================
+
+__ws2 = os_load_lib("ws2_32.dll")
+when typeOf(__ws2) == "nil" or __ws2 == 0 {
+    throw "ezsocket: could not load ws2_32.dll"
+}
+
+export model SockFFI {
+    static startup      = os_get_func(__ws2, "WSAStartup")
+    static cleanup      = os_get_func(__ws2, "WSACleanup")
+    static lastError    = os_get_func(__ws2, "WSAGetLastError")
+
+    static socket       = os_get_func(__ws2, "socket")
+    static bind         = os_get_func(__ws2, "bind")
+    static listen       = os_get_func(__ws2, "listen")
+    static accept       = os_get_func(__ws2, "accept")
+    static connect      = os_get_func(__ws2, "connect")
+    static send         = os_get_func(__ws2, "send")
+    static recv         = os_get_func(__ws2, "recv")
+    static sendto       = os_get_func(__ws2, "sendto")
+    static recvfrom     = os_get_func(__ws2, "recvfrom")
+    static shutdown     = os_get_func(__ws2, "shutdown")
+    static closesocket  = os_get_func(__ws2, "closesocket")
+
+    static setsockopt   = os_get_func(__ws2, "setsockopt")
+    static htons        = os_get_func(__ws2, "htons")
+    static inet_addr    = os_get_func(__ws2, "inet_addr")
+
+    // Name resolution. inet_addr only parses dotted quads, so without these a
+    // hostname could never be connected to.
+    static getaddrinfo  = os_get_func(__ws2, "getaddrinfo")
+    static freeaddrinfo = os_get_func(__ws2, "freeaddrinfo")
+}
+
+// ── Constants ───────────────────────────────────────────────────────────────
+export AF_INET      = 2
+export SOCK_STREAM  = 1
+export SOCK_DGRAM   = 2
+export IPPROTO_TCP  = 6
+export IPPROTO_UDP  = 17
+export INVALID_SOCKET = -1
+export SOCKET_ERROR   = -1
+
+export SOL_SOCKET    = 65535    // 0xFFFF
+export SO_REUSEADDR  = 4
+export SO_RCVTIMEO   = 4102     // 0x1006
+export SO_SNDTIMEO   = 4101     // 0x1005
+export SO_BROADCAST  = 32
+
+// SO_EXCLUSIVEADDRUSE (~SO_REUSEADDR, i.e. -5).
+//
+// SO_REUSEADDR does NOT mean on Windows what it means on Unix. On Unix it
+// permits rebinding a port stuck in TIME_WAIT. On Windows it additionally lets
+// a second process bind a port that is ALREADY being listened on, and traffic
+// then goes to whichever socket the stack picks -- so any local process can
+// quietly hijack a server's port. That is why this library binds exclusively by
+// default and leaves SO_REUSEADDR as an explicit opt-in.
+export SO_EXCLUSIVEADDRUSE = -5
+
+export SD_RECEIVE = 0
+export SD_SEND    = 1
+export SD_BOTH    = 2
+
+// sockaddr_in is 16 bytes; addrinfo is 48 on x64.
+export SOCKADDR_LEN = 16
+export ADDRINFO_LEN = 48
+
+// ── Winsock startup ─────────────────────────────────────────────────────────
+//
+// Started once, at import. The previous version printed on failure and carried
+// on, so every later call failed in a way that pointed at the call rather than
+// at Winsock never having initialised.
+__wsa_started = false
+
+export task wsa_init() {
+    when __wsa_started { give true }
+    data = os_alloc(512)
+    rc = os_call(SockFFI.startup, "int", 514, data)   // 0x0202 = version 2.2
+    os_free(data)
+    when rc != 0 {
+        throw "ezsocket: WSAStartup failed (code " + str(rc) + ")"
+    }
+    __wsa_started = true
+    give true
+}
+
+export task wsa_last_error() {
+    give os_call(SockFFI.lastError, "int")
+}
+
+// ── sockaddr_in ─────────────────────────────────────────────────────────────
+
+// Build a sockaddr_in for a DOTTED-QUAD address. Returns 0 when `ip` is not a
+// valid numeric address -- callers that accept hostnames must resolve first.
+export task make_sockaddr(ip, port) {
+    n_ip = os_call(SockFFI.inet_addr, "int", str(ip))
+    // INADDR_NONE. inet_addr signals failure with the same value it returns for
+    // 255.255.255.255, which is why that address is not usable here.
+    when n_ip == 4294967295 or n_ip == -1 { give 0 }
+
+    addr = os_alloc(SOCKADDR_LEN)
+    os_write_uint16(addr, 0, AF_INET)
+    os_write_uint16(addr, 2, os_call(SockFFI.htons, "int", port))
+    os_write_uint32(addr, 4, n_ip)
+    os_write_uint64(addr, 8, 0)
+    give addr
+}
+
+// Read a sockaddr_in back into { "ip": "1.2.3.4", "port": 8080 }.
+export task read_sockaddr(addr) {
+    when addr == 0 { give { "ip": "", "port": 0 } }
+    // sin_port is network byte order: high byte first.
+    hi = os_read_byte(addr, 2)
+    lo = os_read_byte(addr, 3)
+    port = (hi * 256) + lo
+    // sin_addr is already in network order, so the octets read left to right.
+    a = os_read_byte(addr, 4)
+    b = os_read_byte(addr, 5)
+    c = os_read_byte(addr, 6)
+    d = os_read_byte(addr, 7)
+    give { "ip": str(a) + "." + str(b) + "." + str(c) + "." + str(d), "port": port }
+}
+
+// ── Name resolution ─────────────────────────────────────────────────────────
+//
+// Resolve `host` (a hostname OR a dotted quad) to a freshly allocated
+// sockaddr_in. Returns 0 on failure. The caller owns the result and must
+// os_free() it.
+//
+// getaddrinfo hands back a linked list whose ai_addr points into memory it
+// owns, so the address is copied out before freeaddrinfo reclaims it.
+export task resolve(host, port, sockType) {
+    h = str(host)
+
+    // A numeric address needs no DNS round trip.
+    direct = make_sockaddr(h, port)
+    when direct != 0 { give direct }
+
+    hints = os_alloc(ADDRINFO_LEN)
+    i = 0
+    while i < ADDRINFO_LEN {
+        os_write_byte(hints, i, 0)
+        i = i + 1
+    }
+    os_write_int32(hints, 4, AF_INET)      // ai_family
+    os_write_int32(hints, 8, sockType)     // ai_socktype
+
+    resultPtr = os_alloc(8)
+    os_write_uint64(resultPtr, 0, 0)
+
+    rc = os_call(SockFFI.getaddrinfo, "int", h, str(port), hints, resultPtr)
+    os_free(hints)
+
+    when rc != 0 {
+        os_free(resultPtr)
+        give 0
+    }
+
+    info = os_read_uint64(resultPtr, 0)
+    os_free(resultPtr)
+    when info == 0 { give 0 }
+
+    // addrinfo x64 layout: ai_addrlen @16 (8 bytes), ai_addr @32.
+    aiAddr = os_read_uint64(info, 32)
+    out_ = 0
+    when aiAddr != 0 {
+        out_ = os_alloc(SOCKADDR_LEN)
+        j = 0
+        while j < SOCKADDR_LEN {
+            os_write_byte(out_, j, os_read_byte(aiAddr, j))
+            j = j + 1
+        }
+    }
+    os_call(SockFFI.freeaddrinfo, "void", info)
+    give out_
+}
+
+// ── Options ─────────────────────────────────────────────────────────────────
+
+export task set_int_option(sock, level, optname, value) {
+    buf = os_alloc(4)
+    os_write_int32(buf, 0, value)
+    rc = os_call(SockFFI.setsockopt, "int", sock, level, optname, buf, 4)
+    os_free(buf)
+    give rc == 0
+}

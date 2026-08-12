@@ -1,0 +1,232 @@
+# ============================================================================
+# queue — test suite
+#   ez test.ez
+#
+# The memory driver is exercised fully. Redis-backed tests run only when a
+# server is reachable and report as skipped otherwise.
+# ============================================================================
+
+use "queue"
+use "redis"
+
+PASS = 0
+FAIL = 0
+SKIP = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+DONE = []
+ATTEMPTS = 0
+task resetState() { DONE = []  ATTEMPTS = 0  give nil }
+
+out "queue tests"
+
+# ── basics ──────────────────────────────────────────────────────────────────
+resetState()
+q = Queue()
+q.handle("greet", |p| { push(DONE, p["name"])  give nil })
+
+check("starts empty", q.isEmpty(), true)
+id = q.push("greet", { "name": "Ali" })
+check("push returns an id", len(str(id)) > 0, true)
+check("size after push", q.size(), 1)
+check("not empty", q.isEmpty(), false)
+
+q.push("greet", { "name": "Sara" })
+check("processes everything", q.work(), 2)
+check("handlers ran", to_json(DONE), to_json(["Ali", "Sara"]))
+check("empty afterwards", q.size(), 0)
+check("work on an empty queue", q.work(), 0)
+
+# FIFO: the oldest job runs first.
+resetState()
+q2 = Queue()
+q2.handle("n", |p| { push(DONE, p["v"])  give nil })
+q2.push("n", { "v": 1 })
+q2.push("n", { "v": 2 })
+q2.push("n", { "v": 3 })
+q2.work()
+check("first in, first out", to_json(DONE), to_json([1, 2, 3]))
+
+# ── payloads ────────────────────────────────────────────────────────────────
+resetState()
+q3 = Queue()
+q3.handle("any", |p| { push(DONE, p)  give nil })
+q3.push("any", { "nested": { "k": "v" }, "list": [1, 2] })
+q3.work()
+check("payload survives", DONE[0]["nested"]["k"], "v")
+check("list payload survives", to_json(DONE[0]["list"]), to_json([1, 2]))
+
+# ── runNext ─────────────────────────────────────────────────────────────────
+resetState()
+q4 = Queue()
+q4.handle("one", |p| { push(DONE, "ran")  give nil })
+check("runNext when idle", q4.runNext(), nil)
+q4.push("one", {})
+job = q4.runNext()
+check("runNext returns the job", job["name"], "one")
+check("runNext ran the handler", len(DONE), 1)
+check("runNext drained it", q4.size(), 0)
+
+# workLimit stops early.
+resetState()
+q5 = Queue()
+q5.handle("x", |p| { push(DONE, 1)  give nil })
+repeat i = 1 to 5 { q5.push("x", {}) }
+check("workLimit stops at the limit", q5.workLimit(2), 2)
+check("rest still queued", q5.size(), 3)
+
+# ── retries ─────────────────────────────────────────────────────────────────
+resetState()
+r = Queue().attempts(3)
+r.handle("bad", |p| {
+    ATTEMPTS = ATTEMPTS + 1
+    throw Exception("nope")
+})
+r.push("bad", {})
+r.work()
+check("retried up to the limit", ATTEMPTS, 3)
+check("failed after the attempts", len(r.failed()), 1)
+check("failure records the reason", r.failed()[0]["error"], "nope")
+check("queue is empty after failing", r.size(), 0)
+
+# A job that fails once and then succeeds is not marked failed.
+resetState()
+r2 = Queue().attempts(3)
+r2.handle("flaky", |p| {
+    ATTEMPTS = ATTEMPTS + 1
+    when ATTEMPTS < 2 { throw Exception("first time") }
+    push(DONE, "ok")
+    give nil
+})
+r2.push("flaky", {})
+r2.work()
+check("recovers on retry", to_json(DONE), to_json(["ok"]))
+check("nothing failed", len(r2.failed()), 0)
+check("attempts used", ATTEMPTS, 2)
+
+# attempts(1) means no retry.
+resetState()
+r3 = Queue().attempts(1)
+r3.handle("bad", |p| { ATTEMPTS = ATTEMPTS + 1  throw Exception("x") })
+r3.push("bad", {})
+r3.work()
+check("single attempt", ATTEMPTS, 1)
+
+# ── missing handler ─────────────────────────────────────────────────────────
+# Permanent, not retried: retrying will not conjure a handler.
+resetState()
+m = Queue().attempts(5)
+m.push("unregistered", {})
+m.work()
+check("unhandled job fails at once", len(m.failed()), 1)
+check("failure explains why", contains(m.failed()[0]["error"], "no handler"), true)
+
+# ── callbacks ───────────────────────────────────────────────────────────────
+resetState()
+COMPLETED = 0
+FAILED = 0
+c = Queue().attempts(1)
+c.handle("good", |p| nil)
+c.handle("bad", |p| { throw Exception("x") })
+c.whenCompleted(|job| { COMPLETED = COMPLETED + 1  give nil })
+c.whenFailed(|job, reason| { FAILED = FAILED + 1  give nil })
+c.push("good", {})
+c.push("bad", {})
+c.work()
+check("completed callback", COMPLETED, 1)
+check("failed callback", FAILED, 1)
+
+# ── delayed jobs ────────────────────────────────────────────────────────────
+resetState()
+d = Queue()
+d.handle("later", |p| { push(DONE, "ran")  give nil })
+d.later("later", {}, 10)
+check("delayed job is not ready", d.runNext(), nil)
+check("delayed job did not run", len(DONE), 0)
+
+# A delay of zero is available immediately.
+d.later("later", {}, 0)
+d.work()
+check("zero delay runs", len(DONE), 1)
+
+# ── named queues ────────────────────────────────────────────────────────────
+resetState()
+shared = MemoryDriver()
+emails = Queue()
+emails.driver = shared
+emails.on("emails")
+emails.handle("send", |p| { push(DONE, "email")  give nil })
+
+reports = Queue()
+reports.driver = shared
+reports.on("reports")
+reports.handle("build", |p| { push(DONE, "report")  give nil })
+
+emails.push("send", {})
+reports.push("build", {})
+check("queues are separate", emails.size(), 1)
+check("other queue separate", reports.size(), 1)
+emails.work()
+check("only its own jobs ran", to_json(DONE), to_json(["email"]))
+check("other queue untouched", reports.size(), 1)
+
+# ── clearing ────────────────────────────────────────────────────────────────
+resetState()
+cl = Queue()
+cl.handle("x", |p| nil)
+repeat i = 1 to 3 { cl.push("x", {}) }
+cl.clear()
+check("clear empties", cl.size(), 0)
+
+check("memory driver has nothing to recover", Queue().recoverStalled(), 0)
+
+# ── redis driver (skipped when absent) ──────────────────────────────────────
+probe = Redis("127.0.0.1", 6379)
+probe.timeout(300)
+
+when probe.isAlive() == false {
+    SKIP = 8
+    out "  (no server on 127.0.0.1:6379 -- 8 redis tests skipped)"
+}
+other {
+    resetState()
+    client = Redis("127.0.0.1", 6379)
+    client.timeout(2000)
+    rq = redisQueue(client, "ez:test:queue")
+    rq.clear()
+    rq.handle("job", |p| { push(DONE, p["v"])  give nil })
+
+    rq.push("job", { "v": "a" })
+    check("redis push", rq.size(), 1)
+    rq.push("job", { "v": "b" })
+    check("redis size", rq.size(), 2)
+    check("redis processes", rq.work(), 2)
+    check("redis order", to_json(DONE), to_json(["a", "b"]))
+    check("redis empty after", rq.size(), 0)
+
+    # Jobs survive being read by a second Queue over the same keys.
+    rq.push("job", { "v": "shared" })
+    other2 = redisQueue(client, "ez:test:queue")
+    other2.handle("job", |p| { push(DONE, p["v"])  give nil })
+    check("another worker sees it", other2.size(), 1)
+    other2.work()
+    check("the other worker ran it", DONE[len(DONE) - 1], "shared")
+
+    rq.clear()
+    client.delete("ez:test:queue:failed")
+    check("redis cleared", rq.size(), 0)
+    client.close()
+}
+
+out ""
+out `  passed {PASS}   failed {FAIL}   skipped {SKIP}`
+when FAIL > 0 { exit(1) }

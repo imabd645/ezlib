@@ -1,0 +1,317 @@
+# ============================================================================
+# cron — test suite
+#   ez test.ez
+#
+# The calendar is pinned against timestamps that can be checked by hand before
+# anything else is tested with it, because every schedule assertion below is
+# only as good as the date arithmetic underneath.
+# ============================================================================
+
+use "cron"
+use "cron/parse.ez"
+use "cron/time.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task throwsSaying(label, fragment, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when contains(str(e.message), fragment) { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected the message to mention: {fragment}`
+            out `    actual:   {e.message}`
+        }
+    }
+}
+# The next occurrence after a given wall-clock time, as a readable string.
+task after(expression, y, mo, d, h, mi, s) {
+    give formatTime(Cron(expression).nextAfter(buildUp(y, mo, d, h, mi, s)))
+}
+
+out "cron tests"
+
+# ── the calendar, against timestamps that can be verified independently ─────
+check("the epoch", buildUp(1970, 1, 1, 0, 0, 0), 0)
+check("y2k", buildUp(2000, 1, 1, 0, 0, 0), 946684800)
+check("the second before y2k", buildUp(1999, 12, 31, 23, 59, 59), 946684799)
+check("a leap day", buildUp(2024, 2, 29, 0, 0, 0), 1709164800)
+# The 32-bit signed overflow, which is a value everyone knows by sight.
+check("2038", buildUp(2038, 1, 19, 3, 14, 7), 2147483647)
+check("before the epoch", buildUp(1969, 12, 31, 23, 59, 59), -1)
+check("formats the epoch", formatTime(0), "1970-01-01T00:00:00Z")
+check("formats 2038", formatTime(2147483647), "2038-01-19T03:14:07Z")
+check("round trips", formatTime(buildUp(2026, 8, 12, 12, 49, 45)), "2026-08-12T12:49:45Z")
+check("round trips before the epoch", formatTime(-1), "1969-12-31T23:59:59Z")
+
+# The rule that trips up naive implementations: 1900 and 2100 are not leap
+# years, 2000 is.
+check("1900 is not a leap year", isLeapYear(1900), false)
+check("2000 is a leap year", isLeapYear(2000), true)
+check("2024 is a leap year", isLeapYear(2024), true)
+check("2026 is not", isLeapYear(2026), false)
+check("2100 is not", isLeapYear(2100), false)
+check("February in a leap year", daysInMonth(2024, 2), 29)
+check("February otherwise", daysInMonth(2026, 2), 28)
+check("the calendar survives 2100", formatTime(buildUp(2100, 3, 1, 0, 0, 0)), "2100-03-01T00:00:00Z")
+
+# 1970-01-01 was a Thursday.
+check("the epoch was a Thursday", weekdayFromDays(0), 4)
+check("the day before was a Wednesday", weekdayFromDays(-1), 3)
+check("2026-08-12 was a Wednesday", breakDown(buildUp(2026, 8, 12, 0, 0, 0))["weekday"], 3)
+
+# ── parsing ─────────────────────────────────────────────────────────────────
+check("a five-field expression gets a zero seconds field",
+      to_json(parseExpression("0 3 * * *")["seconds"]), to_json([0]))
+check("six fields keeps its seconds",
+      to_json(parseExpression("30 0 3 * * *")["seconds"]), to_json([30]))
+check("a single value", to_json(parseField("5", 0, 59, nil, "minute")), to_json([5]))
+check("a list", to_json(parseField("1,3,5", 0, 59, nil, "minute")), to_json([1, 3, 5]))
+check("a list is sorted and deduplicated",
+      to_json(parseField("5,1,3,1", 0, 59, nil, "minute")), to_json([1, 3, 5]))
+check("a range", to_json(parseField("2-5", 0, 59, nil, "minute")), to_json([2, 3, 4, 5]))
+check("a star", len(parseField("*", 0, 59, nil, "minute")), 60)
+check("a step", to_json(parseField("*/20", 0, 59, nil, "minute")), to_json([0, 20, 40]))
+check("a step within a range", to_json(parseField("10-20/5", 0, 59, nil, "minute")), to_json([10, 15, 20]))
+# `5/2` means from 5 to the end of the range, which is what crontabs mean by it.
+check("an open-ended step", to_json(parseField("55/2", 0, 59, nil, "minute")), to_json([55, 57, 59]))
+check("a mixed list", to_json(parseField("1,5-7,*/30", 0, 59, nil, "minute")), to_json([0, 1, 5, 6, 7, 30]))
+check("month names", to_json(parseField("JAN,MAR", 1, 12, ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"], "month")), to_json([1, 3]))
+check("day names", to_json(parseField("mon-fri", 0, 6, ["sun","mon","tue","wed","thu","fri","sat"], "day of week")), to_json([1, 2, 3, 4, 5]))
+# Sunday is both 0 and 7 in every crontab ever written.
+check("sunday as 7", to_json(parseField("7", 0, 6, nil, "day of week")), to_json([0]))
+check("sunday as 0", to_json(parseField("0", 0, 6, nil, "day of week")), to_json([0]))
+# A wrapping range is a real thing people write.
+check("a range that wraps", to_json(parseField("FRI-MON", 0, 6, ["sun","mon","tue","wed","thu","fri","sat"], "day of week")), to_json([0, 1, 5, 6]))
+check("? is treated as *", len(parseField("?", 1, 31, nil, "day of month")), 31)
+# Tabs and doubled spaces come with any copy-pasted crontab line.
+check("tolerates tabs", len(splitFields("0\t3  *   * *")), 5)
+
+throwsSaying("too few fields is reported", "5 or 6 fields", || Cron("* * *"))
+throwsSaying("too many fields is reported", "5 or 6 fields", || Cron("* * * * * * *"))
+throwsSaying("out of range is reported", "outside", || Cron("0 25 * * *"))
+throwsSaying("a bad day of month", "outside", || Cron("0 0 32 * *"))
+throwsSaying("a bad month", "outside", || Cron("0 0 * 13 *"))
+throwsSaying("a bad name", "understands", || Cron("0 0 * FOO *"))
+throwsSaying("a zero step never advances", "never advance", || Cron("*/0 * * * *"))
+throwsSaying("an unknown macro lists the real ones", "@daily", || Cron("@fortnightly"))
+throws("an empty expression", || Cron(""))
+throws("nil", || Cron(nil))
+check("isValid accepts", isValid("0 3 * * *"), true)
+check("isValid rejects", isValid("nonsense"), false)
+
+# ── the next occurrence ─────────────────────────────────────────────────────
+check("daily", after("0 3 * * *", 2026, 8, 12, 1, 0, 0), "2026-08-12T03:00:00Z")
+# Strictly after: a schedule that has just fired must not fire again.
+check("already past today", after("0 3 * * *", 2026, 8, 12, 3, 0, 0), "2026-08-13T03:00:00Z")
+check("later the same day", after("0 3 * * *", 2026, 8, 12, 4, 0, 0), "2026-08-13T03:00:00Z")
+check("every fifteen minutes", after("*/15 * * * *", 2026, 8, 12, 10, 7, 0), "2026-08-12T10:15:00Z")
+check("crossing the hour", after("*/15 * * * *", 2026, 8, 12, 10, 47, 0), "2026-08-12T11:00:00Z")
+check("crossing midnight", after("0 0 * * *", 2026, 8, 12, 23, 59, 59), "2026-08-13T00:00:00Z")
+check("crossing a month", after("0 0 * * *", 2026, 8, 31, 12, 0, 0), "2026-09-01T00:00:00Z")
+check("crossing a year", after("0 0 * * *", 2026, 12, 31, 12, 0, 0), "2027-01-01T00:00:00Z")
+check("with seconds", after("30 * * * * *", 2026, 8, 12, 10, 0, 0), "2026-08-12T10:00:30Z")
+check("seconds already past", after("30 * * * * *", 2026, 8, 12, 10, 0, 30), "2026-08-12T10:01:30Z")
+check("several times a day", after("0 9,17 * * *", 2026, 8, 12, 10, 0, 0), "2026-08-12T17:00:00Z")
+check("and round to the next day", after("0 9,17 * * *", 2026, 8, 12, 18, 0, 0), "2026-08-13T09:00:00Z")
+
+# Weekdays. 2026-08-12 is a Wednesday, 2026-08-15 a Saturday.
+check("a weekday schedule", after("0 9 * * MON-FRI", 2026, 8, 12, 10, 0, 0), "2026-08-13T09:00:00Z")
+check("skips the weekend", after("0 9 * * MON-FRI", 2026, 8, 14, 10, 0, 0), "2026-08-17T09:00:00Z")
+check("a single weekday", after("0 0 * * SUN", 2026, 8, 12, 0, 0, 0), "2026-08-16T00:00:00Z")
+
+# Months and days of month.
+check("monthly", after("0 0 1 * *", 2026, 8, 12, 0, 0, 0), "2026-09-01T00:00:00Z")
+check("a specific month", after("0 0 1 1 *", 2026, 8, 12, 0, 0, 0), "2027-01-01T00:00:00Z")
+check("quarterly", after("0 0 1 */3 *", 2026, 8, 12, 0, 0, 0), "2026-10-01T00:00:00Z")
+# The 31st does not exist in September, so it must skip to October.
+check("the 31st skips short months", after("0 0 31 * *", 2026, 9, 1, 0, 0, 0), "2026-10-31T00:00:00Z")
+# Only leap years have a 29th of February.
+check("february 29th finds the next leap year",
+      after("0 0 29 2 *", 2026, 8, 12, 0, 0, 0), "2028-02-29T00:00:00Z")
+check("and the one after that", after("0 0 29 2 *", 2028, 3, 1, 0, 0, 0), "2032-02-29T00:00:00Z")
+# 2100 is not a leap year, so the gap there is eight years.
+check("february 29th respects the century rule",
+      after("0 0 29 2 *", 2096, 3, 1, 0, 0, 0), "2104-02-29T00:00:00Z")
+# An expression with no occurrence at all must say so rather than hang.
+throwsSaying("an impossible date is reported", "no occurrence", || Cron("0 0 30 2 *").next())
+
+# The famous cron quirk: with BOTH day fields restricted the day matches if
+# EITHER does. 2026-08-12 is a Wednesday; the next Monday is the 17th, and the
+# 1st of September comes later, so Monday wins.
+both = Cron("0 0 1 * MON")
+check("dom or dow, not and", formatTime(both.nextAfter(buildUp(2026, 8, 12, 0, 0, 0))),
+      "2026-08-17T00:00:00Z")
+# 2026-09-01 is a Tuesday, so it can only be reached by the day-of-month rule.
+check("the day of month arm fires too", formatTime(both.nextAfter(buildUp(2026, 8, 31, 12, 0, 0))),
+      "2026-09-01T00:00:00Z")
+# With only one restricted, the other is not consulted at all.
+check("dom alone", after("0 0 15 * *", 2026, 8, 12, 0, 0, 0), "2026-08-15T00:00:00Z")
+check("dow alone", after("0 0 * * WED", 2026, 8, 12, 0, 0, 0), "2026-08-19T00:00:00Z")
+
+# ── macros ──────────────────────────────────────────────────────────────────
+check("@daily", after("@daily", 2026, 8, 12, 10, 0, 0), "2026-08-13T00:00:00Z")
+check("@hourly", after("@hourly", 2026, 8, 12, 10, 30, 0), "2026-08-12T11:00:00Z")
+check("@weekly is Sunday", after("@weekly", 2026, 8, 12, 10, 0, 0), "2026-08-16T00:00:00Z")
+check("@monthly", after("@monthly", 2026, 8, 12, 10, 0, 0), "2026-09-01T00:00:00Z")
+check("@yearly", after("@yearly", 2026, 8, 12, 10, 0, 0), "2027-01-01T00:00:00Z")
+check("@midnight matches @daily", after("@midnight", 2026, 8, 12, 10, 0, 0), "2026-08-13T00:00:00Z")
+check("macros are case-insensitive", after("@DAILY", 2026, 8, 12, 10, 0, 0), "2026-08-13T00:00:00Z")
+
+# @every is an interval from the last run, not a calendar position.
+check("@every seconds", after("@every 30s", 2026, 8, 12, 10, 0, 0), "2026-08-12T10:00:30Z")
+check("@every minutes", after("@every 5m", 2026, 8, 12, 10, 0, 0), "2026-08-12T10:05:00Z")
+check("@every hours", after("@every 2h", 2026, 8, 12, 10, 0, 0), "2026-08-12T12:00:00Z")
+check("@every days", after("@every 1d", 2026, 8, 12, 10, 0, 0), "2026-08-13T10:00:00Z")
+check("a bare number is seconds", after("@every 45", 2026, 8, 12, 10, 0, 0), "2026-08-12T10:00:45Z")
+check("an interval is not a calendar", Cron("@every 5m").isInterval(), true)
+check("a real expression is", Cron("0 3 * * *").isInterval(), false)
+throws("@every needs an interval", || Cron("@every"))
+throws("@every rejects zero", || Cron("@every 0s"))
+throws("@every rejects nonsense", || Cron("@every soon"))
+
+# ── nextRuns ────────────────────────────────────────────────────────────────
+series = Cron("0 0 * * *").nextRunsAfter(3, buildUp(2026, 8, 12, 12, 0, 0))
+check("gives the right number", len(series), 3)
+check("first", formatTime(series[0]), "2026-08-13T00:00:00Z")
+check("second", formatTime(series[1]), "2026-08-14T00:00:00Z")
+check("third", formatTime(series[2]), "2026-08-15T00:00:00Z")
+check("each is later than the last", series[2] > series[1] and series[1] > series[0], true)
+
+# ── matches ─────────────────────────────────────────────────────────────────
+daily = Cron("0 3 * * *")
+check("matches its moment", daily.matches(buildUp(2026, 8, 12, 3, 0, 0)), true)
+check("not a second later", daily.matches(buildUp(2026, 8, 12, 3, 0, 1)), false)
+check("not an hour later", daily.matches(buildUp(2026, 8, 12, 4, 0, 0)), false)
+check("an interval never matches a calendar moment",
+      Cron("@every 5m").matches(buildUp(2026, 8, 12, 3, 0, 0)), false)
+
+# ── offsets ─────────────────────────────────────────────────────────────────
+# 03:00 in a zone five and a half hours ahead is 21:30 UTC the previous day.
+india = Cron("0 3 * * *").withOffset(330)
+check("a positive offset", formatTime(india.nextAfter(buildUp(2026, 8, 12, 0, 0, 0))),
+      "2026-08-12T21:30:00Z")
+newYork = Cron("0 3 * * *").withOffset(-300)
+check("a negative offset", formatTime(newYork.nextAfter(buildUp(2026, 8, 12, 0, 0, 0))),
+      "2026-08-12T08:00:00Z")
+check("the offset does not change UTC scheduling",
+      formatTime(Cron("0 3 * * *").nextAfter(buildUp(2026, 8, 12, 0, 0, 0))),
+      "2026-08-12T03:00:00Z")
+
+# ── describe ────────────────────────────────────────────────────────────────
+check("a daily time", describe("0 3 * * *"), "at 03:00 every day")
+check("a step", describe("*/15 * * * *"), "every 15 minutes")
+check("hourly", describe("0 * * * *"), "every hour at 00 past")
+check("weekdays", describe("0 9 * * MON-FRI"),
+      "at 09:00 on Monday, Tuesday, Wednesday, Thursday, Friday")
+check("a day of the month", describe("0 0 1 * *"), "at 00:00 on the 1st")
+check("a month", describe("0 0 1 1 *"), "at 00:00 on the 1st in January")
+check("an ordinal", describe("0 0 3 * *"), "at 00:00 on the 3rd")
+check("an ordinal that is not third", describe("0 0 13 * *"), "at 00:00 on the 13th")
+check("an interval", describe("@every 30s"), "every 30 seconds")
+check("a one-unit interval is singular", describe("@every 1h"), "every hour")
+check("printing", str(Cron("0 3 * * *").toString()), "Cron(0 3 * * *)")
+
+# ── the scheduler ───────────────────────────────────────────────────────────
+COUNTER = 0
+BOOM = 0
+task bump() { COUNTER = COUNTER + 1  give nil }
+task explode() { BOOM = BOOM + 1  throw Exception("job failed") }
+
+sched = Scheduler()
+sched.add("tick", "@every 1s", bump)
+check("the job is registered", len(sched.jobs), 1)
+check("it can be looked up", sched.job("tick")["name"], "tick")
+check("an unknown job is nil", sched.job("nope"), nil)
+check("it knows when it runs next", sched.job("tick")["nextRun"] > 0, true)
+throwsSaying("names must be unique", "already a job", || sched.add("tick", "@every 1s", bump))
+throws("a job needs a name", || sched.add("", "@every 1s", bump))
+throws("a job needs a valid expression", || sched.add("bad", "nonsense", bump))
+
+# tick() runs what is due and nothing else.
+sched.job("tick")["nextRun"] = 1000
+check("nothing is due yet", sched.tick(999), 0)
+check("the job has not run", COUNTER, 0)
+check("now it is due", sched.tick(1000), 1)
+check("and it ran", COUNTER, 1)
+check("it was rescheduled", sched.job("tick")["nextRun"] > 1000, true)
+check("the run was counted", sched.job("tick")["runs"], 1)
+
+# A job that overran must not then fire once per interval catching up.
+sched.job("tick")["nextRun"] = 1000
+sched.tick(1000)
+check("no catch-up storm", sched.job("tick")["nextRun"] > nowSeconds(), true)
+
+# Disabling.
+sched.disable("tick")
+sched.job("tick")["nextRun"] = 1
+check("a disabled job does not run", sched.tick(nowSeconds()), 0)
+check("and its counter is untouched", COUNTER, 2)
+sched.enable("tick")
+# Re-enabling must not fire for everything it slept through.
+check("re-enabling reschedules", sched.job("tick")["nextRun"] > nowSeconds(), true)
+check("enabling an unknown job", sched.enable("nope"), false)
+
+# A failing job must not stop the scheduler or retry immediately.
+FAILED_NAME = nil
+sched.add("boom", "@every 1s", explode)
+sched.onFailure(|name, err| FAILED_NAME = name)
+sched.job("boom")["nextRun"] = 1
+sched.job("tick")["nextRun"] = 1
+fired = sched.tick(nowSeconds())
+check("both jobs fired", fired, 2)
+check("the failure was caught", BOOM, 1)
+check("the other job still ran", COUNTER, 3)
+check("the failure was counted", sched.job("boom")["failures"], 1)
+check("the error was kept", sched.job("boom")["lastError"] != nil, true)
+check("the handler was called", FAILED_NAME, "boom")
+check("a failed job is still rescheduled", sched.job("boom")["nextRun"] > nowSeconds(), true)
+
+listing = sched.list()
+check("lists every job", len(listing), 2)
+check("with its expression", listing[0]["expression"], "@every 1s")
+check("and a readable description", listing[0]["describes"], "every second")
+check("and a formatted next run", contains(listing[0]["nextRunAt"], "T"), true)
+
+check("removing", sched.remove("boom"), true)
+check("it is gone", len(sched.jobs), 1)
+check("removing what is not there", sched.remove("boom"), false)
+check("something is due eventually", sched.secondsUntilNext() >= 0, true)
+
+# A bounded run actually runs the job and stops on its own.
+COUNTER = 0
+bounded = Scheduler()
+bounded.add("fast", "@every 1s", bump)
+bounded.job("fast")["nextRun"] = nowSeconds()
+ran = bounded.runFor(2)
+check("the bounded run fired", ran >= 1, true)
+check("the job ran", COUNTER >= 1, true)
+check("and it stopped", bounded.running, false)
+throwsSaying("an empty scheduler is an error", "no jobs", || Scheduler().runFor(1))
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

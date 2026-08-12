@@ -1,0 +1,183 @@
+# ============================================================================
+# diff — test suite
+#   ez test.ez
+# ============================================================================
+
+use "diff"
+use "diff/lcs.ez"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task ops(a, b) {
+    parts = []
+    get op in Diff.lines(a, b) { push(parts, op["op"] + ":" + op["value"]) }
+    give join(parts, " ")
+}
+
+out "diff tests"
+
+# ── identical input produces no changes ─────────────────────────────────────
+same = "a" + NL + "b"
+check("no changes", ops(same, same), "keep:a keep:b")
+check("isSame true", Diff.isSame(same, same), true)
+check("isSame false", Diff.isSame(same, "a" + NL + "c"), false)
+check("empty inputs", ops("", ""), "")
+check("trailing newline ignored", Diff.isSame("a" + NL, "a"), true)
+check("crlf normalised", Diff.isSame("a" + chr(13) + chr(10) + "b", "a" + NL + "b"), true)
+
+# ── the exact bug this library exists to avoid ──────────────────────────────
+# Every op must appear exactly once. A `when/when/other` chain in the
+# formatter silently emitted an extra "keep" for every add, which is what
+# these assertions pin down.
+check("substitution is one remove and one add",
+      ops("one" + NL + "two" + NL + "three", "one" + NL + "TWO" + NL + "three"),
+      "keep:one remove:two add:TWO keep:three")
+check("no duplicated ops", len(Diff.lines("a", "b")), 2)
+
+# An insertion at the top must not report every following line as changed.
+inserted = Diff.stats("a" + NL + "b" + NL + "c", "NEW" + NL + "a" + NL + "b" + NL + "c")
+check("insert added", inserted["added"], 1)
+check("insert removed nothing", inserted["removed"], 0)
+check("insert kept the rest", inserted["unchanged"], 3)
+
+# The same for a deletion in the middle.
+deleted = Diff.stats("a" + NL + "b" + NL + "c", "a" + NL + "c")
+check("delete removed", deleted["removed"], 1)
+check("delete added nothing", deleted["added"], 0)
+check("delete kept", deleted["unchanged"], 2)
+
+check("append at end", ops("a", "a" + NL + "b"), "keep:a add:b")
+check("prepend at start", ops("b", "a" + NL + "b"), "add:a keep:b")
+check("everything replaced", ops("a", "b"), "remove:a add:b")
+check("from empty", ops("", "a"), "add:a")
+check("to empty", ops("a", ""), "remove:a")
+
+# ── statistics ──────────────────────────────────────────────────────────────
+st = Diff.stats("a" + NL + "b" + NL + "c", "a" + NL + "X" + NL + "c")
+check("stats added", st["added"], 1)
+check("stats removed", st["removed"], 1)
+check("stats unchanged", st["unchanged"], 2)
+# The counts must add up to the ops emitted -- a duplicated op would inflate
+# one of them.
+check("stats total matches ops",
+      st["added"] + st["removed"] + st["unchanged"],
+      len(Diff.lines("a" + NL + "b" + NL + "c", "a" + NL + "X" + NL + "c")))
+
+# ── inline format ───────────────────────────────────────────────────────────
+inline = Diff.inline("a" + NL + "b", "a" + NL + "c")
+check("inline keeps context", contains(inline, "  a"), true)
+check("inline marks removal", contains(inline, "- b"), true)
+check("inline marks addition", contains(inline, "+ c"), true)
+check("inline line count", len(split(inline, NL)), 3)
+
+changes = Diff.changesOnly("a" + NL + "b", "a" + NL + "c")
+check("changesOnly drops context", contains(changes, "  a"), false)
+check("changesOnly line count", len(split(changes, NL)), 2)
+
+# ── unified format ──────────────────────────────────────────────────────────
+u = Diff.unified("a" + NL + "b" + NL + "c", "a" + NL + "X" + NL + "c", "old", "new")
+check("unified old header", contains(u, "--- old"), true)
+check("unified new header", contains(u, "+++ new"), true)
+check("unified hunk header", contains(u, "@@ -1,3 +1,3 @@"), true)
+check("unified removal", contains(u, "-b"), true)
+check("unified addition", contains(u, "+X"), true)
+check("unified context prefix", contains(u, " a"), true)
+check("identical gives no diff", Diff.unified(same, same, "a", "b"), "")
+
+# Context limits what is shown: far-apart changes make two hunks.
+far = "1" + NL + "2" + NL + "3" + NL + "4" + NL + "5" + NL + "6" + NL + "7" + NL + "8" + NL + "9" + NL + "10"
+farChanged = "X" + NL + "2" + NL + "3" + NL + "4" + NL + "5" + NL + "6" + NL + "7" + NL + "8" + NL + "9" + NL + "Y"
+twoHunks = Diff.unifiedWith(far, farChanged, "a", "b", 1)
+check("two hunks for distant changes", len(re_find_all(twoHunks, "@@ -")), 2)
+# With enough context they merge into one.
+oneHunk = Diff.unifiedWith(far, farChanged, "a", "b", 10)
+check("one hunk with wide context", len(re_find_all(oneHunk, "@@ -")), 1)
+
+# ── applying and inverting ──────────────────────────────────────────────────
+# The strongest check: applying the script must reproduce the target exactly.
+task roundTrips(label, a, b) {
+    check(label, Diff.apply(Diff.lines(a, b)), b)
+}
+roundTrips("apply reproduces target", "a" + NL + "b", "a" + NL + "c")
+roundTrips("apply after insert", "a", "x" + NL + "a" + NL + "y")
+roundTrips("apply after delete", "a" + NL + "b" + NL + "c", "b")
+roundTrips("apply identical", same, same)
+roundTrips("apply full replace", "a" + NL + "b", "c" + NL + "d")
+
+# Inverting and applying gets back to the original.
+script = Diff.lines("a" + NL + "b", "a" + NL + "c")
+check("invert returns to source", Diff.apply(Diff.invert(script)), "a" + NL + "b")
+check("invert twice is identity", Diff.apply(Diff.invert(Diff.invert(script))), "a" + NL + "c")
+
+task mapValues(list) {
+    parts = []
+    get op in list {
+        when op["op"] != "remove" { push(parts, op["value"]) }
+    }
+    give parts
+}
+
+# ── sequences and characters ────────────────────────────────────────────────
+seq = Diff.sequences([1, 2, 3], [1, 9, 3])
+check("sequence diff length", len(seq), 4)
+check("sequence keeps", seq[0]["op"], "keep")
+check("sequence removes", seq[1]["op"], "remove")
+check("sequence adds", seq[2]["op"], "add")
+
+charOps = Diff.chars("cat", "cut")
+check("char diff length", len(charOps), 4)
+check("char diff reconstructs", join(mapValues(charOps), ""), "cut")
+
+# ── word level ──────────────────────────────────────────────────────────────
+w = Diff.wordsInline("the quick brown fox", "the slow brown fox")
+check("word removal marked", contains(w, "[-quick-]"), true)
+check("word addition marked", contains(w, "{+slow+}"), true)
+check("unchanged words plain", contains(w, "brown fox"), true)
+# The changed word must appear once as removed and once as added -- not
+# additionally as unchanged.
+check("no stray duplicate", len(re_find_all(w, "slow")), 1)
+
+# ── LCS itself ──────────────────────────────────────────────────────────────
+t1 = lcsTable(["a", "b", "c"], ["a", "c"])
+check("lcs length", t1[0][0], 2)
+check("lcs of disjoint", lcsTable(["a"], ["b"])[0][0], 0)
+check("lcs of identical", lcsTable(["a", "b"], ["a", "b"])[0][0], 2)
+check("lcs with empty", lcsTable([], ["a"])[0][0], 0)
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+# An enormous table is refused rather than allocated for minutes.
+task hugeInput() {
+    big = []
+    repeat i = 1 to 2100 { push(big, str(i)) }
+    other2 = []
+    repeat i = 1 to 2100 { push(other2, str(i + 1)) }
+    give diffSequences(big, other2)
+}
+throws("oversized input refused", || hugeInput())
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+check("diffLines shorthand", contains(diffLines("a", "b"), "- a"), true)
+check("diffUnified shorthand", contains(diffUnified("a", "b"), "@@"), true)
+check("diffStats shorthand", diffStats("a", "b")["added"], 1)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

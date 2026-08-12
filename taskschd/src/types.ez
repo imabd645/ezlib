@@ -1,0 +1,95 @@
+// ============================================================================
+// eztaskschd / types.ez -- Exceptions and Trigger Types
+// ============================================================================
+
+// Base exception for Task Scheduler operations
+export model TaskschdError {
+    init(message) {
+        self.message = str(message)
+    }
+    task toString() {
+        give "TaskschdError: " + self.message
+    }
+}
+
+// Exception thrown when a task is not found
+export model TaskNotFoundError {
+    init(taskName) {
+        self.taskName = str(taskName)
+        self.message = "The scheduled task '" + self.taskName + "' could not be found."
+    }
+    task toString() {
+        give "TaskNotFoundError: " + self.message
+    }
+}
+
+// Exception thrown when permissions are insufficient
+export model AccessDeniedError {
+    init(message) {
+        self.message = str(message)
+    }
+    task toString() {
+        give "AccessDeniedError: " + self.message
+    }
+}
+
+// Formats trigger configurations into schtasks CLI arguments
+export model Trigger {
+    static task toArgs(opts) {
+        when typeOf(opts) == "nil" {
+            give []
+        }
+        
+        args = []
+        
+        // Trigger schedule: MINUTE, HOURLY, DAILY, WEEKLY, MONTHLY, ONCE, ONSTART, ONLOGON, ONIDLE
+        when opts["type"] {
+            push(args, "/SC")
+            push(args, str(opts["type"]))
+        }
+        
+        // Modifier: interval or frequency
+        when opts["interval"] {
+            push(args, "/MO")
+            push(args, str(opts["interval"]))
+        }
+        
+        // Days of the week (for WEEKLY schedule): MON, TUE, WED, THU, FRI, SAT, SUN
+        when opts["days"] {
+            push(args, "/D")
+            push(args, str(opts["days"]))
+        }
+        
+        // Months of the year (for MONTHLY schedule): JAN, FEB, etc.
+        when opts["months"] {
+            push(args, "/M")
+            push(args, str(opts["months"]))
+        }
+        
+        // Start Time: HH:mm
+        when opts["starttime"] {
+            push(args, "/ST")
+            push(args, str(opts["starttime"]))
+        }
+        
+        // Start Date: yyyy/MM/dd or MM/dd/yyyy
+        when opts["startdate"] {
+            push(args, "/SD")
+            push(args, str(opts["startdate"]))
+        }
+        
+        // End Time: HH:mm
+        when opts["endtime"] {
+            push(args, "/ET")
+            push(args, str(opts["endtime"]))
+        }
+        
+        // End Date: yyyy/MM/dd
+        when opts["enddate"] {
+            push(args, "/ED")
+            push(args, str(opts["enddate"]))
+        }
+        
+        give args
+    }
+}

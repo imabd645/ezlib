@@ -1,0 +1,72 @@
+# ============================================================================
+# oauth/pkce.ez — proof key for code exchange, and CSRF state
+#
+# PKCE (RFC 7636) closes a real hole: the authorization code comes back through
+# the browser, so anything that can observe the redirect -- a malicious app
+# registered for the same custom scheme, a logged URL, a proxy -- can steal it
+# and redeem it. With PKCE the code is useless without the verifier, which
+# never leaves the client.
+#
+# It was designed for mobile apps but OAuth 2.1 requires it for every client,
+# including confidential ones. This package therefore turns it on by default.
+# ============================================================================
+
+use "crypto"
+
+export S256 = "S256"
+export PLAIN = "plain"
+
+# RFC 7636 allows 43-128 characters. 32 random bytes base64url-encodes to 43,
+# which is the shortest legal value and already 256 bits of entropy.
+export task createVerifier() { give createVerifierOf(32) }
+
+export task createVerifierOf(entropyBytes) {
+    when entropyBytes < 32 {
+        throw Exception("oauth: a PKCE verifier needs at least 32 bytes of entropy")
+    }
+    when entropyBytes > 96 {
+        throw Exception("oauth: a PKCE verifier of more than 96 bytes exceeds the 128-character limit")
+    }
+    give b64url_encode(SecureRandom.bytes(entropyBytes))
+}
+
+# base64url(sha256(verifier)), unpadded. The transform must be S256 wherever
+# the server supports it; `plain` sends the verifier itself, which defeats the
+# point against anyone who can read the authorization request.
+export task challengeFor(verifier, method) {
+    when verifier == nil or len(verifier) < 43 {
+        throw Exception("oauth: a PKCE verifier must be at least 43 characters")
+    }
+    when len(verifier) > 128 {
+        throw Exception("oauth: a PKCE verifier must be at most 128 characters")
+    }
+    when method == PLAIN { give verifier }
+    when method != S256 and method != nil {
+        throw Exception(`oauth: unknown PKCE method '{method}'`)
+    }
+    give b64url_encode(Hash.sha256Bytes(verifier))
+}
+
+# A fresh pair, ready to hand to authorizeUrl.
+export task createPair() {
+    verifier = createVerifier()
+    give { "verifier": verifier, "challenge": challengeFor(verifier, S256), "method": S256 }
+}
+
+# The `state` parameter is a separate defence: it ties the callback to the
+# request that started it, so an attacker cannot feed you their own code and
+# silently attach their account to your session.
+export task createState() { give b64url_encode(SecureRandom.bytes(16)) }
+
+# Compared without an early return, because state is a secret being checked
+# against attacker-supplied input.
+export task statesMatch(expected, received) {
+    when expected == nil or received == nil { give false }
+    when len(expected) == 0 { give false }
+    when len(expected) != len(received) { give false }
+    diff = 0
+    repeat i = 0 to len(expected) - 1 {
+        diff = diff | (ord(substr(expected, i, 1)) ^ ord(substr(received, i, 1)))
+    }
+    give diff == 0
+}

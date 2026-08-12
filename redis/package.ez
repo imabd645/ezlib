@@ -1,0 +1,11 @@
+{
+  "name": "redis",
+  "version": "1.0.0",
+  "description": "Redis client for EZ over pure TCP. RESP protocol, strings, hashes, lists, sets, expiry and URL connection strings.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["redis", "cache", "session", "resp", "keyvalue", "store"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "socket": "^1.0.0" }
+}

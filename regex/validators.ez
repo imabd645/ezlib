@@ -1,0 +1,69 @@
+// ============================================================================
+// regex — Validators
+//
+// Each answers "is the WHOLE string one of these?", so a validator anchors its
+// pattern. `isEmail("a@b.co and junk")` is false.
+// ============================================================================
+use "patterns.ez"
+
+// Anchored full-string test. nil and non-strings are false rather than an
+// error: validators are usually called on unvalidated input, and a form field
+// that is missing is simply invalid.
+task fullMatches(text, pattern) {
+    when text == nil { give false }
+    when typeOf(text) != "string" { give false }
+    give re_full_match(text, pattern, "")
+}
+
+export task isEmail(text)        { give fullMatches(text, PATTERNS["EMAIL"]) }
+export task isPhone(text)        { give fullMatches(text, PATTERNS["PHONE_US"]) }
+export task isPhoneIntl(text)    { give fullMatches(text, PATTERNS["PHONE_INTL"]) }
+export task isUrl(text)          { give fullMatches(text, PATTERNS["URL"]) }
+export task isDomain(text)       { give fullMatches(text, PATTERNS["DOMAIN"]) }
+export task isIpv4(text)         { give fullMatches(text, PATTERNS["IPV4"]) }
+export task isMac(text)          { give fullMatches(text, PATTERNS["MAC"]) }
+export task isPort(text)         { give fullMatches(text, PATTERNS["PORT"]) }
+
+export task isDigits(text)       { give fullMatches(text, "[0-9]+") }
+export task isInteger(text)      { give fullMatches(text, PATTERNS["INTEGER"]) }
+export task isNumber(text)       { give fullMatches(text, PATTERNS["NUMBER"]) }
+export task isAlpha(text)        { give fullMatches(text, "[a-zA-Z]+") }
+export task isAlphanumeric(text) { give fullMatches(text, "[a-zA-Z0-9]+") }
+export task isWhitespace(text)   { give fullMatches(text, "[ \\t\\n\\r]+") }
+
+export task isDateIso(text)      { give fullMatches(text, PATTERNS["DATE_ISO"]) }
+export task isTime24(text)       { give fullMatches(text, PATTERNS["TIME_24H"]) }
+export task isDateTimeIso(text)  { give fullMatches(text, PATTERNS["DATETIME_ISO"]) }
+
+export task isUuid(text)         { give fullMatches(text, PATTERNS["UUID"]) }
+export task isHexColor(text)     { give fullMatches(text, PATTERNS["HEX_COLOR"] + "|" + PATTERNS["HEX_COLOR_SHORT"]) }
+export task isSlug(text)         { give fullMatches(text, PATTERNS["SLUG"]) }
+export task isSemver(text)       { give fullMatches(text, PATTERNS["SEMVER"]) }
+export task isSsn(text)          { give fullMatches(text, PATTERNS["SSN"]) }
+
+// Shape only. A number that looks like a card still has to pass the Luhn check
+// below before you treat it as one.
+export task isCreditCardShape(text) { give fullMatches(text, PATTERNS["CREDIT_CARD"]) }
+
+// Luhn checksum. This is what actually rejects a mistyped digit; the pattern
+// above only confirms the grouping.
+export task isCreditCard(text) {
+    when not isCreditCardShape(text) { give false }
+    digits = re_replace(text, "[^0-9]", "", "", 0)
+    when len(digits) < 13 { give false }
+
+    total = 0
+    double = false
+    i = len(digits) - 1
+    while i >= 0 {
+        d = num(substr(digits, i, 1))
+        when double {
+            d = d * 2
+            when d > 9 { d = d - 9 }
+        }
+        total = total + d
+        double = not double
+        i = i - 1
+    }
+    give total % 10 == 0
+}

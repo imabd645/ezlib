@@ -1,0 +1,436 @@
+# ============================================================================
+# EZ Notify Library — desktop dialogs and notifications (Win32)
+#
+#   alert("Saved")                 info / warn / error / success
+#   when confirm("Delete?") { }    yes-no
+#   ask("Save changes?")           -> "yes" | "no" | "cancel"
+#   name = input("Your name?")     text entry, nil when cancelled
+#   toast("Build finished")        tray balloon, non-blocking
+#   beep("error")
+#
+# Message boxes BLOCK until dismissed; toast() does not.
+#
+# Everything except input(), password() and choose() is pure Win32 FFI. Those
+# three need a form with controls, so they still drive PowerShell and read its
+# stdout -- their text is escaped for a single-quoted PowerShell string.
+# ============================================================================
+
+__u32 = os_load_lib("User32.dll")
+__k32 = os_load_lib("Kernel32.dll")
+__sh32 = os_load_lib("Shell32.dll")
+__msv = os_load_lib("msvcrt.dll")
+when __u32 == 0 { throw "eznotify: User32.dll not found" }
+when __sh32 == 0 { throw "eznotify: Shell32.dll not found" }
+
+export model NotifyFFI {
+    static messageBox        = os_get_func(__u32, "MessageBoxA")
+    static messageBoxTimeout = os_get_func(__u32, "MessageBoxTimeoutA")
+    static messageBeep       = os_get_func(__u32, "MessageBeep")
+    static loadIcon          = os_get_func(__u32, "LoadIconA")
+    static createWindowEx    = os_get_func(__u32, "CreateWindowExA")
+    static destroyWindow     = os_get_func(__u32, "DestroyWindow")
+    static getConsoleWindow  = os_get_func(__k32, "GetConsoleWindow")
+    static notifyIcon        = os_get_func(__sh32, "Shell_NotifyIconA")
+    static winExec           = os_get_func(__k32, "WinExec")
+    static popen             = os_get_func(__msv, "_popen")
+    static pclose            = os_get_func(__msv, "_pclose")
+    static fgets             = os_get_func(__msv, "fgets")
+    static feof              = os_get_func(__msv, "feof")
+}
+
+export NOTIFY_ERROR = "notify/error: "
+
+# ── MessageBox flags ─────────────────────────────────────────────────────────
+export MB_OK                = 0x00000000
+export MB_OKCANCEL          = 0x00000001
+export MB_ABORTRETRYIGNORE  = 0x00000002
+export MB_YESNOCANCEL       = 0x00000003
+export MB_YESNO             = 0x00000004
+export MB_RETRYCANCEL       = 0x00000005
+export MB_ICONERROR         = 0x00000010
+export MB_ICONQUESTION      = 0x00000020
+export MB_ICONWARNING       = 0x00000030
+export MB_ICONINFORMATION   = 0x00000040
+export MB_DEFBUTTON2        = 0x00000100
+export MB_SYSTEMMODAL       = 0x00001000
+export MB_TOPMOST           = 0x00040000
+
+# Return codes
+_IDOK = 1
+_IDCANCEL = 2
+_IDABORT = 3
+_IDRETRY = 4
+_IDIGNORE = 5
+_IDYES = 6
+_IDNO = 7
+
+# ── Internals ────────────────────────────────────────────────────────────────
+
+task _box(message, title, flags, topmost) {
+    f = flags
+    when topmost { f = f + MB_TOPMOST }
+    give os_call(NotifyFFI.messageBox, "int", 0, str(message), str(title), f)
+}
+
+# Escape a value for a SINGLE-QUOTED PowerShell string.
+#
+# PowerShell ends a single-quoted string at the first quote, so a message
+# containing an apostrophe -- "Can't open file" -- used to terminate the string
+# early and leave the rest to be parsed as code. Doubling the quote is the
+# documented escape and closes that injection.
+task _psEscape(s) {
+    give join(split(str(s), "'"), "''")
+}
+
+# Run a PowerShell command and return its stdout.
+task _psCapture(psCommand) {
+    cmd = "powershell -NoProfile -NonInteractive -Command \"" + psCommand + "\""
+    fp = os_call(NotifyFFI.popen, "ptr", cmd, "r")
+    when fp == 0 { give nil }
+    buf = os_alloc(4096)
+    outText = ""
+    while os_call(NotifyFFI.feof, "int", fp) == 0 {
+        p = os_call(NotifyFFI.fgets, "ptr", buf, 4096, fp)
+        when p != 0 { outText = outText + os_read_string_ptr(p) }
+    }
+    os_call(NotifyFFI.pclose, "int", fp)
+    os_free(buf)
+    give outText
+}
+
+task _trimTrailingNewlines(s) {
+    t = str(s)
+    while len(t) > 0 {
+        last = ord(substr(t, len(t) - 1, 1))
+        when last == 10 or last == 13 { t = substr(t, 0, len(t) - 1) }
+        other { give t }
+    }
+    give t
+}
+
+# ── Message boxes ────────────────────────────────────────────────────────────
+
+export task alert(message, title = "EZ Notification", topmost = false) {
+    give _box(message, title, MB_OK + MB_ICONINFORMATION, topmost)
+}
+
+export task info(message, title = "Information", topmost = false) {
+    give _box(message, title, MB_OK + MB_ICONINFORMATION, topmost)
+}
+
+export task error(message, title = "Error", topmost = false) {
+    give _box(message, title, MB_OK + MB_ICONERROR, topmost)
+}
+
+export task warn(message, title = "Warning", topmost = false) {
+    give _box(message, title, MB_OK + MB_ICONWARNING, topmost)
+}
+
+# Windows has no "success" icon; the information one is the closest match.
+export task success(message, title = "Success", topmost = false) {
+    give _box(message, title, MB_OK + MB_ICONINFORMATION, topmost)
+}
+
+# Yes / No. True for Yes.
+export task confirm(message, title = "Confirm", topmost = false) {
+    give _box(message, title, MB_YESNO + MB_ICONQUESTION, topmost) == _IDYES
+}
+
+# Yes / No, defaulting to No -- for destructive actions, where the safe choice
+# should be the one a stray Enter selects.
+export task confirmDanger(message, title = "Are you sure?", topmost = true) {
+    give _box(message, title, MB_YESNO + MB_ICONWARNING + MB_DEFBUTTON2, topmost) == _IDYES
+}
+
+# OK / Cancel. True for OK.
+export task prompt(message, title = "Prompt", topmost = false) {
+    give _box(message, title, MB_OKCANCEL + MB_ICONQUESTION, topmost) == _IDOK
+}
+
+# Yes / No / Cancel -> "yes" | "no" | "cancel".
+#
+# A two-state bool cannot express "the user dismissed the dialog", which is a
+# different decision from "no" for anything that saves.
+export task ask(message, title = "Confirm", topmost = false) {
+    r = _box(message, title, MB_YESNOCANCEL + MB_ICONQUESTION, topmost)
+    when r == _IDYES { give "yes" }
+    when r == _IDNO { give "no" }
+    give "cancel"
+}
+
+# Retry / Cancel -> true to retry.
+export task retry(message, title = "Retry?", topmost = false) {
+    give _box(message, title, MB_RETRYCANCEL + MB_ICONWARNING, topmost) == _IDRETRY
+}
+
+# Abort / Retry / Ignore -> "abort" | "retry" | "ignore".
+export task abortRetryIgnore(message, title = "Error", topmost = false) {
+    r = _box(message, title, MB_ABORTRETRYIGNORE + MB_ICONERROR, topmost)
+    when r == _IDABORT { give "abort" }
+    when r == _IDRETRY { give "retry" }
+    give "ignore"
+}
+
+# A box that closes itself after `timeoutMs`.
+#
+# MessageBoxTimeoutA is undocumented, so check it resolved before calling
+# through a null pointer.
+export task popup(message, title = "EZ Notification", timeoutMs = 3000) {
+    when NotifyFFI.messageBoxTimeout == 0 {
+        # Fall back to a normal box rather than crashing.
+        give alert(message, title)
+    }
+    give os_call(NotifyFFI.messageBoxTimeout, "int", 0, str(message), str(title),
+                 MB_OK + MB_ICONINFORMATION, 0, timeoutMs)
+}
+
+# ── Text input ───────────────────────────────────────────────────────────────
+
+# Ask for a line of text. Returns the text, or nil if the user cancelled.
+#
+# Uses the VisualBasic InputBox, which reports Cancel as an empty string -- so
+# an empty entry and a cancel are indistinguishable, and both come back as nil.
+export task input(message, title = "Input", initial = "") {
+    ps = "Add-Type -AssemblyName Microsoft.VisualBasic;" +
+         "[Microsoft.VisualBasic.Interaction]::InputBox('" + _psEscape(message) +
+         "','" + _psEscape(title) + "','" + _psEscape(initial) + "')"
+    r = _psCapture(ps)
+    when typeOf(r) == "nil" { give nil }
+    t = _trimTrailingNewlines(r)
+    when len(t) == 0 { give nil }
+    give t
+}
+
+# Ask for a password. The text is masked, and it is never echoed to a console.
+export task password(message = "Password:", title = "Password") {
+    ps = "Add-Type -AssemblyName System.Windows.Forms;" +
+         "Add-Type -AssemblyName System.Drawing;" +
+         "$f=New-Object System.Windows.Forms.Form;" +
+         "$f.Text='" + _psEscape(title) + "';$f.Width=340;$f.Height=170;" +
+         "$f.StartPosition='CenterScreen';$f.TopMost=$true;" +
+         "$l=New-Object System.Windows.Forms.Label;$l.Text='" + _psEscape(message) + "';" +
+         "$l.Left=10;$l.Top=15;$l.Width=300;$f.Controls.Add($l);" +
+         "$t=New-Object System.Windows.Forms.TextBox;$t.UseSystemPasswordChar=$true;" +
+         "$t.Left=10;$t.Top=45;$t.Width=300;$f.Controls.Add($t);" +
+         "$b=New-Object System.Windows.Forms.Button;$b.Text='OK';$b.Left=230;$b.Top=80;" +
+         "$b.DialogResult='OK';$f.Controls.Add($b);$f.AcceptButton=$b;" +
+         "if($f.ShowDialog() -eq 'OK'){Write-Output $t.Text}"
+    r = _psCapture(ps)
+    when typeOf(r) == "nil" { give nil }
+    t = _trimTrailingNewlines(r)
+    when len(t) == 0 { give nil }
+    give t
+}
+
+# Pick one item from a list. Returns the chosen string, or nil.
+export task choose(message, options, title = "Select") {
+    when typeOf(options) != "array" or len(options) == 0 {
+        throw NOTIFY_ERROR + "choose() needs a non-empty array of options"
+    }
+    items = []
+    get o in options { push(items, "'" + _psEscape(o) + "'") }
+    ps = "$c=@(" + join(items, ",") + ");" +
+         "$r=$c | Out-GridView -Title '" + _psEscape(title) + "' -OutputMode Single;" +
+         "if($r){Write-Output $r}"
+    r = _psCapture(ps)
+    when typeOf(r) == "nil" { give nil }
+    t = _trimTrailingNewlines(r)
+    when len(t) == 0 { give nil }
+    give t
+}
+
+# ── Tray notifications (Shell_NotifyIcon, no PowerShell) ────────────────────
+#
+# These call Shell_NotifyIconA directly. The previous implementation spawned
+# `powershell -Command ...` for every balloon, which cost a whole process launch
+# (typically 150-600 ms), depended on PowerShell being installed and not blocked
+# by execution policy, and had to escape the message text to avoid the command
+# being rewritten by its own contents. None of that applies here.
+
+# NOTIFYICONDATAA field offsets, x64. cbSize must match the layout exactly or
+# Shell_NotifyIcon rejects the call outright.
+_NID_SIZE       = 528
+_OFF_CBSIZE     = 0      # DWORD
+_OFF_HWND       = 8      # HWND   (8-aligned)
+_OFF_UID        = 16     # UINT
+_OFF_FLAGS      = 20     # UINT
+_OFF_CALLBACK   = 24     # UINT
+_OFF_HICON      = 32     # HICON
+_OFF_TIP        = 40     # CHAR[128]
+_OFF_STATE      = 168    # DWORD
+_OFF_STATEMASK  = 172    # DWORD
+_OFF_INFO       = 176    # CHAR[256]
+_OFF_TIMEOUT    = 432    # UINT
+_OFF_INFOTITLE  = 436    # CHAR[64]
+_OFF_INFOFLAGS  = 500    # DWORD
+
+_NIF_ICON = 0x02
+_NIF_TIP  = 0x04
+_NIF_INFO = 0x10
+
+_NIM_ADD    = 0
+_NIM_MODIFY = 1
+_NIM_DELETE = 2
+
+_NIIF_NONE    = 0
+_NIIF_INFO    = 1
+_NIIF_WARNING = 2
+_NIIF_ERROR   = 3
+
+_IDI_ERROR       = 32513
+_IDI_QUESTION    = 32514
+_IDI_WARNING     = 32515
+_IDI_INFORMATION = 32516
+
+# Owner window and live icon state, created lazily and reused.
+_notifyHwnd = 0
+_notifyShown = false
+_notifyNid = 0
+
+# A tray icon needs an owning window. A console script usually has one; a
+# windowless run does not, so fall back to a message-only window (HWND_MESSAGE
+# is (HWND)-3). "STATIC" is a system class, so nothing has to be registered.
+task _notifyOwnerWindow() {
+    when _notifyHwnd != 0 { give _notifyHwnd }
+    h = 0
+    when NotifyFFI.getConsoleWindow != 0 {
+        h = os_call(NotifyFFI.getConsoleWindow, "ptr")
+    }
+    when h == 0 {
+        h = os_call(NotifyFFI.createWindowEx, "ptr",
+                    0, "STATIC", "EZNotify", 0, 0, 0, 0, 0, -3, 0, 0, 0)
+    }
+    _notifyHwnd = h
+    give h
+}
+
+# Copy at most `capacity - 1` bytes so the field stays NUL-terminated. A longer
+# string would otherwise run into the next field and corrupt the struct.
+task _notifyWriteField(buf, offset, text, capacity) {
+    s = str(text)
+    when len(s) > capacity - 1 { s = substr(s, 0, capacity - 1) }
+    os_write_string(buf, offset, s)
+}
+
+task _notifyIconFor(kind) {
+    k = str(kind)
+    when k == "error" { give _IDI_ERROR }
+    when k == "warning" { give _IDI_WARNING }
+    when k == "question" { give _IDI_QUESTION }
+    give _IDI_INFORMATION
+}
+
+task _notifyInfoFlagFor(kind) {
+    k = str(kind)
+    when k == "error" { give _NIIF_ERROR }
+    when k == "warning" { give _NIIF_WARNING }
+    when k == "none" { give _NIIF_NONE }
+    give _NIIF_INFO
+}
+
+# Show a tray balloon. Returns immediately -- the balloon is drawn by the shell.
+#
+# `kind` is "info" (default), "warning", "error", "question" or "none" and picks
+# both the tray icon and the balloon glyph.
+#
+# The icon stays in the tray until toastClose(), so a script that shows one and
+# exits straight away may leave it behind until the user hovers over it. Use
+# toastWait() for a fire-and-forget notification in a short script.
+export task toast(message, title = "EZ Notification", timeoutMs = 5000, kind = "info") {
+    hwnd = _notifyOwnerWindow()
+    when hwnd == 0 {
+        give false
+    }
+
+    # One balloon at a time: replace whatever is already there.
+    when _notifyShown { toastClose() }
+
+    nid = os_alloc(_NID_SIZE)
+    # os_alloc does not promise zeroed memory, and every field we do not set
+    # must be zero or the shell reads rubbish out of it.
+    repeat i = 0 to _NID_SIZE - 1 { os_write_byte(nid, i, 0) }
+
+    os_write_uint32(nid, _OFF_CBSIZE, _NID_SIZE)
+    os_write_uint64(nid, _OFF_HWND, hwnd)
+    os_write_uint32(nid, _OFF_UID, 1)
+    os_write_uint32(nid, _OFF_FLAGS, _NIF_ICON + _NIF_TIP + _NIF_INFO)
+    os_write_uint64(nid, _OFF_HICON,
+                    os_call(NotifyFFI.loadIcon, "ptr", 0, _notifyIconFor(kind)))
+    _notifyWriteField(nid, _OFF_TIP, title, 128)
+    _notifyWriteField(nid, _OFF_INFO, message, 256)
+    _notifyWriteField(nid, _OFF_INFOTITLE, title, 64)
+    # Windows has ignored uTimeout since Vista (the shell decides), but it is
+    # part of the struct and is set for older systems.
+    os_write_uint32(nid, _OFF_TIMEOUT, timeoutMs)
+    os_write_uint32(nid, _OFF_INFOFLAGS, _notifyInfoFlagFor(kind))
+
+    rc = os_call(NotifyFFI.notifyIcon, "int", _NIM_ADD, nid)
+    when rc == 0 {
+        os_free(nid)
+        give false
+    }
+    _notifyNid = nid
+    _notifyShown = true
+    give true
+}
+
+# Remove the tray icon added by toast().
+export task toastClose() {
+    when not _notifyShown { give false }
+    os_call(NotifyFFI.notifyIcon, "int", _NIM_DELETE, _notifyNid)
+    os_free(_notifyNid)
+    _notifyNid = 0
+    _notifyShown = false
+    give true
+}
+
+# Show a balloon, hold it for `holdMs`, then clean the icon up.
+#
+# Blocking, but it leaves nothing in the tray -- the right choice for a script
+# that notifies and exits.
+export task toastWait(message, title = "EZ Notification", holdMs = 5000, kind = "info") {
+    when not toast(message, title, holdMs, kind) { give false }
+    wait(holdMs)
+    toastClose()
+    give true
+}
+
+# True while a tray icon from this library is on screen.
+export task toastVisible() {
+    give _notifyShown
+}
+
+# Release the owner window as well as the icon. Only needed if a long-running
+# script wants to give the window back before it exits.
+export task toastCleanup() {
+    toastClose()
+    when _notifyHwnd != 0 and NotifyFFI.getConsoleWindow != 0 {
+        # Never destroy the console window -- it is not ours.
+        console = os_call(NotifyFFI.getConsoleWindow, "ptr")
+        when _notifyHwnd != console {
+            os_call(NotifyFFI.destroyWindow, "int", _notifyHwnd)
+        }
+    } other when _notifyHwnd != 0 {
+        os_call(NotifyFFI.destroyWindow, "int", _notifyHwnd)
+    }
+    _notifyHwnd = 0
+    give true
+}
+
+# Kept for compatibility with earlier code; toast() is the clearer name.
+export task tray(message, title = "EZ Notification", timeoutMs = 5000) {
+    give toast(message, title, timeoutMs)
+}
+
+# ── Sound ────────────────────────────────────────────────────────────────────
+
+# System sound: "default" | "error" | "warning" | "info" | "question".
+export task beep(kind = "default") {
+    k = str(kind)
+    flag = 0xFFFFFFFF               # simple beep
+    when k == "error" { flag = MB_ICONERROR }
+    when k == "warning" { flag = MB_ICONWARNING }
+    when k == "info" { flag = MB_ICONINFORMATION }
+    when k == "question" { flag = MB_ICONQUESTION }
+    give os_call(NotifyFFI.messageBeep, "int", flag) != 0
+}

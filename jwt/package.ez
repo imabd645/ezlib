@@ -1,0 +1,10 @@
+{
+    "name": "jwt",
+    "version": "1.0.0",
+    "description": "JSON Web Tokens (JWT) encoder and decoder using HS256 algorithm for EZ Language",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {
+        "crypto": "^1.0.0"
+    }
+}

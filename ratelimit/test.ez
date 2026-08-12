@@ -1,0 +1,202 @@
+# ============================================================================
+# ratelimit — test suite
+#   ez test.ez
+#
+# Windows are kept to fractions of a second so the timing behaviour can be
+# exercised without the suite taking minutes.
+# ============================================================================
+
+use "ratelimit"
+use "ratelimit/stores.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task pause(seconds) {
+    until = clock() + (seconds * 1000)
+    while clock() < until { }
+    give nil
+}
+
+out "ratelimit tests"
+
+# ── sliding window ──────────────────────────────────────────────────────────
+lim = RateLimit(3, 60)
+check("first is allowed", lim.check("a")["allowed"], true)
+check("remaining counts down", lim.check("a")["remaining"], 1)
+check("last one allowed", lim.check("a")["allowed"], true)
+check("over the limit is refused", lim.check("a")["allowed"], false)
+check("remaining floors at zero", lim.check("a")["remaining"], 0)
+check("refusal reports a wait", lim.check("a")["retryAfter"] > 0, true)
+check("allowed has no wait", RateLimit(2, 60).check("x")["retryAfter"], 0)
+check("limit is reported", lim.check("a")["limit"], 3)
+
+# Keys are independent, or one noisy client would lock out everyone.
+check("a different key is unaffected", lim.check("b")["allowed"], true)
+check("and has its own budget", lim.check("b")["remaining"], 1)
+
+# Keys are stringified, so 1 and "1" are one bucket.
+numeric = RateLimit(1, 60)
+numeric.check(1)
+check("numeric keys coerce", numeric.check("1")["allowed"], false)
+
+# ── the window actually slides ──────────────────────────────────────────────
+# The point of a sliding window: capacity returns gradually as old requests
+# age out, rather than all at once on a boundary.
+slide = RateLimit(2, 0.3)
+check("first", slide.check("s")["allowed"], true)
+check("second", slide.check("s")["allowed"], true)
+check("third refused", slide.check("s")["allowed"], false)
+pause(0.35)
+check("allowed again once the window passes", slide.check("s")["allowed"], true)
+
+# ── peek does not consume ───────────────────────────────────────────────────
+p = RateLimit(2, 60)
+check("peek on an unseen key", p.peek("p")["remaining"], 2)
+check("peek did not consume", p.check("p")["remaining"], 1)
+check("peek reflects use", p.peek("p")["remaining"], 1)
+p.check("p")
+check("peek shows exhaustion", p.peek("p")["allowed"], false)
+
+# ── reset ───────────────────────────────────────────────────────────────────
+r = RateLimit(1, 60)
+r.check("r")
+check("exhausted", r.check("r")["allowed"], false)
+r.reset("r")
+check("reset restores the key", r.check("r")["allowed"], true)
+r.clear()
+check("clear restores everything", r.check("r")["allowed"], true)
+
+# ── costs ───────────────────────────────────────────────────────────────────
+c = RateLimit(10, 60)
+check("a costly call consumes more", c.consume("c", 4)["remaining"], 6)
+check("and again", c.consume("c", 4)["remaining"], 2)
+check("not enough left", c.consume("c", 4)["allowed"], false)
+check("a smaller call still fits", c.consume("c", 2)["allowed"], true)
+# A cost larger than the limit could never succeed, so it is refused loudly
+# rather than always returning false.
+throws("cost above the limit is rejected", || RateLimit(5, 60).consume("x", 6))
+
+# ── token bucket ────────────────────────────────────────────────────────────
+# Bursts up to capacity are allowed, then refills at limit/window per second.
+b = RateLimit(4, 4).bucket()
+check("burst 1", b.check("b")["allowed"], true)
+check("burst 2", b.check("b")["allowed"], true)
+check("burst 3", b.check("b")["allowed"], true)
+check("burst 4", b.check("b")["allowed"], true)
+check("burst exhausted", b.check("b")["allowed"], false)
+check("refusal reports a wait", b.check("b")["retryAfter"] > 0, true)
+
+# One token per second at this rate.
+refill = RateLimit(2, 2).bucket()
+refill.check("f")
+refill.check("f")
+check("bucket empty", refill.check("f")["allowed"], false)
+pause(1.1)
+check("one token refilled", refill.check("f")["allowed"], true)
+check("but only one", refill.check("f")["allowed"], false)
+
+# Refill is capped at capacity: idling does not bank unlimited credit.
+capped = RateLimit(2, 0.2).bucket()
+capped.check("cap")
+pause(0.5)
+check("capped burst 1", capped.check("cap")["allowed"], true)
+check("capped burst 2", capped.check("cap")["allowed"], true)
+check("no more than capacity", capped.check("cap")["allowed"], false)
+
+# ── headers ─────────────────────────────────────────────────────────────────
+h = RateLimit(5, 60)
+allowed = h.headers(h.check("h"))
+check("limit header", allowed["X-RateLimit-Limit"], "5")
+check("remaining header", allowed["X-RateLimit-Remaining"], "4")
+check("reset header present", has_key(allowed, "X-RateLimit-Reset"), true)
+# Retry-After only belongs on a refusal.
+check("no Retry-After when allowed", has_key(allowed, "Retry-After"), false)
+one = RateLimit(1, 60)
+one.check("o")
+refused = one.headers(one.check("o"))
+check("Retry-After when refused", has_key(refused, "Retry-After"), true)
+# Rounded up: telling a client to retry in 0 seconds invites a hot loop.
+check("Retry-After rounds up", refused["Retry-After"] != "0", true)
+
+# ── guard ───────────────────────────────────────────────────────────────────
+g = RateLimit(1, 60)
+check("guard runs the action", g.guard("g", || "ran", |r| "blocked"), "ran")
+check("guard blocks past the limit", g.guard("g", || "ran", |r| "blocked"), "blocked")
+check("guard passes the result to the rejection",
+      g.guard("g", || "ran", |r| str(r["allowed"])), "false")
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+check("perMinute window", perMinute(10).window, 60)
+check("perHour window", perHour(10).window, 3600)
+check("perSecond window", perSecond(10).window, 1)
+check("perMinute limit", perMinute(10).limit, 10)
+
+# ── memory store ────────────────────────────────────────────────────────────
+s = MemoryStore()
+check("read of an unknown key", s.read("k"), nil)
+s.write("k", { "tokens": 1, "expiresAt": 999999999999 })
+check("written record reads back", s.read("k")["tokens"], 1)
+check("size counts entries", s.size(), 1)
+s.forget("k")
+check("forgotten", s.read("k"), nil)
+
+# Pruning is what stops a limiter keyed on an IP growing without bound.
+s.write("old", { "expiresAt": 1 })
+s.write("new", { "expiresAt": 999999999999 })
+s.prune(clock() / 1000)
+check("expired record pruned", s.read("old"), nil)
+check("live record kept", s.read("new") != nil, true)
+
+s.clear()
+check("cleared", s.size(), 0)
+
+# ── redis store, duck-typed ─────────────────────────────────────────────────
+# No dependency on `redis`: anything with get/setEx/delete works, which is
+# what makes this testable without a server.
+model FakeRedis {
+    init() { self.data = {}  self.calls = 0 }
+    task get(k) {
+        when has_key(self.data, k) { give self.data[k] }
+        give nil
+    }
+    task setEx(k, v, ttl) { self.data[k] = v  self.calls = self.calls + 1  give "OK" }
+    task delete(k) {
+        when has_key(self.data, k) { dictRemove(self.data, k) }
+        give 1
+    }
+}
+fake = FakeRedis()
+dist = RateLimit(2, 60).useRedis(fake, "test")
+check("redis-backed first", dist.check("u")["allowed"], true)
+check("redis-backed second", dist.check("u")["allowed"], true)
+check("redis-backed refused", dist.check("u")["allowed"], false)
+check("state went to the client", fake.calls > 0, true)
+check("key is prefixed", has_key(fake.data, "test:u"), true)
+
+# Two limiters sharing one client share the limit -- the reason this exists.
+worker2 = RateLimit(2, 60).useRedis(fake, "test")
+check("a second worker sees the same state", worker2.check("u")["allowed"], false)
+
+throws("redis store refuses a blind clear", || dist.clear())
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

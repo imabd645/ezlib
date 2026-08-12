@@ -1,0 +1,71 @@
+// ============================================================================
+// src/types.ez — C type descriptors for the ezffi library.
+//
+// Each type constant is a dictionary { _type: "<ffi-type-string>", _size: N }.
+// This mirrors Python ctypes' type system (ctypes.c_int, ctypes.c_double, etc.)
+//
+// Bare strings like "int", "ptr" are also accepted everywhere via typeStr() for
+// backward compatibility with the old API.
+// ============================================================================
+
+// ── Integer types ────────────────────────────────────────────────────────────
+
+export c_int8    = { "_type": "i8",   "_size": 1 }
+export c_uint8   = { "_type": "u8",   "_size": 1 }
+export c_int16   = { "_type": "i16",  "_size": 2 }
+export c_uint16  = { "_type": "u16",  "_size": 2 }
+export c_int32   = { "_type": "i32",  "_size": 4 }
+export c_uint32  = { "_type": "u32",  "_size": 4 }
+export c_int64   = { "_type": "i64",  "_size": 8 }
+export c_uint64  = { "_type": "u64",  "_size": 8 }
+
+// Common aliases — match the most frequent ctypes names
+export c_int     = { "_type": "i32",  "_size": 4 }   // ctypes.c_int
+export c_uint    = { "_type": "u32",  "_size": 4 }   // ctypes.c_uint
+export c_long    = { "_type": "i64",  "_size": 8 }   // ctypes.c_long (on 64-bit)
+export c_ulong   = { "_type": "u64",  "_size": 8 }
+export c_byte    = { "_type": "u8",   "_size": 1 }   // ctypes.c_byte
+export c_bool    = { "_type": "i32",  "_size": 4 }   // C _Bool is int-sized in FFI
+
+// ── Floating-point types ─────────────────────────────────────────────────────
+
+export c_float   = { "_type": "f32",    "_size": 4 }  // 32-bit IEEE float
+export c_double  = { "_type": "double", "_size": 8 }  // 64-bit IEEE double
+
+// ── Pointer and string types ─────────────────────────────────────────────────
+
+export c_void_p  = { "_type": "ptr",    "_size": 8 }  // opaque void* / HANDLE / HWND
+export c_char_p  = { "_type": "string", "_size": 8 }  // null-terminated const char*
+export c_void    = { "_type": "void",   "_size": 0 }  // void return type
+
+// ── Legacy bare-string constants (kept for backward compatibility) ─────────────
+
+export INT    = "int"
+export PTR    = "ptr"
+export FLOAT  = "float"
+export DOUBLE = "double"
+export STR    = "string"
+export VOID   = "void"
+
+// ── Internal helper ───────────────────────────────────────────────────────────
+
+// Extract the raw FFI type string from either a type descriptor dict or a bare
+// string.  This is used throughout the library so old "int"/"ptr" strings still
+// work alongside the new c_int / c_double descriptor objects.
+export task typeStr(t) {
+    when typeOf(t) == "dictionary" {
+        give t["_type"]
+    }
+    give str(t)
+}
+
+// Build a raw sigArray of type strings from an array of type descriptors.
+// Returns nil when argtypes is nil (caller should use the untyped path).
+export task buildSigArray(argtypes) {
+    when not argtypes { give nil }
+    sig = []
+    get t in argtypes {
+        push(sig, typeStr(t))
+    }
+    give sig
+}

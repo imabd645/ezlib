@@ -1,0 +1,6 @@
+{
+    "name": "notify",
+    "version": "1.0.0",
+    "description": "Desktop notifications and dialog prompts via Win32 API.",
+    "entry": "main.ez"
+}

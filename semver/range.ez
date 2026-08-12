@@ -1,0 +1,123 @@
+# ============================================================================
+# semver/range.ez — range matching
+#
+# Supported, in the order they are tried:
+#   *  x  ""        any version
+#   1.2.3           exact
+#   ^1.2.3          compatible: no major change (and for 0.x, no minor change)
+#   ~1.2.3          patch-level changes only
+#   >=1.2.3  >1.2.3  <=1.2.3  <1.2.3  =1.2.3
+#   1.2.x  1.x       wildcards
+#   a - b            inclusive interval
+#   a || b           either
+#   ">=1 <2"         space-separated comparators, all must hold
+# ============================================================================
+
+use "semver/parse.ez"
+
+# A prerelease only satisfies a range when the range itself mentions one.
+# Otherwise "^1.0.0" would match 2.0.0-alpha, which no package manager wants.
+task svPrereleaseAllowed(version, rangeText) {
+    when version["prerelease"] == "" { give true }
+    give contains(rangeText, "-")
+}
+
+task svSatisfiesOne(version, comparator, wholeRange) {
+    spec = trim(comparator)
+    when spec == "" { give true }
+    when spec == "*" or spec == "x" or spec == "X" {
+        give version["prerelease"] == ""
+    }
+
+    # ── operators ──────────────────────────────────────────────────────────
+    get op in [">=", "<=", ">", "<", "="] {
+        when startsWith(spec, op) {
+            target = svParse(trim(substr(spec, len(op), len(spec) - len(op))))
+            when target == nil { give false }
+            when svPrereleaseAllowed(version, wholeRange) == false { give false }
+            cmp = svCompare(version, target)
+            when op == ">=" { give cmp >= 0 }
+            when op == "<=" { give cmp <= 0 }
+            when op == ">" { give cmp > 0 }
+            when op == "<" { give cmp < 0 }
+            give cmp == 0
+        }
+    }
+
+    # ── caret: no change to the leftmost non-zero part ─────────────────────
+    when startsWith(spec, "^") {
+        target = svParse(substr(spec, 1, len(spec) - 1))
+        when target == nil { give false }
+        when svPrereleaseAllowed(version, wholeRange) == false { give false }
+        when svCompare(version, target) < 0 { give false }
+        when target["major"] > 0 { give version["major"] == target["major"] }
+        # 0.x releases treat minor as breaking, which is the whole point of
+        # the 0.x convention.
+        when target["minor"] > 0 {
+            give version["major"] == 0 and version["minor"] == target["minor"]
+        }
+        give version["major"] == 0 and version["minor"] == 0 and version["patch"] == target["patch"]
+    }
+
+    # ── tilde: patch-level changes ─────────────────────────────────────────
+    when startsWith(spec, "~") {
+        target = svParse(substr(spec, 1, len(spec) - 1))
+        when target == nil { give false }
+        when svPrereleaseAllowed(version, wholeRange) == false { give false }
+        when svCompare(version, target) < 0 { give false }
+        give version["major"] == target["major"] and version["minor"] == target["minor"]
+    }
+
+    # ── wildcards: 1.2.x / 1.x ─────────────────────────────────────────────
+    when contains(spec, "x") or contains(spec, "X") or contains(spec, "*") {
+        parts = split(spec, ".")
+        when svPrereleaseAllowed(version, wholeRange) == false { give false }
+        fields = ["major", "minor", "patch"]
+        index = 0
+        get part in parts {
+            when index > 2 { escape }
+            cleaned = trim(part)
+            when cleaned == "x" or cleaned == "X" or cleaned == "*" { escape }
+            when svAllDigits(cleaned) == false { give false }
+            when version[fields[index]] != num(cleaned) { give false }
+            index = index + 1
+        }
+        give true
+    }
+
+    # ── bare version: exact ────────────────────────────────────────────────
+    target = svParse(spec)
+    when target == nil { give false }
+    give svCompare(version, target) == 0
+}
+
+# All comparators in a space-separated group must hold.
+task svSatisfiesGroup(version, group, wholeRange) {
+    body = trim(group)
+
+    # Interval form: "1.2.3 - 2.0.0"
+    dashAt = indexOf(body, " - ")
+    when dashAt >= 0 {
+        low = svParse(trim(substr(body, 0, dashAt)))
+        high = svParse(trim(substr(body, dashAt + 3, len(body) - dashAt - 3)))
+        when low == nil or high == nil { give false }
+        when svPrereleaseAllowed(version, wholeRange) == false { give false }
+        give svCompare(version, low) >= 0 and svCompare(version, high) <= 0
+    }
+
+    get comparator in split(body, " ") {
+        when trim(comparator) == "" { skip }
+        when svSatisfiesOne(version, comparator, wholeRange) == false { give false }
+    }
+    give true
+}
+
+export task svSatisfies(version, rangeText) {
+    body = trim(rangeText)
+    when body == "" { give version["prerelease"] == "" }
+
+    get group in split(body, "||") {
+        when svSatisfiesGroup(version, group, body) { give true }
+    }
+    give false
+}

@@ -1,0 +1,107 @@
+# ============================================================================
+# toml/value.ez — scalar values
+#
+# TOML is explicitly typed, unlike INI: a bare word is an error rather than a
+# string, and a string must be quoted. That strictness is the point of the
+# format, so this refuses ambiguous input instead of guessing.
+# ============================================================================
+
+task tomlFail(msg, line) {
+    throw Exception(`TOML parse error (line {line}): {msg}`)
+}
+
+export task tomlAllDigits(s) {
+    when len(s) == 0 { give false }
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+# Underscores are allowed as digit separators: 1_000_000.
+task stripUnderscores(s) { give replace(s, "_", "") }
+
+export task tomlIsInteger(s) {
+    body = stripUnderscores(s)
+    when startsWith(body, "-") or startsWith(body, "+") {
+        body = substr(body, 1, len(body) - 1)
+    }
+    give tomlAllDigits(body)
+}
+
+export task tomlIsFloat(s) {
+    body = stripUnderscores(s)
+    when startsWith(body, "-") or startsWith(body, "+") {
+        body = substr(body, 1, len(body) - 1)
+    }
+    dotAt = indexOf(body, ".")
+    when dotAt < 0 { give false }
+    left = substr(body, 0, dotAt)
+    right = substr(body, dotAt + 1, len(body) - dotAt - 1)
+    give tomlAllDigits(left) and tomlAllDigits(right)
+}
+
+# A date or time. Kept as a string: EZ has no date type here, and silently
+# turning one into a number would lose it.
+export task tomlIsDateLike(s) {
+    when len(s) < 8 { give false }
+    give re_test(s, "^[0-9]{4}-[0-9]{2}-[0-9]{2}") or re_test(s, "^[0-9]{2}:[0-9]{2}:[0-9]{2}")
+}
+
+task unescape(body, line) {
+    result = ""
+    total = len(body)
+    i = 0
+    while i < total {
+        c = substr(body, i, 1)
+        when c == "\\" and i + 1 < total {
+            nx = substr(body, i + 1, 1)
+            when nx == "n" { result = result + chr(10) }
+            other when nx == "t" { result = result + chr(9) }
+            other when nx == "r" { result = result + chr(13) }
+            other when nx == "0" { result = result + chr(0) }
+            other when nx == `"` { result = result + `"` }
+            other when nx == "\\" { result = result + "\\" }
+            other when nx == "b" { result = result + chr(8) }
+            other when nx == "f" { result = result + chr(12) }
+            other { tomlFail(`unknown escape '\\{nx}'`, line) }
+            i = i + 2
+            skip
+        }
+        result = result + c
+        i = i + 1
+    }
+    give result
+}
+
+# Parses one scalar. `line` is only for the error message.
+export task tomlScalar(raw, line) {
+    s = trim(raw)
+    when s == "" { tomlFail("a value is missing", line) }
+    total = len(s)
+    first = substr(s, 0, 1)
+    last = substr(s, total - 1, 1)
+
+    # Basic string: escapes apply.
+    when first == `"` {
+        when total < 2 or last != `"` { tomlFail("unterminated string", line) }
+        give unescape(substr(s, 1, total - 2), line)
+    }
+    # Literal string: no escapes at all, which is what makes it useful for
+    # Windows paths and regular expressions.
+    when first == "'" {
+        when total < 2 or last != "'" { tomlFail("unterminated literal string", line) }
+        give substr(s, 1, total - 2)
+    }
+
+    when s == "true" { give true }
+    when s == "false" { give false }
+    when tomlIsInteger(s) { give num(stripUnderscores(s)) }
+    when tomlIsFloat(s) { give num(stripUnderscores(s)) }
+    when tomlIsDateLike(s) { give s }
+
+    # TOML has no bare strings. Saying so is more useful than inventing one.
+    tomlFail(`'{s}' is not a valid value -- strings must be quoted`, line)
+}

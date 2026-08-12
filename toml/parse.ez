@@ -1,0 +1,203 @@
+# ============================================================================
+# toml/parse.ez — document structure
+#
+# TOML is line-oriented like INI, but with real nesting: [a.b.c] creates
+# nested tables, and [[items]] appends to an array of tables. Values can also
+# be inline arrays and inline tables, which need bracket-aware splitting.
+# ============================================================================
+
+use "toml/value.ez"
+
+task fail(msg, line) {
+    throw Exception(`TOML parse error (line {line}): {msg}`)
+}
+
+# Removes a trailing # comment that sits outside quotes.
+task stripComment(s) {
+    quote = ""
+    total = len(s)
+    i = 0
+    while i < total {
+        c = substr(s, i, 1)
+        when quote != "" {
+            when quote == `"` and c == "\\" { i = i + 2  skip }
+            when c == quote { quote = "" }
+        }
+        other when c == `"` or c == "'" { quote = c }
+        other when c == "#" { give trim(substr(s, 0, i)) }
+        i = i + 1
+    }
+    give trim(s)
+}
+
+# Splits on a separator at bracket depth zero and outside quotes.
+export task splitTop(s, sep) {
+    parts = []
+    depth = 0
+    quote = ""
+    current = ""
+    total = len(s)
+    i = 0
+    while i < total {
+        c = substr(s, i, 1)
+        when quote != "" {
+            current = current + c
+            when quote == `"` and c == "\\" and i + 1 < total {
+                current = current + substr(s, i + 1, 1)
+                i = i + 2
+                skip
+            }
+            when c == quote { quote = "" }
+            i = i + 1
+            skip
+        }
+        when c == `"` or c == "'" { quote = c  current = current + c  i = i + 1  skip }
+        when c == "[" or c == "{" { depth = depth + 1 }
+        other when c == "]" or c == "}" { depth = depth - 1 }
+        other when c == sep and depth == 0 {
+            push(parts, trim(current))
+            current = ""
+            i = i + 1
+            skip
+        }
+        current = current + c
+        i = i + 1
+    }
+    when trim(current) != "" { push(parts, trim(current)) }
+    give parts
+}
+
+# A key may be bare, quoted, or dotted: a.b."c d"
+export task splitKeyPath(raw, line) {
+    parts = []
+    get piece in splitTop(raw, ".") {
+        body = trim(piece)
+        when body == "" { fail("empty key segment", line) }
+        first = substr(body, 0, 1)
+        when first == `"` or first == "'" {
+            push(parts, tomlScalar(body, line))
+        }
+        other { push(parts, body) }
+    }
+    when len(parts) == 0 { fail("empty key", line) }
+    give parts
+}
+
+export task tomlParseValue(raw, line) {
+    s = trim(raw)
+    when s == "" { fail("a value is missing", line) }
+    first = substr(s, 0, 1)
+    last = substr(s, len(s) - 1, 1)
+
+    when first == "[" {
+        when last != "]" { fail("unterminated array", line) }
+        items = []
+        get piece in splitTop(substr(s, 1, len(s) - 2), ",") {
+            push(items, tomlParseValue(piece, line))
+        }
+        give items
+    }
+    when first == "{" {
+        when last != "}" { fail("unterminated inline table", line) }
+        table = {}
+        get piece in splitTop(substr(s, 1, len(s) - 2), ",") {
+            eq = indexOf(piece, "=")
+            when eq < 0 { fail(`inline table entry '{piece}' has no '='`, line) }
+            path = splitKeyPath(substr(piece, 0, eq), line)
+            value = tomlParseValue(substr(piece, eq + 1, len(piece) - eq - 1), line)
+            assignPath(table, path, value, line)
+        }
+        give table
+    }
+    give tomlScalar(s, line)
+}
+
+# Walks/creates nested tables and sets the final key.
+export task assignPath(root, path, value, line) {
+    node = root
+    limit = len(path) - 1
+    repeat i = 0 to limit - 1 {
+        key = path[i]
+        when has_key(node, key) == false { node[key] = {} }
+        other when typeOf(node[key]) != "dictionary" {
+            fail(`'{key}' is already a value, so it cannot also be a table`, line)
+        }
+        node = node[key]
+    }
+    node[path[limit]] = value
+    give nil
+}
+
+# Resolves [a.b] to the table it names, creating tables on the way.
+task tableAt(root, path, line) {
+    node = root
+    get key in path {
+        when has_key(node, key) == false { node[key] = {} }
+        other when typeOf(node[key]) == "array" or typeOf(node[key]) == "list" {
+            # [[items]] then [items.x] refers to the last element.
+            list = node[key]
+            when len(list) == 0 { fail(`'{key}' has no entries yet`, line) }
+            node = list[len(list) - 1]
+            skip
+        }
+        other when typeOf(node[key]) != "dictionary" {
+            fail(`'{key}' is already a value, so it cannot also be a table`, line)
+        }
+        node = node[key]
+    }
+    give node
+}
+
+# Appends a new table for [[name]].
+task appendTable(root, path, line) {
+    parent = root
+    limit = len(path) - 1
+    repeat i = 0 to limit - 1 {
+        key = path[i]
+        when has_key(parent, key) == false { parent[key] = {} }
+        parent = parent[key]
+    }
+    name = path[limit]
+    when has_key(parent, name) == false { parent[name] = [] }
+    when typeOf(parent[name]) != "array" and typeOf(parent[name]) != "list" {
+        fail(`'{name}' is already a table, so [[{name}]] cannot append to it`, line)
+    }
+    fresh = {}
+    push(parent[name], fresh)
+    give fresh
+}
+
+export task tomlParse(source) {
+    normalized = replace(replace(str(source), chr(13) + chr(10), chr(10)), chr(13), chr(10))
+    root = {}
+    current = root
+    lineNo = 0
+
+    get raw in split(normalized, chr(10)) {
+        lineNo = lineNo + 1
+        body = stripComment(raw)
+        when body == "" { skip }
+
+        # [[array of tables]]
+        when startsWith(body, "[[") {
+            when endsWith(body, "]]") == false { fail("unterminated [[table]] header", lineNo) }
+            path = splitKeyPath(trim(substr(body, 2, len(body) - 4)), lineNo)
+            current = appendTable(root, path, lineNo)
+            skip
+        }
+        # [table]
+        when startsWith(body, "[") {
+            when endsWith(body, "]") == false { fail("unterminated [table] header", lineNo) }
+            path = splitKeyPath(trim(substr(body, 1, len(body) - 2)), lineNo)
+            current = tableAt(root, path, lineNo)
+            skip
+        }
+
+        eq = indexOf(body, "=")
+        when eq < 0 { fail(`'{body}' is not 'key = value' or a table header`, lineNo) }
+        path = splitKeyPath(substr(body, 0, eq), lineNo)
+        value = tomlParseValue(substr(body, eq + 1, len(body) - eq - 1), lineNo)
+        assignPath(current, path, value, lineNo)
+    }
+    give root
+}

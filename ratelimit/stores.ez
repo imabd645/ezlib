@@ -1,0 +1,99 @@
+# ============================================================================
+# ratelimit/stores.ez — where the counters live
+#
+# In-process by default. A limiter is only as good as the state behind it: two
+# web workers each holding their own counters enforce twice the limit you
+# asked for, which is why the Redis store exists.
+#
+# The Redis store takes a client object rather than importing `redis`, so this
+# package has no dependency on it. Anything exposing increment/expire/get/
+# setEx/delete will do.
+# ============================================================================
+
+export model MemoryStore {
+
+    init() {
+        self.entries = {}
+    }
+
+    # Returns the stored record, or nil.
+    task read(key) {
+        when has_key(self.entries, key) == false { give nil }
+        give self.entries[key]
+    }
+
+    task write(key, record) {
+        self.entries[key] = record
+        give nil
+    }
+
+    task forget(key) {
+        when has_key(self.entries, key) { dictRemove(self.entries, key) }
+        give nil
+    }
+
+    task clear() {
+        self.entries = {}
+        give nil
+    }
+
+    # Drop records whose window has passed. Without this a limiter keyed on
+    # anything user-supplied -- an IP, an API key -- grows without bound.
+    task prune(now) {
+        live = {}
+        get key in keys(self.entries) {
+            record = self.entries[key]
+            when record["expiresAt"] > now { live[key] = record }
+        }
+        self.entries = live
+        give nil
+    }
+
+    task size() { give len(keys(self.entries)) }
+}
+
+# Shared state, so several workers enforce one limit between them.
+#
+# Records are stored as JSON under a prefixed key with a TTL, so a key nobody
+# touches again disappears on its own rather than being pruned.
+export model RedisStore {
+
+    init(client, prefix) {
+        self.client = client
+        self.prefix = prefix
+        when prefix == nil { self.prefix = "ratelimit" }
+    }
+
+    task keyFor(key) { give self.prefix + ":" + str(key) }
+
+    task read(key) {
+        raw = self.client.get(self.keyFor(key))
+        when raw == nil { give nil }
+        try { give parse_json(raw) }
+        catch (e) { give nil }
+    }
+
+    # The TTL is what makes expiry someone else's problem. It is derived from
+    # the record so a long window is not evicted early.
+    task write(key, record) {
+        ttl = record["ttlSeconds"]
+        when ttl == nil or ttl < 1 { ttl = 1 }
+        self.client.setEx(self.keyFor(key), to_json(record), floor(ttl) + 1)
+        give nil
+    }
+
+    task forget(key) {
+        self.client.delete(self.keyFor(key))
+        give nil
+    }
+
+    # Deliberately absent: clearing every limiter key would mean scanning the
+    # keyspace, which blocks the server. Delete the prefix yourself if you
+    # really need to.
+    task clear() {
+        throw Exception("ratelimit: clear() is not supported on the Redis store -- delete the key prefix directly")
+    }
+
+    task prune(now) { give nil }
+    task size() { give -1 }
+}

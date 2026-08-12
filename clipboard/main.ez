@@ -1,0 +1,312 @@
+# ============================================================================
+# EZ Clipboard Library — Win32 clipboard access
+#
+#   copy("hello")        paste()        clear()
+#   hasText()            isEmpty()      length()
+#   append(" world")     replace("a", "b")
+#   copyLines([...])     pasteLines()
+#
+# Text is read and written as CF_UNICODETEXT and converted to/from UTF-8, so
+# accented characters, CJK and emoji survive the round trip. The old CF_TEXT
+# (ANSI) path replaced anything outside the system code page with "?".
+# ============================================================================
+
+__u32 = os_load_lib("User32.dll")
+__k32 = os_load_lib("Kernel32.dll")
+when __u32 == 0 { throw "ezclipboard: User32.dll not found" }
+when __k32 == 0 { throw "ezclipboard: Kernel32.dll not found" }
+
+export model ClipFFI {
+    static openClipboard   = os_get_func(__u32, "OpenClipboard")
+    static closeClipboard  = os_get_func(__u32, "CloseClipboard")
+    static emptyClipboard  = os_get_func(__u32, "EmptyClipboard")
+    static getClipboardData = os_get_func(__u32, "GetClipboardData")
+    static setClipboardData = os_get_func(__u32, "SetClipboardData")
+    static isFormatAvail   = os_get_func(__u32, "IsClipboardFormatAvailable")
+    static seqNumber       = os_get_func(__u32, "GetClipboardSequenceNumber")
+
+    static globalAlloc     = os_get_func(__k32, "GlobalAlloc")
+    static globalLock      = os_get_func(__k32, "GlobalLock")
+    static globalUnlock    = os_get_func(__k32, "GlobalUnlock")
+    static globalFree      = os_get_func(__k32, "GlobalFree")
+}
+
+export CLIPBOARD_ERROR = "clipboard/error: "
+
+_CF_TEXT        = 1
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE  = 0x0002
+
+_clipLastError = ""
+
+# ── Opening ──────────────────────────────────────────────────────────────────
+
+# The clipboard is a single system-wide resource: only one process may hold it
+# at a time, and OpenClipboard fails outright if another one is mid-operation.
+# A single attempt therefore fails intermittently for no reason the caller can
+# act on, so retry briefly before giving up.
+task _clipOpen(attempts = 8) {
+    tries = 0
+    while tries < attempts {
+        when os_call(ClipFFI.openClipboard, "int", 0) != 0 { give true }
+        tries = tries + 1
+        wait(15)
+    }
+    _clipLastError = "another application is holding the clipboard"
+    give false
+}
+
+task _clipClose() {
+    os_call(ClipFFI.closeClipboard, "int")
+}
+
+# ── UTF-16 <-> UTF-8 ─────────────────────────────────────────────────────────
+
+# Read a NUL-terminated UTF-16LE string and return it as UTF-8.
+task _wideToUtf8(ptr) {
+    result = ""
+    i = 0
+    # Guard against a missing terminator rather than reading forever.
+    limit = 4194304
+    while i < limit {
+        unit = os_read_uint16(ptr, i * 2)
+        when unit == 0 { give result }
+        cp = unit
+        # A code point above the BMP arrives as a surrogate pair.
+        when unit >= 0xD800 and unit <= 0xDBFF {
+            low = os_read_uint16(ptr, (i + 1) * 2)
+            when low >= 0xDC00 and low <= 0xDFFF {
+                cp = 0x10000 + ((unit - 0xD800) * 1024) + (low - 0xDC00)
+                i = i + 1
+            }
+        }
+        result = result + chr(cp)
+        i = i + 1
+    }
+    give result
+}
+
+# Number of UTF-16 code units needed for a UTF-8 string (excluding the NUL).
+task _utf16Units(s) {
+    units = 0
+    i = 0
+    n = len(s)
+    while i < n {
+        b = ord(substr(s, i, 1))
+        when b < 0x80 { units = units + 1  i = i + 1 }
+        other when b < 0xE0 { units = units + 1  i = i + 2 }
+        other when b < 0xF0 { units = units + 1  i = i + 3 }
+        other { units = units + 2  i = i + 4 }   # surrogate pair
+    }
+    give units
+}
+
+# Write a UTF-8 string into `ptr` as NUL-terminated UTF-16LE.
+task _utf8ToWide(ptr, s) {
+    outIdx = 0
+    i = 0
+    n = len(s)
+    while i < n {
+        b = ord(substr(s, i, 1))
+        cp = b
+        adv = 1
+        when b >= 0xF0 {
+            cp = ((b - 0xF0) * 262144) + ((ord(substr(s, i + 1, 1)) - 0x80) * 4096) +
+                 ((ord(substr(s, i + 2, 1)) - 0x80) * 64) + (ord(substr(s, i + 3, 1)) - 0x80)
+            adv = 4
+        } other when b >= 0xE0 {
+            cp = ((b - 0xE0) * 4096) + ((ord(substr(s, i + 1, 1)) - 0x80) * 64) +
+                 (ord(substr(s, i + 2, 1)) - 0x80)
+            adv = 3
+        } other when b >= 0xC0 {
+            cp = ((b - 0xC0) * 64) + (ord(substr(s, i + 1, 1)) - 0x80)
+            adv = 2
+        }
+        when cp >= 0x10000 {
+            v = cp - 0x10000
+            os_write_uint16(ptr, outIdx * 2, 0xD800 + floor(v / 1024))
+            os_write_uint16(ptr, (outIdx + 1) * 2, 0xDC00 + (v % 1024))
+            outIdx = outIdx + 2
+        } other {
+            os_write_uint16(ptr, outIdx * 2, cp)
+            outIdx = outIdx + 1
+        }
+        i = i + adv
+    }
+    os_write_uint16(ptr, outIdx * 2, 0)
+    give outIdx
+}
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+
+# Clipboard text as a UTF-8 string. Empty string when there is no text.
+export task paste() {
+    when not _clipOpen() { give "" }
+
+    hData = os_call(ClipFFI.getClipboardData, "ptr", _CF_UNICODETEXT)
+    wide = true
+    when hData == 0 {
+        # Some older applications publish only CF_TEXT.
+        hData = os_call(ClipFFI.getClipboardData, "ptr", _CF_TEXT)
+        wide = false
+    }
+    when hData == 0 {
+        _clipClose()
+        _clipLastError = "clipboard holds no text"
+        give ""
+    }
+
+    pText = os_call(ClipFFI.globalLock, "ptr", hData)
+    when pText == 0 {
+        # Close on EVERY failure path -- an unclosed clipboard locks out every
+        # other process on the machine until this one exits.
+        _clipClose()
+        _clipLastError = "GlobalLock failed"
+        give ""
+    }
+
+    text = ""
+    when wide { text = _wideToUtf8(pText) } other { text = os_read_string_ptr(pText) }
+
+    os_call(ClipFFI.globalUnlock, "int", hData)
+    _clipClose()
+    _clipLastError = ""
+    give text
+}
+
+# Put text on the clipboard. Returns true on success.
+export task copy(text) {
+    s = str(text)
+    units = _utf16Units(s)
+    sz = (units + 1) * 2            # + terminating NUL
+
+    hMem = os_call(ClipFFI.globalAlloc, "ptr", _GMEM_MOVEABLE, sz)
+    when hMem == 0 {
+        _clipLastError = "GlobalAlloc failed"
+        give false
+    }
+
+    pMem = os_call(ClipFFI.globalLock, "ptr", hMem)
+    when pMem == 0 {
+        # Free on the failure path. The old version returned here holding the
+        # allocation, leaking it on every failed copy.
+        os_call(ClipFFI.globalFree, "ptr", hMem)
+        _clipLastError = "GlobalLock failed"
+        give false
+    }
+    _utf8ToWide(pMem, s)
+    os_call(ClipFFI.globalUnlock, "int", hMem)
+
+    when not _clipOpen() {
+        os_call(ClipFFI.globalFree, "ptr", hMem)
+        give false
+    }
+    os_call(ClipFFI.emptyClipboard, "int")
+    placed = os_call(ClipFFI.setClipboardData, "ptr", _CF_UNICODETEXT, hMem)
+    _clipClose()
+
+    when placed == 0 {
+        # Ownership only transfers to the system on success; otherwise it is
+        # still ours to release.
+        os_call(ClipFFI.globalFree, "ptr", hMem)
+        _clipLastError = "SetClipboardData failed"
+        give false
+    }
+    _clipLastError = ""
+    give true
+}
+
+# Empty the clipboard.
+export task clear() {
+    when not _clipOpen() { give false }
+    ok = os_call(ClipFFI.emptyClipboard, "int") != 0
+    _clipClose()
+    give ok
+}
+
+# ── Queries ──────────────────────────────────────────────────────────────────
+
+# True when the clipboard currently holds text, without copying it out.
+export task hasText() {
+    a = os_call(ClipFFI.isFormatAvail, "int", _CF_UNICODETEXT)
+    when a != 0 { give true }
+    give os_call(ClipFFI.isFormatAvail, "int", _CF_TEXT) != 0
+}
+
+export task isEmpty() {
+    when not hasText() { give true }
+    give len(paste()) == 0
+}
+
+# Length in BYTES of the clipboard text (EZ strings are UTF-8).
+export task length() {
+    give len(paste())
+}
+
+# A counter the system bumps on every change. Poll it to detect that the
+# clipboard was modified without repeatedly copying the contents out.
+export task sequence() {
+    give os_call(ClipFFI.seqNumber, "int")
+}
+
+# Text of the last failure; empty when the last call succeeded.
+export task lastError() {
+    give _clipLastError
+}
+
+# ── Convenience ──────────────────────────────────────────────────────────────
+
+# Add to the end of what is already there.
+export task append(text) {
+    give copy(paste() + str(text))
+}
+
+# Add to the front.
+export task prepend(text) {
+    give copy(str(text) + paste())
+}
+
+# Replace every occurrence of `find` in the clipboard text.
+export task replace(find, replacement) {
+    current = paste()
+    when len(str(find)) == 0 { give false }
+    give copy(join(split(current, str(find)), str(replacement)))
+}
+
+# Copy an array of lines, joined with newlines.
+export task copyLines(lines) {
+    when typeOf(lines) != "array" {
+        throw CLIPBOARD_ERROR + "expected an array, got " + typeOf(lines)
+    }
+    parts = []
+    get l in lines { push(parts, str(l)) }
+    give copy(join(parts, "\n"))
+}
+
+# Clipboard text split into lines. CRLF and LF are both handled, and a trailing
+# newline does not produce a phantom empty last line.
+export task pasteLines() {
+    text = paste()
+    when len(text) == 0 { give [] }
+    normalised = join(split(text, "\r\n"), "\n")
+    lines = split(normalised, "\n")
+    when len(lines) > 0 and lines[len(lines) - 1] == "" {
+        trimmed = []
+        repeat i = 0 to len(lines) - 2 { push(trimmed, lines[i]) }
+        give trimmed
+    }
+    give lines
+}
+
+# Run `fn` with the clipboard set to `text`, then put the old contents back.
+#
+# Pasting into another window is a common automation step, and silently
+# destroying whatever the user had copied is rude. This restores it.
+export task withText(text, fn) {
+    saved = paste()
+    hadText = hasText()
+    copy(text)
+    result = fn()
+    when hadText { copy(saved) } other { clear() }
+    give result
+}

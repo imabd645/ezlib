@@ -1,0 +1,128 @@
+# ============================================================================
+# oauth/token.ez — what came back from the token endpoint
+#
+# The wire format gives `expires_in`, a duration in seconds. Storing that is a
+# bug waiting to happen: it is only meaningful at the moment of receipt. It is
+# converted to an absolute time here, once.
+# ============================================================================
+
+# Treat a token as expired this many seconds early, so one that is valid when
+# checked but expires mid-flight does not produce a 401 you have to retry.
+export EXPIRY_SKEW = 60
+
+export model Token {
+
+    init(accessToken, tokenType, expiresAt, refreshToken, scope, raw) {
+        self.accessToken = accessToken
+        self.tokenType = tokenType
+        when tokenType == nil { self.tokenType = "Bearer" }
+        self.expiresAt = expiresAt
+        self.refreshToken = refreshToken
+        self.scope = scope
+        self.raw = raw
+        when raw == nil { self.raw = {} }
+    }
+
+    # `expires_in` is relative to now, so this must be called when the response
+    # arrives and not later.
+    static task fromResponse(body) {
+        when body == nil or type(body) != "dictionary" {
+            throw Exception("oauth: token response was not an object")
+        }
+        access = body["access_token"]
+        when access == nil {
+            throw Exception("oauth: token response contained no access_token")
+        }
+        expiresAt = nil
+        when body["expires_in"] != nil {
+            expiresAt = (clock() / 1000) + num(body["expires_in"])
+        }
+        scope = body["scope"]
+        when type(scope) == "array" { scope = join(scope, " ") }
+        give Token(access, body["token_type"], expiresAt, body["refresh_token"], scope, body)
+    }
+
+    # A token with no expiry is treated as valid: some providers issue tokens
+    # that only stop working when revoked, and guessing a lifetime for them
+    # would throw away a working credential.
+    task isExpired() {
+        when self.expiresAt == nil { give false }
+        give (clock() / 1000) >= (self.expiresAt - EXPIRY_SKEW)
+    }
+
+    task isValid() { give self.accessToken != nil and self.isExpired() == false }
+
+    task secondsRemaining() {
+        when self.expiresAt == nil { give nil }
+        left = self.expiresAt - (clock() / 1000)
+        when left < 0 { give 0 }
+        give left
+    }
+
+    task canRefresh() { give self.refreshToken != nil }
+
+    # The value for the Authorization header.
+    task header() { give self.tokenType + " " + self.accessToken }
+
+    task authHeaders() { give { "Authorization": self.header() } }
+
+    task scopes() {
+        when self.scope == nil or self.scope == "" { give [] }
+        parts = []
+        get piece in split(self.scope, " ") {
+            when trim(piece) != "" { push(parts, trim(piece)) }
+        }
+        give parts
+    }
+
+    task hasScope(name) {
+        get granted in self.scopes() {
+            when granted == name { give true }
+        }
+        give false
+    }
+
+    # For putting in a session or a database. Absolute expiry survives the
+    # round trip; `expires_in` would not.
+    task toDict() {
+        give {
+            "access_token": self.accessToken,
+            "token_type": self.tokenType,
+            "expires_at": self.expiresAt,
+            "refresh_token": self.refreshToken,
+            "scope": self.scope
+        }
+    }
+
+    static task fromDict(stored) {
+        when stored == nil { give nil }
+        give Token(stored["access_token"], stored["token_type"], stored["expires_at"],
+                   stored["refresh_token"], stored["scope"], stored)
+    }
+
+    task toJson() { give to_json(self.toDict()) }
+
+    static task fromJson(text) {
+        when text == nil or text == "" { give nil }
+        give Token.fromDict(parse_json(text))
+    }
+
+    # Refreshing returns a new token, but many providers -- Google among them --
+    # omit refresh_token from the response because the old one still works.
+    # Dropping it there would silently break every future refresh.
+    task mergedWith(fresh) {
+        when fresh.refreshToken == nil { fresh.refreshToken = self.refreshToken }
+        when fresh.scope == nil { fresh.scope = self.scope }
+        give fresh
+    }
+
+    # An access token in a log is a live credential, so printing one shows only
+    # enough to tell two apart.
+    task toString() {
+        tail = "…"
+        when len(self.accessToken) > 6 { tail = substr(self.accessToken, 0, 6) + "…" }
+        expiry = "no expiry"
+        when self.expiresAt != nil { expiry = `{floor(self.secondsRemaining())}s left` }
+        give `Token({tail}, {expiry})`
+    }
+}

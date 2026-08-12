@@ -1,0 +1,339 @@
+# ============================================================================
+# CSV Standard Library for EZ — RFC 4180
+#
+# Two shapes, because real files come in both:
+#   parse(text)        -> array of DICTIONARIES, keyed by the header row
+#   parseRows(text)    -> array of ARRAYS, for files with no header
+#
+# The comma path is native (parse_csv / to_csv). Any other delimiter -- ';' in
+# European exports, '\t' in TSV -- is handled by the RFC 4180 scanner here.
+#
+#   rows = parse(readText("data.csv"))
+#   rows = parse(text, ";")                  # semicolon-separated
+#   out  stringify(rows)
+# ============================================================================
+
+export CSV_IO_ERROR    = "csv/io: "
+export CSV_SHAPE_ERROR = "csv/shape: "
+
+# ── Scanner (RFC 4180) ───────────────────────────────────────────────────────
+#
+# A field may be quoted, and inside quotes the delimiter, CR, LF and a doubled
+# quote ("") are all literal content. Splitting on the delimiter is therefore
+# wrong for any file with quoting -- which is most of them.
+task _csvScan(text, delim) {
+    rows = []
+    row = []
+    field = ""
+    inQuotes = false
+    i = 0
+    n = len(text)
+    any = false        # did this row have any content at all?
+
+    while i < n {
+        c = substr(text, i, 1)
+        when inQuotes {
+            when c == "\"" {
+                # A doubled quote is one literal quote; a single one ends the field.
+                when i + 1 < n and substr(text, i + 1, 1) == "\"" {
+                    field = field + "\""
+                    i = i + 2
+                } other {
+                    inQuotes = false
+                    i = i + 1
+                }
+            } other {
+                field = field + c
+                i = i + 1
+            }
+        } other {
+            when c == "\"" {
+                inQuotes = true
+                any = true
+                i = i + 1
+            } other when c == delim {
+                push(row, field)
+                field = ""
+                any = true
+                i = i + 1
+            } other when c == "\n" or c == "\r" {
+                # Accept CRLF, LF and lone CR without emitting a blank row.
+                when c == "\r" and i + 1 < n and substr(text, i + 1, 1) == "\n" { i = i + 1 }
+                push(row, field)
+                push(rows, row)
+                row = []
+                field = ""
+                any = false
+                i = i + 1
+            } other {
+                field = field + c
+                any = true
+                i = i + 1
+            }
+        }
+    }
+
+    # Trailing record with no line terminator.
+    when any or len(field) > 0 or len(row) > 0 {
+        push(row, field)
+        push(rows, row)
+    }
+    give rows
+}
+
+# ── Parsing ──────────────────────────────────────────────────────────────────
+
+# Parse into an array of arrays. No header handling: every line is data.
+export task parseRows(csvString, delim = ",") {
+    when typeOf(csvString) != "string" {
+        throw CSV_SHAPE_ERROR + "expected a string, got " + typeOf(csvString)
+    }
+    when len(csvString) == 0 { give [] }
+    give _csvScan(csvString, delim)
+}
+
+# Parse into an array of dictionaries keyed by the first row.
+#
+# A short row leaves the missing columns as "" rather than absent, so callers can
+# index every declared column without checking each one first.
+export task parse(csvString, delim = ",") {
+    rows = parseRows(csvString, delim)
+    when len(rows) == 0 { give [] }
+    header = rows[0]
+    result = []
+    repeat r = 1 to len(rows) - 1 {
+        rec = {}
+        repeat c = 0 to len(header) - 1 {
+            key = header[c]
+            when c < len(rows[r]) { rec[key] = rows[r][c] }
+            other { rec[key] = "" }
+        }
+        push(result, rec)
+    }
+    give result
+}
+
+# The header row on its own, without parsing the body.
+export task headers(csvString, delim = ",") {
+    rows = parseRows(csvString, delim)
+    when len(rows) == 0 { give [] }
+    give rows[0]
+}
+
+# ── Serialising ──────────────────────────────────────────────────────────────
+
+# Quote a field only when it needs it: RFC 4180 requires quoting if the value
+# contains the delimiter, a quote, CR or LF. Quoting everything is legal but
+# bloats the file and upsets some readers.
+task _csvQuote(value, delim) {
+    s = str(value)
+    needs = false
+    repeat i = 0 to len(s) - 1 {
+        c = substr(s, i, 1)
+        when c == delim or c == "\"" or c == "\n" or c == "\r" { needs = true }
+    }
+    when not needs { give s }
+    outS = "\""
+    repeat i = 0 to len(s) - 1 {
+        c = substr(s, i, 1)
+        when c == "\"" { outS = outS + "\"\"" } other { outS = outS + c }
+    }
+    give outS + "\""
+}
+
+# Serialise an array of arrays.
+export task stringifyRows(rows, delim = ",") {
+    when typeOf(rows) != "array" {
+        throw CSV_SHAPE_ERROR + "expected an array, got " + typeOf(rows)
+    }
+    lines = []
+    get row in rows {
+        cells = []
+        get cell in row { push(cells, _csvQuote(cell, delim)) }
+        push(lines, join(cells, delim))
+    }
+    give join(lines, "\n")
+}
+
+# Serialise an array of dictionaries, emitting a header row.
+#
+# `columns` fixes the column order; without it the keys of the first record are
+# used, and any key appearing only in later records is added on the end. That
+# matters because dictionary order is not guaranteed -- passing `columns`
+# explicitly is the only way to get a stable layout.
+export task stringify(records, delim = ",", columns = nil) {
+    when typeOf(records) != "array" {
+        throw CSV_SHAPE_ERROR + "expected an array, got " + typeOf(records)
+    }
+    when len(records) == 0 { give "" }
+
+    cols = []
+    when typeOf(columns) == "array" {
+        get c in columns { push(cols, c) }
+    } other {
+        get k in keys(records[0]) { push(cols, k) }
+        get rec in records {
+            get k in keys(rec) {
+                seen = false
+                get c in cols { when c == k { seen = true } }
+                when not seen { push(cols, k) }
+            }
+        }
+    }
+
+    rows = [cols]
+    get rec in records {
+        row = []
+        get c in cols {
+            when typeOf(rec) == "dictionary" and has_key(rec, c) { push(row, rec[c]) }
+            other { push(row, "") }
+        }
+        push(rows, row)
+    }
+    give stringifyRows(rows, delim)
+}
+
+# ── Files ────────────────────────────────────────────────────────────────────
+
+task _readText(filePath) {
+    when not File.exists(filePath) {
+        throw CSV_IO_ERROR + "no such file: " + str(filePath)
+    }
+    f = File(filePath, "r")
+    when not f.isOpen() { throw CSV_IO_ERROR + "cannot open: " + str(filePath) }
+    content = f.readAll()
+    f.close()
+    give content
+}
+
+# Read a CSV file into dictionaries. Throws if the file is missing.
+export task read(filePath, delim = ",") {
+    give parse(_readText(filePath), delim)
+}
+
+# Read a CSV file into arrays.
+export task readRows(filePath, delim = ",") {
+    give parseRows(_readText(filePath), delim)
+}
+
+# Read, or return `fallback` when the file is missing or unreadable.
+export task safeRead(filePath, fallback = nil, delim = ",") {
+    try { give read(filePath, delim) } catch (e) { give fallback }
+}
+
+# Write dictionaries to a file (header included).
+export task write(filePath, records, delim = ",", columns = nil) {
+    f = File(filePath, "w")
+    when not f.isOpen() { throw CSV_IO_ERROR + "cannot write: " + str(filePath) }
+    body = stringify(records, delim, columns)
+    # Terminate the last record. Without this, append() continues the final line
+    # instead of starting a new one.
+    when len(body) > 0 { body = body + "\n" }
+    f.write(body)
+    f.close()
+    give true
+}
+
+# Write arrays to a file.
+export task writeRows(filePath, rows, delim = ",") {
+    f = File(filePath, "w")
+    when not f.isOpen() { throw CSV_IO_ERROR + "cannot write: " + str(filePath) }
+    rowsBody = stringifyRows(rows, delim)
+    when len(rowsBody) > 0 { rowsBody = rowsBody + "\n" }
+    f.write(rowsBody)
+    f.close()
+    give true
+}
+
+# Append records to an existing file WITHOUT repeating the header.
+#
+# Rewriting a growing log through write() costs a full re-serialise every time;
+# this only pays for the new rows. The column order is taken from the file's own
+# header so the appended rows line up even if the dictionaries are ordered
+# differently.
+export task append(filePath, records, delim = ",") {
+    when typeOf(records) != "array" {
+        throw CSV_SHAPE_ERROR + "expected an array, got " + typeOf(records)
+    }
+    when len(records) == 0 { give true }
+
+    cols = []
+    fresh = not File.exists(filePath) or File.size(filePath) == 0
+    needsNewline = false
+    when not fresh {
+        existing = _readText(filePath)
+        cols = headers(existing, delim)
+        # A file written elsewhere may not end in a newline; starting a record
+        # straight after its last byte would join two rows into one.
+        when len(existing) > 0 {
+            lastCh = substr(existing, len(existing) - 1, 1)
+            # 10 = LF, 13 = CR -- compared numerically to keep raw control
+            # characters out of this source file.
+            lastO = ord(lastCh)
+            when lastO != 10 and lastO != 13 { needsNewline = true }
+        }
+    }
+    when len(cols) == 0 {
+        get k in keys(records[0]) { push(cols, k) }
+        fresh = true
+    }
+
+    rows = []
+    get rec in records {
+        row = []
+        get c in cols {
+            when has_key(rec, c) { push(row, rec[c]) } other { push(row, "") }
+        }
+        push(rows, row)
+    }
+
+    body = stringifyRows(rows, delim)
+    f = File(filePath, "a")
+    when not f.isOpen() { throw CSV_IO_ERROR + "cannot append: " + str(filePath) }
+    when needsNewline { f.write("\n") }
+    when fresh { f.write(stringifyRows([cols], delim) + "\n") }
+    f.write(body + "\n")
+    f.close()
+    give true
+}
+
+# ── Shaping ──────────────────────────────────────────────────────────────────
+
+# Every value of one column, in row order.
+export task column(records, name) {
+    result = []
+    get rec in records {
+        when has_key(rec, name) { push(result, rec[name]) } other { push(result, "") }
+    }
+    give result
+}
+
+# Records for which `predicate(record)` is true.
+export task filter(records, predicate) {
+    result = []
+    get rec in records {
+        when predicate(rec) { push(result, rec) }
+    }
+    give result
+}
+
+# Report rows whose column count does not match the header.
+#
+# A ragged file usually means a stray delimiter inside an unquoted field, and it
+# is far easier to see it here than three transformations later.
+export task validate(csvString, delim = ",") {
+    rows = parseRows(csvString, delim)
+    problems = []
+    when len(rows) == 0 { give problems }
+    want = len(rows[0])
+    repeat i = 1 to len(rows) - 1 {
+        when len(rows[i]) != want {
+            push(problems, {
+                "line": i + 1,
+                "expected": want,
+                "got": len(rows[i])
+            })
+        }
+    }
+    give problems
+}

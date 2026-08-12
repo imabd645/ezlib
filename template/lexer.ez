@@ -1,0 +1,139 @@
+# ============================================================================
+# template/lexer.ez — template source to tokens
+#
+# Three delimiters carry meaning:
+#   {{ expr }}   output an expression
+#   {% tag %}    control flow
+#   {# text #}   comment, dropped entirely
+#
+# Everything else is literal text. A `-` next to a delimiter ({%- ... -%})
+# trims the whitespace on that side, which is what keeps generated HTML from
+# being buried in the blank lines that block tags would otherwise leave.
+# ============================================================================
+
+export TOK_TEXT = "text"
+export TOK_VAR = "var"
+export TOK_TAG = "tag"
+
+task tplFail(msg, line) {
+    throw Exception(`Template error (line {line}): {msg}`)
+}
+
+task tplCountNewlines(s) {
+    total = 0
+    limit = len(s)
+    repeat i = 0 to limit - 1 {
+        when substr(s, i, 1) == chr(10) { total = total + 1 }
+    }
+    give total
+}
+
+# Index of `needle` at or after `from`, or -1.
+task tplIndexFrom(haystack, needle, from) {
+    hLen = len(haystack)
+    nLen = len(needle)
+    when nLen == 0 { give -1 }
+    limit = hLen - nLen
+    when from > limit { give -1 }
+    repeat i = from to limit {
+        when substr(haystack, i, nLen) == needle { give i }
+    }
+    give -1
+}
+
+task tplTrimRight(s) {
+    # NOT `stop`: that is a builtin, and a bare assignment would replace it.
+    stopAt = len(s)
+    while stopAt > 0 {
+        c = substr(s, stopAt - 1, 1)
+        when c == " " or c == chr(9) or c == chr(10) or c == chr(13) { stopAt = stopAt - 1 }
+        other { escape }
+    }
+    give substr(s, 0, stopAt)
+}
+
+task tplTrimLeft(s) {
+    start = 0
+    limit = len(s)
+    while start < limit {
+        c = substr(s, start, 1)
+        when c == " " or c == chr(9) or c == chr(10) or c == chr(13) { start = start + 1 }
+        other { escape }
+    }
+    give substr(s, start, limit - start)
+}
+
+# Produces tokens: { kind, value, line }
+export task tplTokenize(source) {
+    tokens = []
+    pos = 0
+    line = 1
+    total = len(source)
+
+    while pos < total {
+        openVar = tplIndexFrom(source, "{{", pos)
+        openTag = tplIndexFrom(source, "{%", pos)
+        openCom = tplIndexFrom(source, "{#", pos)
+
+        # Nearest delimiter wins; -1 means "not present".
+        nextAt = -1
+        kind = ""
+        get cand in [[openVar, TOK_VAR], [openTag, TOK_TAG], [openCom, "comment"]] {
+            at = cand[0]
+            when at >= 0 {
+                when nextAt < 0 or at < nextAt {
+                    nextAt = at
+                    kind = cand[1]
+                }
+            }
+        }
+
+        when nextAt < 0 {
+            # No delimiters left: the rest is literal text.
+            rest = substr(source, pos, total - pos)
+            when rest != "" { push(tokens, { "kind": TOK_TEXT, "value": rest, "line": line }) }
+            escape
+        }
+
+        closer = "}}"
+        when kind == TOK_TAG { closer = "%}" }
+        when kind == "comment" { closer = "#}" }
+
+        closeAt = tplIndexFrom(source, closer, nextAt + 2)
+        when closeAt < 0 {
+            tplFail(`unclosed '{substr(source, nextAt, 2)}'`, line + tplCountNewlines(substr(source, 0, nextAt)))
+        }
+
+        text = substr(source, pos, nextAt - pos)
+        body = substr(source, nextAt + 2, closeAt - nextAt - 2)
+
+        # Whitespace control on the opening side.
+        when startsWith(body, "-") {
+            body = substr(body, 1, len(body) - 1)
+            text = tplTrimRight(text)
+        }
+        trimAfter = false
+        when endsWith(body, "-") {
+            body = substr(body, 0, len(body) - 1)
+            trimAfter = true
+        }
+
+        when text != "" {
+            push(tokens, { "kind": TOK_TEXT, "value": text, "line": line })
+        }
+        line = line + tplCountNewlines(substr(source, pos, closeAt + 2 - pos))
+
+        when kind != "comment" {
+            push(tokens, { "kind": kind, "value": trim(body), "line": line })
+        }
+
+        pos = closeAt + 2
+
+        when trimAfter {
+            remainder = substr(source, pos, total - pos)
+            trimmed = tplTrimLeft(remainder)
+            pos = pos + (len(remainder) - len(trimmed))
+        }
+    }
+    give tokens
+}

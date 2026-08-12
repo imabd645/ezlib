@@ -1,0 +1,124 @@
+# ============================================================================
+# websocket/bytes.ez — byte-exact string building
+#
+# WebSocket frames are binary: opcode bits, big-endian lengths, and a random
+# 4-byte masking key. EZ strings are UTF-8, so building one with chr() is not
+# byte-exact -- chr(255) becomes the two-byte sequence C3 BF and the frame is
+# corrupt.
+#
+# Writing through a raw buffer and converting with buf_to_str is exact, which
+# is the same route `socket` uses to read. Every frame this library emits is
+# assembled here rather than by concatenation.
+# ============================================================================
+
+# Turns a list of byte octets (0-255) into a byte-exact string.
+export task bytesToStr(octets) {
+    total = len(octets)
+    when total == 0 { give "" }
+    buf = os_alloc(total)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b % 256)
+        index = index + 1
+    }
+    result = buf_to_str(os_buffer_from_ptr(buf, total))
+    os_free(buf)
+    give result
+}
+
+# The byte octets of a string. Safe on data read from a socket, which arrives
+# byte-exact.
+export task strToBytes(s) {
+    octets = []
+    total = len(s)
+    repeat i = 0 to total - 1 { push(octets, ord(substr(s, i, 1))) }
+    give octets
+}
+
+# Big-endian, `width` bytes. WebSocket lengths are network byte order.
+export task intToBytes(value, width) {
+    octets = []
+    remaining = value
+    repeat i = 1 to width {
+        push(octets, 0)
+    }
+    index = width - 1
+    while index >= 0 {
+        octets[index] = remaining % 256
+        remaining = (remaining - (remaining % 256)) / 256
+        index = index - 1
+    }
+    give octets
+}
+
+export task bytesToInt(octets, from, width) {
+    total = 0
+    repeat i = 0 to width - 1 {
+        total = total * 256 + octets[from + i]
+    }
+    give total
+}
+
+# XOR mask, applied in place per RFC 6455. The same operation both masks and
+# unmasks, since XOR is its own inverse.
+export task applyMask(payload, maskKey) {
+    result = []
+    index = 0
+    get b in payload {
+        push(result, xorByte(b, maskKey[index % 4]))
+        index = index + 1
+    }
+    give result
+}
+
+# EZ has no bitwise XOR operator, so it is computed bit by bit.
+export task xorByte(a, b) {
+    result = 0
+    bit = 1
+    left = a
+    right = b
+    repeat i = 1 to 8 {
+        leftBit = left % 2
+        rightBit = right % 2
+        when leftBit != rightBit { result = result + bit }
+        left = (left - leftBit) / 2
+        right = (right - rightBit) / 2
+        bit = bit * 2
+    }
+    give result
+}
+
+# Bit helpers, for the flag bits packed into the first two frame bytes.
+export task bitAnd(a, b) {
+    result = 0
+    bit = 1
+    left = a
+    right = b
+    repeat i = 1 to 32 {
+        when left == 0 or right == 0 { escape }
+        leftBit = left % 2
+        rightBit = right % 2
+        when leftBit == 1 and rightBit == 1 { result = result + bit }
+        left = (left - leftBit) / 2
+        right = (right - rightBit) / 2
+        bit = bit * 2
+    }
+    give result
+}
+
+export task bitOr(a, b) {
+    result = 0
+    bit = 1
+    left = a
+    right = b
+    repeat i = 1 to 32 {
+        when left == 0 and right == 0 { escape }
+        leftBit = left % 2
+        rightBit = right % 2
+        when leftBit == 1 or rightBit == 1 { result = result + bit }
+        left = (left - leftBit) / 2
+        right = (right - rightBit) / 2
+        bit = bit * 2
+    }
+    give result
+}

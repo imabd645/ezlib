@@ -1,0 +1,61 @@
+use "core.ez"
+
+export task factorial(n) {
+    when n < 0 or floor(n) != n { throw "factorial(): n must be a non-negative integer" }
+    result = 1
+    repeat i = 2 to n { result = result * i }
+    give result
+}
+
+export task gcd(a, b) {
+    a = abs(a)
+    b = abs(b)
+    while b != 0 { remainder = a % b  a = b  b = remainder }
+    give a
+}
+
+export task lcm(a, b) {
+    when a == 0 or b == 0 { give 0 }
+    give abs((a / gcd(a, b)) * b)
+}
+
+export task isPrime(n) {
+    when floor(n) != n or n < 2 { give false }
+    when n == 2 { give true }
+    when n % 2 == 0 { give false }
+    divisor = 3
+    while divisor * divisor <= n { when n % divisor == 0 { give false }  divisor = divisor + 2 }
+    give true
+}
+
+export task nextPrime(n) {
+    candidate = floor(n) + 1
+    when candidate <= 2 { give 2 }
+    when candidate % 2 == 0 { candidate = candidate + 1 }
+    while not isPrime(candidate) { candidate = candidate + 2 }
+    give candidate
+}
+
+export task factors(n) {
+    when floor(n) != n or n < 1 { throw "factors(): n must be a positive integer" }
+    result = []
+    divisor = 2
+    while divisor * divisor <= n {
+        while n % divisor == 0 { push(result, divisor)  n = n / divisor }
+        when divisor == 2 { divisor = 3 } other { divisor = divisor + 2 }
+    }
+    when n > 1 { push(result, n) }
+    give result
+}
+
+export task fibonacci(n) {
+    when n < 0 or floor(n) != n { throw "fibonacci(): n must be a non-negative integer" }
+    a = 0
+    b = 1
+    repeat i = 1 to n { next = a + b  a = b  b = next }
+    give a
+}
+
+export task isEven(n) { give n % 2 == 0 }
+export task isOdd(n) { give n % 2 != 0 }
+export task isPowerOf2(n) { give n > 0 and floor(n) == n and (n & (n - 1)) == 0 }

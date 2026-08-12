@@ -1,0 +1,154 @@
+// ============================================================================
+// ezos / system.ez -- platform, memory, CPU, version, identity.
+// ============================================================================
+
+use "ffi.ez"
+use "process.ez"
+use "util.ez"
+
+export model OSSystem {
+    task platform() { give "windows" }
+
+    task isWindows() { give true }
+
+    task uptime() { give os_call(OSFFI.getTickCount64, "int") / 1000.0 }
+
+    task _readMemoryStatus() {
+        memInfo = os_alloc(64)
+        os_write_uint32(memInfo, 0, 64)
+        ok = os_call(OSFFI.globalMemStatus, "int", memInfo)
+        when ok == 0 {
+            os_free(memInfo)
+            give nil
+        }
+
+        loadPct = os_read_uint32(memInfo, 4)
+        total = os_read_uint64(memInfo, 8)
+        avail = os_read_uint64(memInfo, 16)
+        os_free(memInfo)
+
+        used = total - avail
+        give {
+            "total": total,
+            "free": avail,
+            "used": used,
+            "loadPercent": loadPct
+        }
+    }
+
+    task totalMemory() {
+        m = self._readMemoryStatus()
+        when typeOf(m) == "nil" { give 0 }
+        give m["total"]
+    }
+
+    task freeMemory() {
+        m = self._readMemoryStatus()
+        when typeOf(m) == "nil" { give 0 }
+        give m["free"]
+    }
+
+    task memory() { give self._readMemoryStatus() }
+
+    task cwd() {
+        buf = os_alloc(1024)
+        os_call(OSFFI.getCwd, "int", 1024, buf)
+        res = os_read_string_ptr(buf)
+        os_free(buf)
+        give res
+    }
+
+    task chdir(path) { give os_call(OSFFI.setCwd, "int", str(path)) != 0 }
+
+    task sleep(ms) { os_call(OSFFI.sleep, "int", ms) }
+
+    task cpuCores() {
+        sysInfo = os_alloc(64)
+        os_call(OSFFI.getSystemInfo, "void", sysInfo)
+        cores = os_read_uint32(sysInfo, 32)
+        os_free(sysInfo)
+        give cores
+    }
+
+    task arch() {
+        sysInfo = os_alloc(64)
+        os_call(OSFFI.getNativeSystemInfo, "void", sysInfo)
+        archId = os_read_uint16(sysInfo, 0)
+        os_free(sysInfo)
+
+        when archId == 9 { give "x64" }
+        when archId == 0 { give "x86" }
+        when archId == 12 { give "arm64" }
+        give "unknown"
+    }
+
+    task pid() {
+        p = OSProcess()
+        give p.pid()
+    }
+
+    task userName() {
+        buf = os_alloc(256)
+        sizeBuf = os_alloc(4)
+        os_write_uint32(sizeBuf, 0, 256)
+        os_call(OSFFI.getUserName, "int", buf, sizeBuf)
+        res = os_read_string_ptr(buf)
+        os_free(buf)
+        os_free(sizeBuf)
+        give res
+    }
+
+    task computerName() {
+        buf = os_alloc(256)
+        sizeBuf = os_alloc(4)
+        os_write_uint32(sizeBuf, 0, 256)
+        os_call(OSFFI.getComputerName, "int", buf, sizeBuf)
+        res = os_read_string_ptr(buf)
+        os_free(buf)
+        os_free(sizeBuf)
+        give res
+    }
+
+    task hostname() { give self.computerName() }
+
+    task executable() {
+        buf = os_alloc(1024)
+        os_call(OSFFI.getModuleFileName, "int", 0, buf, 1024)
+        res = os_read_string_ptr(buf)
+        os_free(buf)
+        give res
+    }
+
+    task version() {
+        info = os_alloc(284)
+        os_write_uint32(info, 0, 284)
+        ok = os_call(OSFFI.rtlGetVersion, "int", info)
+        when ok == 0 {
+            major = os_read_uint32(info, 4)
+            minor = os_read_uint32(info, 8)
+            build = os_read_uint32(info, 12)
+            os_free(info)
+            give {
+                "major": major,
+                "minor": minor,
+                "build": build,
+                "name": "Windows " + str(major) + "." + str(minor)
+            }
+        }
+
+        // Fallback for older systems.
+        legacy = os_alloc(156)
+        os_write_uint32(legacy, 0, 156)
+        os_call(OSFFI.getVersionEx, "int", legacy)
+        major = os_read_uint32(legacy, 4)
+        minor = os_read_uint32(legacy, 8)
+        build = os_read_uint32(legacy, 12)
+        os_free(legacy)
+        give {
+            "major": major,
+            "minor": minor,
+            "build": build,
+            "name": "Windows " + str(major) + "." + str(minor)
+        }
+    }
+}

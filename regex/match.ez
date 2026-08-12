@@ -1,0 +1,47 @@
+// ============================================================================
+// regex — Match objects
+// ============================================================================
+use "errors.ez"
+
+// One match, with its position in the subject string.
+//
+// Positions come from the engine rather than from searching the subject for the
+// matched text, which is what the previous implementation did: looking up
+// `\bcat\b`'s match "cat" inside "concat cat" finds index 3, not the real 7.
+export model Match {
+    init(raw) {
+        self.text = raw["text"]
+        self.start = raw["start"]
+        self.end = raw["end"]
+        self.groups = raw["groups"]
+    }
+
+    // group(0) is the whole match; group(n) is the nth capture.
+    // A group that did not participate is nil -- distinct from one that matched
+    // the empty string, which `(a)?` needs to be tellable apart.
+    task group(n) {
+        when n == 0 { give self.text }
+        i = n - 1
+        when i < 0 or i >= len(self.groups) {
+            throw RegexError("no group " + str(n) + " in this pattern (it has " +
+                             str(len(self.groups)) + " capture group(s))")
+        }
+        give self.groups[i]
+    }
+
+    task groupCount() { give len(self.groups) }
+
+    // Length of the matched text. Zero for a zero-width match such as `^`.
+    task length() { give self.end - self.start }
+
+    task toString() {
+        give "Match(\"" + str(self.text) + "\" at " + str(self.start) + ".." + str(self.end) + ")"
+    }
+}
+
+// Wraps a raw builtin result, passing nil through so callers can write
+// `m = p.find(s)` and test `when m == nil`.
+export task toMatch(raw) {
+    when raw == nil { give nil }
+    give Match(raw)
+}

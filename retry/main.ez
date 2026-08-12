@@ -1,0 +1,240 @@
+# ============================================================================
+# retry — retries, backoff and circuit breaking for EZ
+#
+#   use "retry"
+#
+#   response = retry(|| http.get(url))
+#
+# A network call fails for two different reasons: something transient (a
+# dropped connection, a 503, a lock timeout) and something permanent (a 404,
+# bad credentials, malformed input). Retrying the first is right; retrying the
+# second wastes time and can make things worse. Nothing here retries by
+# default beyond a small number of attempts, and `retryIf` exists so the
+# caller can say which failures are worth repeating.
+# ============================================================================
+
+DEFAULT_ATTEMPTS = 3
+DEFAULT_DELAY = 0.5
+DEFAULT_MULTIPLIER = 2
+DEFAULT_MAX_DELAY = 30
+
+# Busy-wait. EZ has no sleep that is safe to call from any context, and a
+# retry delay is short by design; a long one belongs in a scheduler, not here.
+task pause(seconds) {
+    when seconds <= 0 { give nil }
+    until = clock() + (seconds * 1000)
+    while clock() < until { }
+    give nil
+}
+
+# ── the policy ──────────────────────────────────────────────────────────────
+
+export model Retry {
+
+    init() {
+        self.attempts = DEFAULT_ATTEMPTS
+        self.delay = DEFAULT_DELAY
+        self.multiplier = DEFAULT_MULTIPLIER
+        self.maxDelay = DEFAULT_MAX_DELAY
+        self.jitter = true
+        self.shouldRetry = nil
+        self.onRetry = nil
+        self.lastAttempts = 0
+    }
+
+    # Total attempts, including the first. `times(1)` means no retrying.
+    task times(count) {
+        when count < 1 { throw Exception("retry: attempts must be at least 1") }
+        self.attempts = count
+        give self
+    }
+
+    # Seconds before the second attempt. Each later wait multiplies this.
+    task waiting(seconds) {
+        self.delay = seconds
+        give self
+    }
+
+    # Growth factor between attempts. 1 gives a constant delay.
+    task backoff(factor) {
+        self.multiplier = factor
+        give self
+    }
+
+    task capped(seconds) {
+        self.maxDelay = seconds
+        give self
+    }
+
+    # Jitter spreads retries out. Without it, every client that failed during
+    # an outage retries at the same instant and knocks the service over again
+    # as it recovers -- the thundering herd. On by default for that reason.
+    task withoutJitter() {
+        self.jitter = false
+        give self
+    }
+
+    # A predicate on the caught exception: true to retry, false to give up.
+    # Use it to retry timeouts but not a 404.
+    task onlyWhen(predicate) {
+        self.shouldRetry = predicate
+        give self
+    }
+
+    # Called before each wait, with (attemptNumber, exception, delaySeconds).
+    # For logging, so a retry is visible rather than silent latency.
+    task notify(handler) {
+        self.onRetry = handler
+        give self
+    }
+
+    # Delay before attempt `n` (1-based; n=1 has no delay).
+    task delayFor(n) {
+        when n <= 1 { give 0 }
+        pauseSecs = self.delay
+        repeat i = 2 to n - 1 { pauseSecs = pauseSecs * self.multiplier }
+        when pauseSecs > self.maxDelay { pauseSecs = self.maxDelay }
+        when self.jitter {
+            # Full jitter: a random point in [0, delay]. Spreads clients out
+            # far better than adding a small random fraction.
+            pauseSecs = pauseSecs * (randint(0, 1000) / 1000)
+        }
+        give pauseSecs
+    }
+
+    # Run `action`, retrying on exception. Returns its value, or rethrows the
+    # last exception once the attempts are used up -- the caller still learns
+    # what went wrong.
+    task run(action) {
+        attempt = 1
+        lastError = nil
+        while attempt <= self.attempts {
+            self.lastAttempts = attempt
+            try { give action() }
+            catch (e) {
+                lastError = e
+                when attempt >= self.attempts { escape }
+                when self.shouldRetry != nil {
+                    when self.shouldRetry(e) == false { escape }
+                }
+                pauseSecs = self.delayFor(attempt + 1)
+                when self.onRetry != nil { self.onRetry(attempt, e, pauseSecs) }
+                pause(pauseSecs)
+            }
+            attempt = attempt + 1
+        }
+        throw lastError
+    }
+
+    # As run(), but returns `fallback` instead of throwing.
+    task runOr(action, fallback) {
+        try { give self.run(action) }
+        catch (e) { give fallback }
+    }
+
+    # { ok, value, error, attempts } -- for callers that want to inspect the
+    # failure without a try block. The count is kept on the policy rather than
+    # captured in a closure, so it does not depend on lambda capture semantics.
+    task attempt(action) {
+        self.lastAttempts = 0
+        try {
+            value = self.run(action)
+            give { "ok": true, "value": value, "error": nil, "attempts": self.lastAttempts }
+        }
+        catch (e) {
+            give { "ok": false, "value": nil, "error": e, "attempts": self.lastAttempts }
+        }
+    }
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+# Three attempts with exponential backoff and jitter.
+export task retry(action) {
+    give Retry().run(action)
+}
+
+export task retryTimes(count, action) {
+    give Retry().times(count).run(action)
+}
+
+export task retryOr(action, fallback) {
+    give Retry().runOr(action, fallback)
+}
+
+# A policy tuned for network calls: more attempts, a longer ceiling.
+export task networkRetry() {
+    give Retry().times(5).waiting(0.25).backoff(2).capped(10)
+}
+
+# ── circuit breaker ─────────────────────────────────────────────────────────
+
+# Retrying a service that is genuinely down turns one slow request into many.
+# A breaker notices repeated failure and fails fast for a while instead, which
+# both spares the caller and gives the service room to recover.
+export model CircuitBreaker {
+
+    init(threshold, cooldownSeconds) {
+        self.threshold = threshold
+        self.cooldown = cooldownSeconds
+        self.failures = 0
+        self.openedAt = 0
+        self.state = "closed"
+    }
+
+    # closed = passing through, open = failing fast, half-open = one trial.
+    task currentState() {
+        when self.state == "open" {
+            when clock() - self.openedAt >= self.cooldown * 1000 {
+                self.state = "half-open"
+            }
+        }
+        give self.state
+    }
+
+    task isOpen() { give self.currentState() == "open" }
+
+    task recordSuccess() {
+        self.failures = 0
+        self.state = "closed"
+        give nil
+    }
+
+    task recordFailure() {
+        self.failures = self.failures + 1
+        when self.failures >= self.threshold {
+            self.state = "open"
+            self.openedAt = clock()
+        }
+        give nil
+    }
+
+    task reset() {
+        self.failures = 0
+        self.state = "closed"
+        self.openedAt = 0
+        give nil
+    }
+
+    # Run `action` unless the breaker is open, in which case throw at once.
+    # A success in half-open closes the breaker; a failure re-opens it.
+    task run(action) {
+        when self.currentState() == "open" {
+            throw Exception("retry: circuit is open -- the last calls all failed")
+        }
+        try {
+            value = action()
+            self.recordSuccess()
+            give value
+        }
+        catch (e) {
+            self.recordFailure()
+            throw e
+        }
+    }
+
+    task runOr(action, fallback) {
+        try { give self.run(action) }
+        catch (e) { give fallback }
+    }
+}

@@ -1,0 +1,103 @@
+# ============================================================================
+# decimal/arith.ez — exact integer helpers
+#
+# Every Decimal is an integer count of units plus a scale, so all arithmetic
+# reduces to integer arithmetic. The one operation EZ does not give directly
+# is exact integer division: `a / b` promotes to float and loses precision
+# past 2^53. `(a - a % b) / b` divides a value already known to be a multiple,
+# which EZ returns as an exact integer at the full 64-bit range.
+# ============================================================================
+
+export MAX_SCALE = 18
+
+# Exact truncating division. Both arguments must be integers.
+export task decIDiv(a, b) {
+    when b == 0 { throw Exception("decimal: division by zero") }
+    give (a - (a % b)) / b
+}
+
+# 10^n as an exact integer. Loops rather than using pow(), which returns a
+# float and would round above 10^15.
+export task decPow10(n) {
+    when n < 0 { throw Exception(`decimal: negative scale {n}`) }
+    when n > MAX_SCALE { throw Exception(`decimal: scale {n} exceeds the maximum of {MAX_SCALE}`) }
+    result = 1
+    repeat i = 1 to n { result = result * 10 }
+    give result
+}
+
+export task decSign(n) {
+    when n < 0 { give -1 }
+    when n > 0 { give 1 }
+    give 0
+}
+
+# Rounds `units / divisor` to an integer under the named mode. `units` may be
+# negative; rounding is symmetric about zero for the half-* modes, which is
+# what "round half away from zero" means for negative money.
+export task decRoundDiv(units, divisor, mode) {
+    when divisor == 0 { throw Exception("decimal: division by zero") }
+    quotient = decIDiv(units, divisor)
+    remainder = units % divisor
+
+    when remainder == 0 { give quotient }
+
+    negative = (units < 0)
+    absRemainder = remainder
+    when absRemainder < 0 { absRemainder = -absRemainder }
+    absDivisor = divisor
+    when absDivisor < 0 { absDivisor = -absDivisor }
+    twice = absRemainder * 2
+
+    when mode == "down" { give quotient }
+    when mode == "truncate" { give quotient }
+    when mode == "up" {
+        when negative { give quotient - 1 }
+        give quotient + 1
+    }
+    when mode == "floor" {
+        when negative { give quotient - 1 }
+        give quotient
+    }
+    when mode == "ceil" {
+        when negative { give quotient }
+        give quotient + 1
+    }
+    when mode == "half-down" {
+        when twice > absDivisor {
+            when negative { give quotient - 1 }
+            give quotient + 1
+        }
+        give quotient
+    }
+    when mode == "half-even" {
+        # Banker's rounding: an exact half goes to the even neighbour, so a
+        # long series of roundings does not drift upward.
+        when twice == absDivisor {
+            when quotient % 2 == 0 { give quotient }
+            when negative { give quotient - 1 }
+            give quotient + 1
+        }
+        when twice > absDivisor {
+            when negative { give quotient - 1 }
+            give quotient + 1
+        }
+        give quotient
+    }
+    # Default: half-up (half away from zero), what people expect of money.
+    when twice >= absDivisor {
+        when negative { give quotient - 1 }
+        give quotient + 1
+    }
+    give quotient
+}
+
+# Restates `units` at `fromScale` as units at `toScale`, rounding if the new
+# scale is coarser.
+export task decRescale(units, fromScale, toScale, mode) {
+    when toScale == fromScale { give units }
+    when toScale > fromScale {
+        give units * decPow10(toScale - fromScale)
+    }
+    give decRoundDiv(units, decPow10(fromScale - toScale), mode)
+}

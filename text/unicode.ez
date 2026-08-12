@@ -1,0 +1,73 @@
+# ============================================================================
+# text/unicode.ez — counting characters instead of bytes
+#
+# EZ strings are UTF-8 and `len()` counts BYTES. That is the right answer for a
+# buffer and the wrong one for anything a person will read:
+#
+#   len("café")   -> 5     charCount("café")   -> 4
+#   len("日本")   -> 6     charCount("日本")   -> 2
+#
+# Every function in this package that talks about a length, a width or a
+# position means characters, and goes through here to get them. Padding a table
+# column or truncating a name with `len()` misaligns the moment anyone types an
+# accent.
+# ============================================================================
+
+# How many bytes the character starting with this byte occupies.
+export task charWidth(leadByte) {
+    when leadByte < 128 { give 1 }
+    when leadByte < 192 { give 1 }
+    when leadByte < 224 { give 2 }
+    when leadByte < 240 { give 3 }
+    give 4
+}
+
+# A string as a list of characters, each one a complete string.
+export task chars(text) {
+    body = str(text)
+    total = len(body)
+    result = []
+    i = 0
+    while i < total {
+        size = charWidth(ord(substr(body, i, 1)))
+        when i + size > total { size = 1 }
+        push(result, substr(body, i, size))
+        i = i + size
+    }
+    give result
+}
+
+export task charCount(text) { give len(chars(text)) }
+
+# Characters `start` through `start + count`, counted in characters.
+export task charSlice(text, start, count) {
+    letters = chars(text)
+    result = ""
+    at = start
+    when at < 0 { at = 0 }
+    limit = at + count
+    when limit > len(letters) { limit = len(letters) }
+    repeat i = at to limit - 1 { result = result + letters[i] }
+    give result
+}
+
+export task charAt(text, index) {
+    letters = chars(text)
+    when index < 0 or index >= len(letters) { give nil }
+    give letters[index]
+}
+
+# Reversing by byte would shred every multi-byte character.
+export task reverseText(text) {
+    result = ""
+    get ch in chars(text) { result = ch + result }
+    give result
+}
+
+export task isAscii(text) {
+    body = str(text)
+    repeat i = 0 to len(body) - 1 {
+        when ord(substr(body, i, 1)) > 127 { give false }
+    }
+    give true
+}

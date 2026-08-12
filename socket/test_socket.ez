@@ -1,0 +1,190 @@
+// ============================================================================
+// ezsocket regression tests
+//
+//   ez test_socket.ez        (from C:\ezlib\socket)
+//
+// Runs entirely against 127.0.0.1, so nothing here needs the network. The one
+// DNS check tolerates being offline.
+// ============================================================================
+
+use "socket"
+
+passes = 0
+fails = 0
+task check(name, actual, expected) {
+    when str(actual) == str(expected) {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+task checkThrows(name, fn) {
+    threw = false
+    try { fn() } catch (e) { threw = true }
+    when threw {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected a throw"
+    }
+}
+
+out "=== ezsocket tests ==="
+out ""
+out "-- address handling --"
+
+a = make_sockaddr("192.168.1.10", 8080)
+check("make_sockaddr accepts a dotted quad", a != 0, true)
+info = read_sockaddr(a)
+check("sockaddr round-trips the ip", info["ip"], "192.168.1.10")
+check("sockaddr round-trips the port", info["port"], 8080)
+os_free(a)
+
+check("make_sockaddr rejects a hostname", make_sockaddr("example.com", 80), 0)
+
+loop_ = resolve_host("127.0.0.1")
+check("resolve_host passes numeric through", loop_, "127.0.0.1")
+
+lh = resolve_host("localhost")
+check("resolve_host resolves localhost", lh, "127.0.0.1")
+
+check("resolve_host returns nil for a bad name", resolve_host("no-such-host.invalid."), nil)
+
+out ""
+out "-- errors are diagnosable --"
+check("known code has a message", wsa_message(10061), "connection refused -- nothing is listening on that address and port")
+check("unknown code degrades", wsa_message(999999), "unknown error")
+
+e = SocketError("boom", 10060)
+check("SocketError carries the code", e.code, 10060)
+check("SocketError renders", indexOf(e.str(), "timed out") != -1, true)
+
+checkThrows("connect to a closed port throws", || { tcp_connect("127.0.0.1", 1, 1000) })
+checkThrows("connect to a bad hostname throws", || { tcp_connect("no-such-host.invalid.", 80) })
+checkThrows("tcp_listen rejects a hostname", || { tcp_listen("example.com", 9931) })
+
+out ""
+out "-- listener --"
+srv = tcp_listen("127.0.0.1", 9931)
+check("listener reports its port", srv.port, 9931)
+
+// The port is claimed exclusively, so nothing else can bind it while this
+// listener is alive. On Windows SO_REUSEADDR would ALLOW that second bind and
+// let the other process steal connections, which is why it is not the default.
+checkThrows("a live port cannot be hijacked", || { tcp_listen("127.0.0.1", 9931) })
+checkThrows("...not even with reuseAddr asked for", || { tcp_listen("127.0.0.1", 9931, 128, true) })
+srv.close()
+
+out ""
+out "-- tcp echo, in-process --"
+// The server runs on a spawned thread; the client stays on the main thread.
+server = tcp_listen("127.0.0.1", 9932)
+
+fut = spawn(|| {
+    conn = server.accept()
+    first = conn.recv(1024)
+    conn.sendAll("echo:" + first)
+    conn.close()
+    give conn.ip
+})
+
+wait(300)
+c = tcp_connect("127.0.0.1", 9932, 3000)
+c.sendAll("hello")
+reply = c.recv(1024)
+check("round trip", reply, "echo:hello")
+c.close()
+
+peerIp = await(fut)
+check("accept() reports the peer address", peerIp, "127.0.0.1")
+server.close()
+
+out ""
+out "-- binary payloads survive --"
+// 10 bytes with a NUL at index 3. Reading the receive buffer as a C string
+// truncates this to 3, which is what the old recv() did.
+server2 = tcp_listen("127.0.0.1", 9933)
+fut2 = spawn(|| {
+    conn = server2.accept()
+    got = conn.recv(1024)
+    conn.close()
+    give len(got)
+})
+
+wait(300)
+buf = buffer(10)
+buf_fill(buf, 65)
+os_write_byte(os_buffer_addr(buf), 3, 0)
+payload = buf_to_str(buf)
+check("payload really is 10 bytes", len(payload), 10)
+
+c2 = tcp_connect("127.0.0.1", 9933, 3000)
+c2.sendAll(payload)
+c2.close()
+check("all 10 bytes arrive, NUL included", await(fut2), 10)
+server2.close()
+
+out ""
+out "-- timeouts --"
+server3 = tcp_listen("127.0.0.1", 9934)
+fut3 = spawn(|| {
+    conn = server3.accept()
+    // Hold the connection open without sending, so the client's recv must
+    // time out rather than hang for good.
+    wait(1500)
+    conn.close()
+    give true
+})
+wait(300)
+c3 = tcp_connect("127.0.0.1", 9934, 400)
+t0 = clock()
+timedOut = false
+try {
+    c3.recv(16)
+} catch (err) {
+    timedOut = true
+}
+elapsed = clock() - t0
+check("recv times out instead of hanging", timedOut, true)
+check("timeout fires promptly", elapsed < 1200, true)
+c3.close()
+await(fut3)
+server3.close()
+
+out ""
+out "-- udp --"
+u_srv = udp_open()
+u_srv.bindTo("127.0.0.1", 9935)
+u_srv.setTimeout(2000)
+
+fut4 = spawn(|| {
+    m = u_srv.recvFrom(1024)
+    give m["data"]
+})
+
+wait(300)
+u_cli = udp_open()
+u_cli.sendTo("127.0.0.1", 9935, "udp-hello")
+check("udp datagram arrives", await(fut4), "udp-hello")
+u_cli.close()
+u_srv.close()
+
+out ""
+out "-- closed sockets are refused, not crashed --"
+dead = tcp_listen("127.0.0.1", 9936)
+dead.close()
+checkThrows("accept on a closed listener throws", || { dead.accept() })
+
+deadConn = Conn(-1, "127.0.0.1", 1)
+deadConn.close()
+checkThrows("recv on a closed conn throws", || { deadConn.recv(10) })
+checkThrows("send on a closed conn throws", || { deadConn.send("x") })
+
+out ""
+out "========================================"
+out " passed: " + str(passes) + "   failed: " + str(fails)
+out "========================================"
+when fails > 0 { panic("socket test failures") }

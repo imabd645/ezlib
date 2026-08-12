@@ -1,0 +1,123 @@
+// ============================================================================
+// ezenv -- .env file loading for EZ.
+//
+//   use "env"
+//
+//   env = load()                          // loads .env from cwd
+//   env = load(".env.production")         // loads a specific file
+//   port = env.getInt("PORT", 8080)
+//   debug = env.getBool("DEBUG", false)
+//   db_url = env.get("DATABASE_URL")
+//
+// This file is the public surface and nothing else. The work lives in src/,
+// one concern per file:
+//
+//   src/errors.ez    structured error builders (ParseError, KeyError, TypeError)
+//   src/parser.ez    the only file that reads raw .env content and parses it
+//   src/store.ez     the Env model: get/set/has/require/typed accessors
+//
+// There is no FFI in this package. It reads files with readFile() and works
+// entirely in pure EZ.
+// ============================================================================
+
+use "src/errors.ez"
+use "src/parser.ez"
+use "src/store.ez"
+
+// Load a .env file and return an Env instance.
+//
+//   env = load()                       // .env in current directory
+//   env = load(".env.production")      // specific file
+//   env = load(".env", { "required": ["DB_HOST", "DB_PASS"] })
+//
+// Options:
+//   required   (array)  keys that must be present; validate() is called
+//                        automatically and throws KeyError on the first miss.
+//   defaults   (dict)   fallback values merged in for keys not in the file.
+//   override   (bool)   if true, file values overwrite values from `defaults`
+//                        even if defaults were set first. Default: true.
+export task load(path = ".env", options = nil) {
+    when typeOf(options) == "nil" { options = {} }
+
+    data = parse_file(path)
+    env = Env(data)
+
+    // Merge defaults (file values win unless override is explicitly false).
+    when has_key(options, "defaults") {
+        overrideDefaults = true
+        when has_key(options, "override") {
+            overrideDefaults = options["override"]
+        }
+        // Defaults are merged into the env; existing keys from the file are
+        // kept unless override is false (in which case defaults take priority).
+        // Wait -- the convention is: defaults fill in what the file didn't set.
+        // So we merge defaults with overwrite=false (file wins).
+        env.merge(options["defaults"], false)
+    }
+
+    // Register and validate required keys.
+    when has_key(options, "required") {
+        env.require(options["required"])
+        env.validate()
+    }
+
+    give env
+}
+
+// Load from raw string content (useful for testing, or when the .env data
+// comes from a network response rather than a file).
+//
+//   env = load_string("PORT=3000\nDEBUG=true")
+//
+export task load_string(content, options = nil) {
+    when typeOf(options) == "nil" { options = {} }
+
+    data = parse(content, "<string>")
+    env = Env(data)
+
+    when has_key(options, "defaults") {
+        env.merge(options["defaults"], false)
+    }
+
+    when has_key(options, "required") {
+        env.require(options["required"])
+        env.validate()
+    }
+
+    give env
+}
+
+// Load multiple .env files and merge them in order. The first file's values
+// take priority (matching the convention that `.env` is the base and
+// `.env.local` provides overrides only for keys not already set).
+//
+//   env = load_files([".env", ".env.local", ".env.production"])
+//
+// Pass `priority = "last"` to reverse: last file wins (useful when layering
+// environment-specific overrides on top of a base).
+export task load_files(paths, priority = "first") {
+    env = Env()
+    when priority == "last" {
+        // Last file wins: merge each file with overwrite=true.
+        get path in paths {
+            try {
+                data = parse_file(path)
+                env.merge(data, true)
+            } catch e {
+                // If a file is missing, skip it silently -- only the base
+                // .env is typically guaranteed to exist.
+            }
+        }
+    } other {
+        // First file wins (default): merge each file with overwrite=false.
+        get path in paths {
+            try {
+                data = parse_file(path)
+                env.merge(data, false)
+            } catch e {
+                // Missing files are not fatal.
+            }
+        }
+    }
+    give env
+}

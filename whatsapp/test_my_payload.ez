@@ -1,0 +1,4 @@
+use "wa_proto.ez"
+
+payload = wap_encodeClientPayload()
+out payload

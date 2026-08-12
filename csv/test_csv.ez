@@ -1,0 +1,156 @@
+# ============================================================================
+# CSV package test suite
+# ============================================================================
+use "csv"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=[" + str(got) + "] want=[" + str(want) + "]"
+    }
+}
+
+task checkThrows(name, prefix, fn) {
+    threw = false
+    matched = false
+    try { fn() } catch (e) {
+        threw = true
+        matched = indexOf(str(e), prefix) == 0
+    }
+    check(name, threw and matched)
+}
+
+BASIC = "name,age\nAbdullah,30\nSam,25"
+
+out "== parse (dictionaries) =="
+rows = parse(BASIC)
+checkEq("row count", len(rows), 2)
+checkEq("first name", rows[0]["name"], "Abdullah")
+checkEq("second age", rows[1]["age"], "25")
+checkEq("empty input", len(parse("")), 0)
+checkThrows("non-string rejected", CSV_SHAPE_ERROR, || { parse(42) })
+
+out ""
+out "== parseRows (arrays) =="
+r = parseRows(BASIC)
+checkEq("includes the header", len(r), 3)
+checkEq("header cell", r[0][0], "name")
+checkEq("data cell", r[2][1], "25")
+
+out ""
+out "== headers =="
+checkEq("header list", join(headers(BASIC), "|"), "name|age")
+checkEq("headers of empty", len(headers("")), 0)
+
+out ""
+out "== quoting (RFC 4180) =="
+Q = "a,b\n\"x,y\",2\n\"he said \"\"hi\"\"\",3\n\"multi\nline\",4"
+q = parse(Q)
+checkEq("embedded delimiter", q[0]["a"], "x,y")
+checkEq("escaped quotes", q[1]["a"], "he said \"hi\"")
+checkEq("embedded newline", q[2]["a"], "multi\nline")
+checkEq("row count with quoted newline", len(q), 3)
+
+out ""
+out "== line endings =="
+checkEq("CRLF", len(parse("a,b\r\n1,2\r\n3,4")), 2)
+checkEq("LF", len(parse("a,b\n1,2\n3,4")), 2)
+checkEq("trailing newline adds no blank row", len(parse("a,b\n1,2\n")), 1)
+checkEq("lone CR", len(parse("a,b\r1,2")), 1)
+
+out ""
+out "== custom delimiters =="
+semi = parse("name;age\nAbdullah;30", ";")
+checkEq("semicolon", semi[0]["name"], "Abdullah")
+tab = parse("name\tage\nSam\t25", "\t")
+checkEq("tab", tab[0]["age"], "25")
+# a comma is ordinary content when the delimiter is a semicolon
+checkEq("comma is data under ';'", parse("a;b\n1,5;2", ";")[0]["a"], "1,5")
+
+out ""
+out "== short and long rows =="
+short = parse("a,b,c\n1,2")
+checkEq("missing column is empty", short[0]["c"], "")
+check("missing column still present", has_key(short[0], "c"))
+
+out ""
+out "== stringify =="
+outp = stringify([{"a": "1", "b": "2"}], ",", ["a", "b"])
+checkEq("header + row", outp, "a,b\n1,2")
+checkEq("empty records", stringify([]), "")
+checkEq("column order honoured", stringify([{"a": "1", "b": "2"}], ",", ["b", "a"]), "b,a\n2,1")
+# values needing quotes
+qout = stringify([{"a": "x,y"}], ",", ["a"])
+checkEq("quotes a delimiter", qout, "a\n\"x,y\"")
+checkEq("doubles a quote", stringify([{"a": "he\"y"}], ",", ["a"]), "a\n\"he\"\"y\"")
+checkEq("quotes a newline", stringify([{"a": "p\nq"}], ",", ["a"]), "a\n\"p\nq\"")
+checkEq("leaves plain values alone", stringify([{"a": "plain"}], ",", ["a"]), "a\nplain")
+checkThrows("non-array rejected", CSV_SHAPE_ERROR, || { stringify("nope") })
+
+out ""
+out "== round trip =="
+check("dict round trip", len(parse(stringify(rows, ",", ["name", "age"]))) == 2)
+rt = parse(stringify(q, ",", ["a", "b"]))
+checkEq("quoted values survive", rt[0]["a"], "x,y")
+checkEq("newline survives", rt[2]["a"], "multi\nline")
+checkEq("quotes survive", rt[1]["a"], "he said \"hi\"")
+rr = parseRows(stringifyRows([["x", "y,z"], ["1", "2"]]))
+checkEq("row round trip", rr[0][1], "y,z")
+
+out ""
+out "== column / filter =="
+checkEq("column values", join(column(rows, "name"), "|"), "Abdullah|Sam")
+checkEq("absent column is blank", join(column(rows, "nope"), "|"), "|")
+older = filter(rows, |rec| { give num(rec["age"]) > 27 })
+checkEq("filter keeps matches", len(older), 1)
+checkEq("filter kept the right one", older[0]["name"], "Abdullah")
+
+out ""
+out "== validate =="
+checkEq("clean file has no problems", len(validate(BASIC)), 0)
+bad = validate("a,b\n1,2,3\n4,5")
+checkEq("ragged row reported", len(bad), 1)
+checkEq("reports the line", bad[0]["line"], 2)
+checkEq("reports expected", bad[0]["expected"], 2)
+checkEq("reports actual", bad[0]["got"], 3)
+
+out ""
+out "== files =="
+TMP = "_csv_test.csv"
+write(TMP, rows, ",", ["name", "age"])
+back = read(TMP)
+checkEq("write then read", back[0]["name"], "Abdullah")
+checkEq("row count preserved", len(back), 2)
+checkEq("readRows includes header", len(readRows(TMP)), 3)
+checkThrows("missing file throws", CSV_IO_ERROR, || { read("_absent_file.csv") })
+checkEq("safeRead fallback", safeRead("_absent_file.csv", "fb"), "fb")
+
+# append must not repeat the header
+append(TMP, [{"name": "Zed", "age": "40"}])
+after = read(TMP)
+checkEq("append adds a row", len(after), 3)
+checkEq("appended value", after[2]["name"], "Zed")
+checkEq("header not duplicated", len(readRows(TMP)), 4)
+
+# append to a file that does not exist yet writes the header
+TMP2 = "_csv_new.csv"
+try { File.remove(TMP2) } catch (e) {}
+append(TMP2, [{"name": "New", "age": "1"}])
+fresh = read(TMP2)
+checkEq("append creates with header", fresh[0]["name"], "New")
+File.remove(TMP)
+File.remove(TMP2)
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

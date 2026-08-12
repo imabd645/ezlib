@@ -1,0 +1,345 @@
+// ============================================================================
+// ezsocket -- TCP and UDP sockets for EZ, over ws2_32.
+//
+//   use "socket"
+//
+//   # server
+//   srv = tcp_listen("127.0.0.1", 8080)
+//   conn = srv.accept()
+//   out conn.ip + " said: " + conn.recv(1024)
+//   conn.sendAll("hello")
+//   conn.close()
+//   srv.close()
+//
+//   # client -- hostnames work, not just dotted quads
+//   c = tcp_connect("example.com", 80, 5000)
+//   c.sendAll("GET / HTTP/1.0\r\nHost: example.com\r\n\r\n")
+//   out c.recvAll()
+//   c.close()
+//
+//   # udp
+//   u = udp_open()
+//   u.sendTo("127.0.0.1", 9999, "ping")
+//   m = u.recvFrom(1024)      # { "data": ..., "ip": ..., "port": ... }
+//
+// The work lives in src/, one concern per file:
+//   src/ffi.ez      the only file that touches ws2_32
+//   src/errors.ez   Winsock codes -> readable messages
+//
+// Everything is exposed as methods on Conn / TcpListener / UdpSocket rather
+// than as bare functions. Modules import flat in EZ, so exporting `send`,
+// `recv`, `bind`, `listen` and `close` as globals put five of the most
+// collision-prone names in the language into every program that used sockets.
+// ============================================================================
+
+use "src/ffi.ez"
+use "src/errors.ez"
+
+wsa_init()
+
+// ── A connected socket ──────────────────────────────────────────────────────
+export model Conn {
+    init(fd = -1, ip = "", port = 0) {
+        self.fd = fd
+        self.ip = str(ip)
+        self.port = port
+        self.closed = false
+    }
+
+    // Receive up to `maxBytes`. Returns "" when the peer has closed.
+    //
+    // Binary-safe: the bytes are taken by pointer and length, so a payload with
+    // a NUL in it survives. Reading the buffer as a C string -- which is what
+    // this used to do -- stopped at the first NUL, so 10 bytes containing one
+    // arrived as 3 and no binary protocol could work.
+    task recv(maxBytes = 4096) {
+        when self.closed { throw SocketError("recv on a closed socket") }
+        n = maxBytes
+        when n <= 0 { give "" }
+
+        buf = os_alloc(n)
+        got = os_call(SockFFI.recv, "int", self.fd, buf, n, 0)
+        when got < 0 {
+            os_free(buf)
+            raise_socket("recv failed")
+        }
+        when got == 0 {
+            os_free(buf)
+            give ""
+        }
+        data = buf_to_str(os_buffer_from_ptr(buf, got))
+        os_free(buf)
+        give data
+    }
+
+    // Read until the peer closes. For request/response protocols where the
+    // other side signals completion by hanging up.
+    task recvAll(chunkSize = 4096) {
+        parts = []
+        reading = true
+        while reading {
+            chunk = self.recv(chunkSize)
+            when len(chunk) == 0 {
+                reading = false
+            } other {
+                push(parts, chunk)
+            }
+        }
+        give join(parts, "")
+    }
+
+    // Send once. Returns the number of bytes actually accepted, which for TCP
+    // may be fewer than offered -- use sendAll() unless you are handling that.
+    task send(data) {
+        when self.closed { throw SocketError("send on a closed socket") }
+        payload = str(data)
+        n = len(payload)
+        when n == 0 { give 0 }
+        sent = os_call(SockFFI.send, "int", self.fd, payload, n, 0)
+        when sent < 0 { raise_socket("send failed") }
+        give sent
+    }
+
+    // Send everything, looping over partial writes.
+    //
+    // send() is allowed to accept fewer bytes than it was given; the previous
+    // version returned that count and moved on, so under load the tail of a
+    // message was silently dropped.
+    task sendAll(data) {
+        payload = str(data)
+        total = len(payload)
+        sent = 0
+        while sent < total {
+            remaining = substr(payload, sent, total - sent)
+            n = os_call(SockFFI.send, "int", self.fd, remaining, total - sent, 0)
+            when n < 0 { raise_socket("send failed") }
+            when n == 0 { throw SocketError("send made no progress -- peer is not accepting data") }
+            sent = sent + n
+        }
+        give sent
+    }
+
+    // Milliseconds to wait before recv/send give up. 0 means block forever.
+    //
+    // Without this a recv on a peer that goes quiet holds the thread for good,
+    // which is how a slow client turns into a hung server.
+    task setTimeout(ms) {
+        set_int_option(self.fd, SOL_SOCKET, SO_RCVTIMEO, ms)
+        set_int_option(self.fd, SOL_SOCKET, SO_SNDTIMEO, ms)
+        give self
+    }
+
+    // Half-close: tell the peer no more data is coming, but keep reading.
+    task shutdownSend() {
+        os_call(SockFFI.shutdown, "int", self.fd, SD_SEND)
+        give self
+    }
+
+    task close() {
+        when not self.closed {
+            os_call(SockFFI.closesocket, "int", self.fd)
+            self.closed = true
+        }
+        give nil
+    }
+}
+
+// ── A listening socket ──────────────────────────────────────────────────────
+export model TcpListener {
+    init(fd = -1, ip = "", port = 0) {
+        self.fd = fd
+        self.ip = str(ip)
+        self.port = port
+        self.closed = false
+    }
+
+    // Block until a client arrives, and return a Conn that knows who it is.
+    //
+    // The peer address used to be filled in by accept() and then thrown away,
+    // leaving no way to tell one client from another -- which is exactly how a
+    // per-client rate limiter ends up rate limiting the whole world as one.
+    task accept() {
+        when self.closed { throw SocketError("accept on a closed listener") }
+        addr = os_alloc(SOCKADDR_LEN)
+        lenBuf = os_alloc(4)
+        os_write_int32(lenBuf, 0, SOCKADDR_LEN)
+
+        fd = os_call(SockFFI.accept, "int", self.fd, addr, lenBuf)
+        when fd < 0 {
+            os_free(addr)
+            os_free(lenBuf)
+            raise_socket("accept failed")
+        }
+        peer = read_sockaddr(addr)
+        os_free(addr)
+        os_free(lenBuf)
+        give Conn(fd, peer["ip"], peer["port"])
+    }
+
+    task close() {
+        when not self.closed {
+            os_call(SockFFI.closesocket, "int", self.fd)
+            self.closed = true
+        }
+        give nil
+    }
+}
+
+// ── UDP ─────────────────────────────────────────────────────────────────────
+export model UdpSocket {
+    init(fd = -1) {
+        self.fd = fd
+        self.closed = false
+    }
+
+    task sendTo(host, port, data) {
+        when self.closed { throw SocketError("sendTo on a closed socket") }
+        addr = resolve(host, port, SOCK_DGRAM)
+        when addr == 0 { throw SocketError("cannot resolve '" + str(host) + "'", wsa_last_error()) }
+        payload = str(data)
+        n = os_call(SockFFI.sendto, "int", self.fd, payload, len(payload), 0, addr, SOCKADDR_LEN)
+        os_free(addr)
+        when n < 0 { raise_socket("sendTo failed") }
+        give n
+    }
+
+    // Returns { "data": ..., "ip": ..., "port": ... }.
+    task recvFrom(maxBytes = 4096) {
+        when self.closed { throw SocketError("recvFrom on a closed socket") }
+        buf = os_alloc(maxBytes)
+        addr = os_alloc(SOCKADDR_LEN)
+        lenBuf = os_alloc(4)
+        os_write_int32(lenBuf, 0, SOCKADDR_LEN)
+
+        got = os_call(SockFFI.recvfrom, "int", self.fd, buf, maxBytes, 0, addr, lenBuf)
+        when got < 0 {
+            os_free(buf)
+            os_free(addr)
+            os_free(lenBuf)
+            raise_socket("recvFrom failed")
+        }
+        data = ""
+        when got > 0 { data = buf_to_str(os_buffer_from_ptr(buf, got)) }
+        peer = read_sockaddr(addr)
+        os_free(buf)
+        os_free(addr)
+        os_free(lenBuf)
+        give { "data": data, "ip": peer["ip"], "port": peer["port"] }
+    }
+
+    task bindTo(ip, port) {
+        addr = make_sockaddr(ip, port)
+        when addr == 0 { throw SocketError("bindTo needs a numeric address, got '" + str(ip) + "'") }
+        rc = os_call(SockFFI.bind, "int", self.fd, addr, SOCKADDR_LEN)
+        os_free(addr)
+        when rc != 0 { raise_socket("bind failed") }
+        give self
+    }
+
+    task setTimeout(ms) {
+        set_int_option(self.fd, SOL_SOCKET, SO_RCVTIMEO, ms)
+        set_int_option(self.fd, SOL_SOCKET, SO_SNDTIMEO, ms)
+        give self
+    }
+
+    task setBroadcast(on = true) {
+        v = 0
+        when on { v = 1 }
+        set_int_option(self.fd, SOL_SOCKET, SO_BROADCAST, v)
+        give self
+    }
+
+    task close() {
+        when not self.closed {
+            os_call(SockFFI.closesocket, "int", self.fd)
+            self.closed = true
+        }
+        give nil
+    }
+}
+
+// ── Constructors ────────────────────────────────────────────────────────────
+
+// Listen for TCP connections.
+//
+// The port is claimed EXCLUSIVELY by default. On Windows, SO_REUSEADDR does not
+// mean what it means on Unix: as well as permitting rebinding after TIME_WAIT,
+// it lets a second process bind a port that is already being listened on, with
+// the stack deciding which socket receives a given connection. Turning it on by
+// default would let any local process silently hijack a server's port, so the
+// default is SO_EXCLUSIVEADDRUSE and reuseAddr is an explicit opt-in for the
+// cases that genuinely want it.
+export task tcp_listen(ip, port, backlog = 128, reuseAddr = false) {
+    fd = os_call(SockFFI.socket, "int", AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    when fd < 0 { raise_socket("socket() failed") }
+
+    when reuseAddr {
+        set_int_option(fd, SOL_SOCKET, SO_REUSEADDR, 1)
+    } other {
+        set_int_option(fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+    }
+
+    addr = make_sockaddr(ip, port)
+    when addr == 0 {
+        os_call(SockFFI.closesocket, "int", fd)
+        throw SocketError("tcp_listen needs a numeric address such as \"0.0.0.0\", got '" + str(ip) + "'")
+    }
+    rc = os_call(SockFFI.bind, "int", fd, addr, SOCKADDR_LEN)
+    os_free(addr)
+    when rc != 0 {
+        code = wsa_last_error()
+        os_call(SockFFI.closesocket, "int", fd)
+        throw SocketError("bind to " + str(ip) + ":" + str(port) + " failed", code)
+    }
+
+    rc = os_call(SockFFI.listen, "int", fd, backlog)
+    when rc != 0 {
+        code = wsa_last_error()
+        os_call(SockFFI.closesocket, "int", fd)
+        throw SocketError("listen failed", code)
+    }
+    give TcpListener(fd, ip, port)
+}
+
+// Connect to a host. `host` may be a hostname or a dotted quad.
+// timeoutMs applies to subsequent recv/send; 0 leaves the socket blocking.
+export task tcp_connect(host, port, timeoutMs = 0) {
+    fd = os_call(SockFFI.socket, "int", AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    when fd < 0 { raise_socket("socket() failed") }
+
+    addr = resolve(host, port, SOCK_STREAM)
+    when addr == 0 {
+        code = wsa_last_error()
+        os_call(SockFFI.closesocket, "int", fd)
+        throw SocketError("cannot resolve '" + str(host) + "'", code)
+    }
+
+    rc = os_call(SockFFI.connect, "int", fd, addr, SOCKADDR_LEN)
+    peer = read_sockaddr(addr)
+    os_free(addr)
+    when rc != 0 {
+        code = wsa_last_error()
+        os_call(SockFFI.closesocket, "int", fd)
+        throw SocketError("connect to " + str(host) + ":" + str(port) + " failed", code)
+    }
+
+    c = Conn(fd, peer["ip"], port)
+    when timeoutMs > 0 { c.setTimeout(timeoutMs) }
+    give c
+}
+
+// A UDP socket. Call bindTo() to receive on a fixed port.
+export task udp_open() {
+    fd = os_call(SockFFI.socket, "int", AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    when fd < 0 { raise_socket("socket() failed") }
+    give UdpSocket(fd)
+}
+
+// Resolve a hostname to a dotted-quad address, or nil.
+export task resolve_host(host) {
+    addr = resolve(host, 0, SOCK_STREAM)
+    when addr == 0 { give nil }
+    info = read_sockaddr(addr)
+    os_free(addr)
+    give info["ip"]
+}

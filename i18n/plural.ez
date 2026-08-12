@@ -1,0 +1,102 @@
+# ============================================================================
+# i18n/plural.ez — plural category selection
+#
+# English has two forms, so "1 file / N files" is the whole problem. Most
+# languages are not like that: Polish has three categories that depend on the
+# last two digits, Arabic has six, and Japanese has one. A library that only
+# offers singular/plural cannot express any of them.
+#
+# The rules here follow the CLDR categories -- zero, one, two, few, many,
+# other -- for the language families most likely to come up. `other` is the
+# universal fallback, so an unlisted language behaves like English.
+# ============================================================================
+
+# The CLDR category for `count` in `language`.
+export task pluralCategory(language, count) {
+    code = lower(str(language))
+    dash = indexOf(code, "-")
+    when dash >= 0 { code = substr(code, 0, dash) }
+
+    n = count
+    when n < 0 { n = -n }
+    isWhole = n == floor(n)
+    whole = floor(n)
+    lastTwo = whole % 100
+    lastOne = whole % 10
+
+    # One form for everything.
+    get lang in ["ja", "zh", "ko", "vi", "th", "id", "ms", "my", "km", "lo"] {
+        when code == lang { give "other" }
+    }
+
+    # French and Brazilian Portuguese treat 0 as singular.
+    when code == "fr" or code == "pt" {
+        when n < 2 { give "one" }
+        give "other"
+    }
+
+    when code == "ru" or code == "uk" or code == "be" {
+        when isWhole == false { give "other" }
+        when lastTwo >= 11 and lastTwo <= 14 { give "many" }
+        when lastOne == 1 { give "one" }
+        when lastOne >= 2 and lastOne <= 4 { give "few" }
+        give "many"
+    }
+
+    when code == "pl" {
+        when isWhole == false { give "other" }
+        when whole == 1 { give "one" }
+        when lastTwo >= 12 and lastTwo <= 14 { give "many" }
+        when lastOne >= 2 and lastOne <= 4 { give "few" }
+        give "many"
+    }
+
+    when code == "cs" or code == "sk" {
+        when isWhole == false { give "many" }
+        when whole == 1 { give "one" }
+        when whole >= 2 and whole <= 4 { give "few" }
+        give "other"
+    }
+
+    when code == "ar" {
+        when whole == 0 { give "zero" }
+        when whole == 1 { give "one" }
+        when whole == 2 { give "two" }
+        when lastTwo >= 3 and lastTwo <= 10 { give "few" }
+        when lastTwo >= 11 and lastTwo <= 99 { give "many" }
+        give "other"
+    }
+
+    when code == "cy" {
+        when whole == 0 { give "zero" }
+        when whole == 1 { give "one" }
+        when whole == 2 { give "two" }
+        when whole == 3 { give "few" }
+        when whole == 6 { give "many" }
+        give "other"
+    }
+
+    when code == "lv" {
+        when whole == 0 { give "zero" }
+        when lastOne == 1 and lastTwo != 11 { give "one" }
+        give "other"
+    }
+
+    # English and everything unlisted.
+    when n == 1 and isWhole { give "one" }
+    give "other"
+}
+
+# Picks the best available form from a table like
+#   { "one": "...", "other": "..." }
+# falling back through the CLDR order so a partial table still works.
+export task selectPlural(forms, category) {
+    when has_key(forms, category) { give forms[category] }
+    # A missing category falls back to "other", then to anything present --
+    # showing the wrong plural is better than showing the key.
+    when has_key(forms, "other") { give forms["other"] }
+    get name in ["many", "few", "two", "one", "zero"] {
+        when has_key(forms, name) { give forms[name] }
+    }
+    give nil
+}

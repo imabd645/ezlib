@@ -1,0 +1,192 @@
+# ============================================================================
+# args — test suite
+#   ez test.ez
+#
+# Everything goes through tryParse, which neither throws nor exits -- that is
+# precisely why it exists. `parse` calls exit() and so cannot be tested.
+# ============================================================================
+
+use "args"
+use "args/spec.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+
+task build() {
+    c = Args("tool", "Does a thing")
+    c.flag("verbose", "v", "Talk more")
+    c.option("output", "o", "Where to write")
+    c.option("count", "n", "How many").number().withDefault(1)
+    c.option("mode", "m", "Mode").oneOf(["fast", "slow"]).withDefault("fast")
+    give c
+}
+task vals(c, list) { give c.tryParse(list)["values"] }
+task errs(c, list) { give c.tryParse(list)["errors"] }
+
+out "args tests"
+
+# ── flags ───────────────────────────────────────────────────────────────────
+c = build()
+check("flag absent is false", vals(c, [])["verbose"], false)
+check("long flag", vals(c, ["--verbose"])["verbose"], true)
+check("short flag", vals(c, ["-v"])["verbose"], true)
+check("flag with value rejected", len(errs(c, ["--verbose=yes"])), 1)
+
+# ── options ─────────────────────────────────────────────────────────────────
+check("long option", vals(c, ["--output", "f.txt"])["output"], "f.txt")
+check("long option with equals", vals(c, ["--output=f.txt"])["output"], "f.txt")
+check("short option separate", vals(c, ["-o", "f.txt"])["output"], "f.txt")
+check("short option attached", vals(c, ["-of.txt"])["output"], "f.txt")
+check("missing value reported", len(errs(c, ["--output"])), 1)
+check("unknown long option", len(errs(c, ["--nope"])), 1)
+check("unknown short option", len(errs(c, ["-z"])), 1)
+check("later wins", vals(c, ["-o", "a", "-o", "b"])["output"], "b")
+
+# Clustered short flags, with a value-taking option last.
+check("clustered flags", vals(c, ["-v"])["verbose"], true)
+clustered = vals(c, ["-vn", "5"])
+check("cluster sets flag", clustered["verbose"], true)
+check("cluster takes value", clustered["count"], 5)
+
+# ── defaults and types ──────────────────────────────────────────────────────
+check("default applied", vals(c, [])["count"], 1)
+check("default overridden", vals(c, ["-n", "7"])["count"], 7)
+check("number is a number", typeOf(vals(c, ["-n", "7"])["count"]), "integer")
+check("float accepted", vals(c, ["-n", "1.5"])["count"], 1.5)
+check("negative accepted", vals(c, ["-n", "-3"])["count"], -3)
+check("non-numeric rejected", len(errs(c, ["-n", "abc"])), 1)
+check("partial number rejected", len(errs(c, ["-n", "12abc"])), 1)
+check("empty number rejected", len(errs(c, ["-n", ""])), 1)
+
+b = Args("t", "")
+b.option("on", "", "Toggle").boolean()
+check("bool true", vals(b, ["--on", "true"])["on"], true)
+check("bool yes", vals(b, ["--on", "yes"])["on"], true)
+check("bool zero", vals(b, ["--on", "0"])["on"], false)
+check("bool nonsense rejected", len(errs(b, ["--on", "maybe"])), 1)
+
+# ── choices ─────────────────────────────────────────────────────────────────
+check("allowed choice", vals(c, ["-m", "slow"])["mode"], "slow")
+check("disallowed choice", len(errs(c, ["-m", "sideways"])), 1)
+check("choice error lists options", contains(errs(c, ["-m", "x"])[0], "fast, slow"), true)
+
+# ── positionals ─────────────────────────────────────────────────────────────
+p = Args("t", "")
+p.positional("src", "Source").required()
+p.positional("dest", "Destination")
+check("first positional", vals(p, ["a", "b"])["src"], "a")
+check("second positional", vals(p, ["a", "b"])["dest"], "b")
+check("missing required positional", len(errs(p, [])), 1)
+check("optional positional absent", has_key(vals(p, ["a"]), "dest"), false)
+check("extra positionals collected", len(p.tryParse(["a", "b", "c"])["extra"]), 1)
+
+# Positionals and options interleave freely.
+mix = Args("t", "")
+mix.positional("name", "Name")
+mix.flag("q", "q", "Quiet")
+mixed = vals(mix, ["-q", "value"])
+check("option before positional", mixed["name"], "value")
+check("flag still set", mixed["q"], true)
+mixed2 = vals(mix, ["value", "-q"])
+check("positional before option", mixed2["name"], "value")
+
+# ── repeated values ─────────────────────────────────────────────────────────
+m = Args("t", "")
+m.option("include", "I", "Paths").many()
+checkVal("collects every occurrence",
+         vals(m, ["-I", "a", "-I", "b", "--include", "c"])["include"], ["a", "b", "c"])
+checkVal("empty when absent", vals(m, [])["include"], [])
+
+rest = Args("t", "")
+rest.positional("files", "Files").many()
+checkVal("trailing positional soaks up the rest",
+         vals(rest, ["a", "b", "c"])["files"], ["a", "b", "c"])
+
+# ── required options ────────────────────────────────────────────────────────
+r = Args("t", "")
+r.option("key", "k", "API key").required()
+check("required missing", len(errs(r, [])), 1)
+check("required supplied", len(errs(r, ["-k", "x"])), 0)
+check("required message names it", contains(errs(r, [])[0], "--key"), true)
+# A default makes it not required, since there is always a value.
+d = Args("t", "")
+d.option("key", "k", "Key").required().withDefault("x")
+check("default clears required", len(errs(d, [])), 0)
+
+# ── the -- separator ────────────────────────────────────────────────────────
+# Everything after -- is data, even when it looks like an option. Without
+# this a program could never accept a literal "--verbose" as a value.
+sep = Args("t", "")
+sep.flag("verbose", "v", "V")
+sep.positional("rest", "Rest").many()
+sepResult = sep.tryParse(["-v", "--", "--verbose", "-x"])
+check("flag before separator applies", sepResult["values"]["verbose"], true)
+checkVal("after separator is data", sepResult["values"]["rest"], ["--verbose", "-x"])
+check("no unknown-option errors", len(sepResult["errors"]), 0)
+
+# ── help and version ────────────────────────────────────────────────────────
+check("help requested long", c.tryParse(["--help"])["helpRequested"], true)
+check("help requested short", c.tryParse(["-h"])["helpRequested"], true)
+check("help not requested", c.tryParse([])["helpRequested"], false)
+
+v = Args("t", "").versioned("1.2.3")
+check("version requested", v.tryParse(["--version"])["versionRequested"], true)
+# Without a version declared, --version is just an unknown option.
+check("no version means unknown option", len(errs(Args("t", ""), ["--version"])), 1)
+
+noAuto = Args("t", "").withoutAutoHelp()
+check("auto help off means unknown", len(errs(noAuto, ["--help"])), 1)
+
+# ── generated help ──────────────────────────────────────────────────────────
+helpText = c.help()
+check("usage line", startsWith(helpText, "Usage: tool"), true)
+check("description shown", contains(helpText, "Does a thing"), true)
+check("lists long name", contains(helpText, "--output"), true)
+check("lists short name", contains(helpText, "-o,"), true)
+check("shows placeholder", contains(helpText, "<OUTPUT>"), true)
+check("shows help text", contains(helpText, "Where to write"), true)
+check("shows default", contains(helpText, "[default: 1]"), true)
+check("shows choices", contains(helpText, "fast, slow"), true)
+check("includes --help itself", contains(helpText, "--help"), true)
+check("version line when declared", contains(v.help(), "--version"), true)
+
+posHelp = p.help()
+check("usage shows required positional", contains(posHelp, "<src>"), true)
+check("usage brackets optional", contains(posHelp, "[<dest>]"), true)
+check("arguments section", contains(posHelp, "Arguments:"), true)
+check("marks required", contains(posHelp, "(required)"), true)
+check("many positional shows ellipsis", contains(rest.help(), "..."), true)
+
+# ── spec helpers ────────────────────────────────────────────────────────────
+opt = makeOption(KIND_OPTION, "name", "n", "help")
+check("label for option", optionLabel(opt), "-n, --name <NAME>")
+check("label without short", optionLabel(makeOption(KIND_OPTION, "name", "", "h")), "--name <NAME>")
+check("label for flag", optionLabel(makeOption(KIND_FLAG, "f", "x", "h")), "-x, --f")
+check("label for positional", optionLabel(makeOption(KIND_POSITIONAL, "src", "", "h")), "<src>")
+
+check("coerce string", coerceValue(makeOption(KIND_OPTION, "a", "", ""), "x")["value"], "x")
+numOpt = makeOption(KIND_OPTION, "a", "", "")
+numOpt["valueType"] = "number"
+check("coerce number ok", coerceValue(numOpt, "5")["ok"], true)
+check("coerce number fails", coerceValue(numOpt, "x")["ok"], false)
+
+# ── edge cases ──────────────────────────────────────────────────────────────
+check("nil arguments", c.tryParse(nil)["ok"], true)
+check("empty arguments", c.tryParse([])["ok"], true)
+check("errors accumulate", len(errs(c, ["--nope", "--alsonope"])), 2)
+check("programArgs returns a list", typeOf(programArgs()), "array")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

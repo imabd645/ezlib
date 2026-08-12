@@ -1,0 +1,517 @@
+# ============================================================================
+# log — Logging for EZ
+#
+#   use "log"
+#
+#   info("server started")
+#   warn("slow query", {"ms": 812, "table": "users"})
+#
+#   app = Logger("api")
+#   app.toFile("logs/api.log", 5 * 1024 * 1024, 5)   # 5 MB, keep 5 old files
+#   app.setLevel(DEBUG)
+#   app.error("upload failed", {"user": 42})
+#
+# All file access goes through the interpreter's builtin File class.
+#
+# A logger never throws. If the log file cannot be opened or written, the
+# failure is recorded in `lastError`, reported once on the console, and the
+# process carries on -- losing a log line must not take an application down.
+# ============================================================================
+
+# ── Levels ──────────────────────────────────────────────────────────────────
+# Spaced by ten so custom levels can be slotted in between (e.g. NOTICE = 35).
+export TRACE = 10
+export DEBUG = 20
+export INFO  = 30
+export WARN  = 40
+export ERROR = 50
+export FATAL = 60
+export OFF   = 1000
+
+# Console colour per level (Windows console attribute codes).
+# 8 = gray, 11 = cyan, 10 = green, 14 = yellow, 12 = red, 79 = white on red.
+LEVEL_COLORS = {
+    "10": 8,
+    "20": 11,
+    "30": 10,
+    "40": 14,
+    "50": 12,
+    "60": 79
+}
+
+LEVEL_NAMES = {
+    "10": "TRACE",
+    "20": "DEBUG",
+    "30": "INFO",
+    "40": "WARN",
+    "50": "ERROR",
+    "60": "FATAL"
+}
+
+# Name for a level number. Unknown levels render as LVL<n> rather than blank,
+# so a custom level is still readable in the output.
+export task levelName(level) {
+    k = str(level)
+    when has_key(LEVEL_NAMES, k) {
+        give LEVEL_NAMES[k]
+    }
+    give "LVL" + str(level)
+}
+
+# Parse a level from a name, case-insensitively. Returns nil if unrecognised,
+# so callers can tell "not a level" from "level 0".
+export task levelFromName(name) {
+    n = upper(trim(str(name)))
+    when n == "TRACE" { give TRACE }
+    when n == "DEBUG" { give DEBUG }
+    when n == "INFO"  { give INFO }
+    when n == "WARN"  { give WARN }
+    when n == "WARNING" { give WARN }
+    when n == "ERROR" { give ERROR }
+    when n == "FATAL" { give FATAL }
+    when n == "OFF"   { give OFF }
+    give nil
+}
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+task _pad(n, width) {
+    s = str(n)
+    while len(s) < width {
+        s = "0" + s
+    }
+    give s
+}
+
+# Renders fields as ` key=value key2=value2`, sorted so two lines with the same
+# fields always look the same and can be diffed or grepped reliably.
+task _renderFields(fields) {
+    when fields == nil { give "" }
+    ks = keys(fields)
+    when len(ks) == 0 { give "" }
+    ks = sort(ks)
+    parts = []
+    get k in ks {
+        v = fields[k]
+        sv = str(v)
+        # Quote anything with a space or an inner quote, otherwise `msg=hello
+        # world` would parse as two fields.
+        when contains(sv, " ") or contains(sv, "\"") {
+            sv = "\"" + replace(sv, "\"", "\\\"") + "\""
+        }
+        push(parts, str(k) + "=" + sv)
+    }
+    give " " + join(parts, " ")
+}
+
+# ── Logger ──────────────────────────────────────────────────────────────────
+
+export model Logger {
+    init(name="app") {
+        self.name = name
+        self.level = INFO
+
+        self.showConsole = true
+        self.consoleLevel = TRACE      # effective floor is max(level, this)
+        self.useColor = true
+
+        self.filePath = ""
+        self.fileLevel = TRACE
+        self.maxBytes = 0              # 0 = never rotate
+        self.backupCount = 0
+        self.autoFlush = true
+
+        self.format = "text"           # "text" or "json"
+        self.timeFormat = "%Y-%m-%d %H:%M:%S"
+        self.showTime = true
+        self.showMillis = true
+
+        self.context = {}              # fields added to every record
+        self.lastError = ""
+
+        self._handle = nil
+        self._bytes = 0
+        self._warned = false
+        self._shared = false           # true for with()/child() loggers, which
+                                       # borrow the parent's file handle
+    }
+
+    # ── Configuration ───────────────────────────────────────────────────────
+
+    # Accepts a number or a name ("debug", "WARN"), because levels usually
+    # arrive from config files and environment variables as strings.
+    task setLevel(l) {
+        when typeOf(l) == "string" {
+            parsed = levelFromName(l)
+            when parsed == nil {
+                self._fail("unknown log level '" + str(l) + "'")
+                give self
+            }
+            self.level = parsed
+            give self
+        }
+        self.level = l
+        give self
+    }
+
+    task getLevel() { give self.level }
+
+    task toConsole(on) {
+        self.showConsole = on
+        give self
+    }
+
+    task setConsoleLevel(l) {
+        self.consoleLevel = l
+        give self
+    }
+
+    task setColor(on) {
+        self.useColor = on
+        give self
+    }
+
+    # Start writing to `path`. Rotates once the file passes maxBytes, keeping
+    # `backupCount` previous files as path.1 .. path.N. maxBytes = 0 disables
+    # rotation, which is what you want when an external tool rotates for you.
+    task toFile(path, maxBytes=0, backupCount=0) {
+        self.closeFile()
+        self.filePath = path
+        self.maxBytes = maxBytes
+        self.backupCount = backupCount
+        self._openFile()
+        give self
+    }
+
+    task setFileLevel(l) {
+        self.fileLevel = l
+        give self
+    }
+
+    # "json" emits one JSON object per line for log shippers; "text" is the
+    # human-readable form.
+    task setFormat(f) {
+        self.format = f
+        give self
+    }
+
+    task setTimeFormat(f) {
+        self.timeFormat = f
+        give self
+    }
+
+    task showTimestamps(on) {
+        self.showTime = on
+        give self
+    }
+
+    # Fields attached to every record from this logger (request id, version...).
+    task setContext(fields) {
+        self.context = fields
+        give self
+    }
+
+    task addContext(key, value) {
+        self.context[key] = value
+        give self
+    }
+
+    # A logger that shares this one's sinks and settings but carries extra
+    # context. Used per-request: `rlog = log.with({"req": id})`.
+    task with(fields) {
+        child = Logger(self.name)
+        child.level = self.level
+        child.showConsole = self.showConsole
+        child.consoleLevel = self.consoleLevel
+        child.useColor = self.useColor
+        child.format = self.format
+        child.timeFormat = self.timeFormat
+        child.showTime = self.showTime
+        child.showMillis = self.showMillis
+        child.autoFlush = self.autoFlush
+
+        merged = {}
+        get k in keys(self.context) { merged[k] = self.context[k] }
+        when fields != nil {
+            get k in keys(fields) { merged[k] = fields[k] }
+        }
+        child.context = merged
+
+        # Share the open handle rather than opening the file twice: two handles
+        # in append mode interleave badly and both would rotate independently.
+        child.filePath = self.filePath
+        child.fileLevel = self.fileLevel
+        child.maxBytes = 0
+        child.backupCount = 0
+        child._handle = self._handle
+        child._shared = true
+        give child
+    }
+
+    # A named sub-logger: "api" -> "api.auth".
+    task child(suffix) {
+        c = self.with(nil)
+        c.name = self.name + "." + str(suffix)
+        give c
+    }
+
+    # ── Emitting ────────────────────────────────────────────────────────────
+
+    task isEnabled(level) { give level >= self.level }
+
+    task log(level, msg, fields=nil) {
+        when level < self.level { give false }
+
+        merged = {}
+        get k in keys(self.context) { merged[k] = self.context[k] }
+        when fields != nil {
+            get k in keys(fields) { merged[k] = fields[k] }
+        }
+
+        when self.showConsole and level >= self.consoleLevel {
+            self._toConsole(level, msg, merged)
+        }
+        when self.filePath != "" and level >= self.fileLevel {
+            self._toFile(level, msg, merged)
+        }
+        give true
+    }
+
+    task trace(msg, fields=nil) { give self.log(TRACE, msg, fields) }
+    task debug(msg, fields=nil) { give self.log(DEBUG, msg, fields) }
+    task info(msg, fields=nil)  { give self.log(INFO, msg, fields) }
+    task warn(msg, fields=nil)  { give self.log(WARN, msg, fields) }
+    task error(msg, fields=nil) { give self.log(ERROR, msg, fields) }
+    task fatal(msg, fields=nil) { give self.log(FATAL, msg, fields) }
+
+    # Logs a caught error together with its message. The error is stringified
+    # into an `error` field so structured output keeps it separate from the
+    # human-written message.
+    task exception(msg, err, fields=nil) {
+        merged = {}
+        when fields != nil {
+            get k in keys(fields) { merged[k] = fields[k] }
+        }
+        merged["error"] = str(err)
+        give self.log(ERROR, msg, merged)
+    }
+
+    # ── Rendering ───────────────────────────────────────────────────────────
+
+    task _timestamp() {
+        d = DateTime()
+        s = d.format(self.timeFormat)
+        when self.showMillis {
+            ms = d.timestamp() % 1000
+            s = s + "." + _pad(ms, 3)
+        }
+        give s
+    }
+
+    task _renderText(level, msg, fields) {
+        line = ""
+        when self.showTime {
+            line = line + "[" + self._timestamp() + "] "
+        }
+        line = line + "[" + levelName(level) + "] "
+        when self.name != "" {
+            line = line + "[" + self.name + "] "
+        }
+        line = line + str(msg) + _renderFields(fields)
+        give line
+    }
+
+    task _renderJson(level, msg, fields) {
+        rec = {}
+        rec["time"] = self._timestamp()
+        rec["level"] = levelName(level)
+        rec["logger"] = self.name
+        rec["msg"] = str(msg)
+        when fields != nil {
+            get k in keys(fields) { rec[k] = fields[k] }
+        }
+        give to_json(rec)
+    }
+
+    task _render(level, msg, fields) {
+        when self.format == "json" {
+            give self._renderJson(level, msg, fields)
+        }
+        give self._renderText(level, msg, fields)
+    }
+
+    task _toConsole(level, msg, fields) {
+        line = self._render(level, msg, fields)
+        when self.useColor and self.format != "json" {
+            k = str(level)
+            when has_key(LEVEL_COLORS, k) {
+                color(LEVEL_COLORS[k])
+                out line
+                reset()
+                give true
+            }
+        }
+        out line
+        give true
+    }
+
+    # ── File sink ───────────────────────────────────────────────────────────
+
+    task _openFile() {
+        self._handle = nil
+        self._bytes = 0
+        try {
+            # Size first: File() in append mode creates the file, after which
+            # an existing log would look empty and never rotate.
+            when File.exists(self.filePath) {
+                self._bytes = File.size(self.filePath)
+            }
+            self._handle = File(self.filePath, "a")
+        } catch (e) {
+            self._fail("could not open log file '" + str(self.filePath) + "': " + str(e))
+            self._handle = nil
+        }
+        give self._handle != nil
+    }
+
+    task _toFile(level, msg, fields) {
+        when self._handle == nil {
+            # A previous open failed. Retry once per call is wasteful, so stay
+            # quiet until the caller reconfigures the sink.
+            give false
+        }
+
+        line = self._render(level, msg, fields) + "\n"
+
+        when self.maxBytes > 0 and self._bytes + len(line) > self.maxBytes {
+            self.rotate()
+        }
+
+        try {
+            self._handle.write(line)
+            self._bytes = self._bytes + len(line)
+            when self.autoFlush {
+                self._handle.flush()
+            }
+        } catch (e) {
+            self._fail("could not write to log file: " + str(e))
+            give false
+        }
+        give true
+    }
+
+    # Renames path -> path.1, path.1 -> path.2, ... dropping anything past
+    # backupCount, then reopens an empty file. Renaming from the oldest
+    # backwards is what stops each file from overwriting the next.
+    task rotate() {
+        when self.filePath == "" { give false }
+
+        self.closeFile()
+
+        try {
+            when self.backupCount > 0 {
+                # Drop the oldest generation, then shift each remaining one up
+                # by a number, working from the oldest end. Going the other way
+                # would overwrite path.2 with path.1 before path.2 had moved.
+                oldest = self.filePath + "." + str(self.backupCount)
+                when File.exists(oldest) {
+                    File.remove(oldest)
+                }
+                i = self.backupCount - 1
+                while i >= 1 {
+                    src = self.filePath + "." + str(i)
+                    when File.exists(src) {
+                        File.rename(src, self.filePath + "." + str(i + 1))
+                    }
+                    i = i - 1
+                }
+                when File.exists(self.filePath) {
+                    File.rename(self.filePath, self.filePath + ".1")
+                }
+            } other {
+                # No backups kept: just start the file over.
+                when File.exists(self.filePath) {
+                    File.remove(self.filePath)
+                }
+            }
+        } catch (e) {
+            self._fail("log rotation failed: " + str(e))
+        }
+
+        give self._openFile()
+    }
+
+    task flush() {
+        when self._handle == nil { give false }
+        try {
+            self._handle.flush()
+        } catch (e) {
+            self._fail("flush failed: " + str(e))
+            give false
+        }
+        give true
+    }
+
+    task closeFile() {
+        # A logger made by with()/child() borrows its parent's handle; closing
+        # it here would pull the file out from under the parent.
+        when self._shared {
+            self._handle = nil
+            give true
+        }
+        when self._handle == nil { give false }
+        try {
+            self._handle.close()
+        } catch (e) {
+            self._fail("close failed: " + str(e))
+        }
+        self._handle = nil
+        give true
+    }
+
+    task close() { give self.closeFile() }
+
+    # Records a sink failure. Reported once per logger so a broken log file
+    # cannot itself flood the console.
+    task _fail(message) {
+        self.lastError = message
+        when not self._warned {
+            self._warned = true
+            color(14)
+            out "[log] " + message
+            reset()
+        }
+        give false
+    }
+}
+
+# ── Default logger ──────────────────────────────────────────────────────────
+
+export log = Logger("app")
+
+# Registry so the same name always returns the same logger.
+_registry = {}
+
+export task getLogger(name) {
+    when has_key(_registry, name) {
+        give _registry[name]
+    }
+    l = Logger(name)
+    _registry[name] = l
+    give l
+}
+
+# Module-level shortcuts against the default logger, for the common case where
+# an application only ever wants one.
+export task trace(msg, fields=nil) { give log.trace(msg, fields) }
+export task debug(msg, fields=nil) { give log.debug(msg, fields) }
+export task info(msg, fields=nil)  { give log.info(msg, fields) }
+export task warn(msg, fields=nil)  { give log.warn(msg, fields) }
+export task error(msg, fields=nil) { give log.error(msg, fields) }
+export task fatal(msg, fields=nil) { give log.fatal(msg, fields) }
+export task exception(msg, err, fields=nil) { give log.exception(msg, err, fields) }
+
+export task setLevel(l) { give log.setLevel(l) }
+export task toFile(path, maxBytes=0, backupCount=0) { give log.toFile(path, maxBytes, backupCount) }
+export task setFormat(f) { give log.setFormat(f) }
+export task flush() { give log.flush() }

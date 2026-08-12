@@ -1,0 +1,314 @@
+# ============================================================================
+# s3 — test suite
+#   ez test.ez
+#
+# The signing vectors below were produced by an independent implementation
+# (.NET's HMACSHA256) over the same inputs, and the IAM signing key is AWS's
+# own published constant. That matters more than usual here: a wrong signature
+# comes back as "SignatureDoesNotMatch" with no indication of which of the four
+# stages was wrong, so each stage is checked separately.
+#
+# No credentials are needed. The live section makes one deliberately
+# unauthorised request to real S3 to prove the transport and the XML error
+# path work end to end.
+# ============================================================================
+
+use "s3"
+use "s3/sign.ez"
+use "s3/xml.ez"
+use "httpx"
+use "crypto"
+
+PASS = 0
+FAIL = 0
+SKIPPED = 0
+
+TEST_KEY = "AKIAIOSFODNN7EXAMPLE"
+TEST_SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task throwsSaying(label, fragment, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when contains(str(e.message), fragment) { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected the message to mention: {fragment}`
+            out `    actual:   {e.message}`
+        }
+    }
+}
+
+out "s3 tests"
+
+# ── the signing key chain ───────────────────────────────────────────────────
+# AWS publishes this one in the SigV4 documentation. If it drifts, nothing
+# else can possibly be right.
+check("the AWS published signing key",
+      toHex(signingKey(TEST_SECRET, "20150830", "us-east-1", "iam")),
+      "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9")
+# Derived per day, per region, per service -- which is why a leaked signature
+# stops working tomorrow.
+check("a different day gives a different key",
+      toHex(signingKey(TEST_SECRET, "20150831", "us-east-1", "iam")) !=
+      toHex(signingKey(TEST_SECRET, "20150830", "us-east-1", "iam")), true)
+check("a different region does too",
+      toHex(signingKey(TEST_SECRET, "20150830", "eu-west-1", "iam")) !=
+      toHex(signingKey(TEST_SECRET, "20150830", "us-east-1", "iam")), true)
+check("and a different service",
+      toHex(signingKey(TEST_SECRET, "20150830", "us-east-1", "s3")) !=
+      toHex(signingKey(TEST_SECRET, "20150830", "us-east-1", "iam")), true)
+check("the key is 32 bytes", len(signingKey(TEST_SECRET, "20150830", "us-east-1", "s3")), 32)
+
+# ── the canonical request ───────────────────────────────────────────────────
+getHeaders = {
+    "host": "examplebucket.s3.amazonaws.com",
+    "range": "bytes=0-9",
+    "x-amz-content-sha256": EMPTY_SHA256,
+    "x-amz-date": "20130524T000000Z"
+}
+canonical = canonicalRequest("GET", "/test.txt", {}, getHeaders, EMPTY_SHA256)
+expectedCanonical = "GET\n/test.txt\n\nhost:examplebucket.s3.amazonaws.com\nrange:bytes=0-9\nx-amz-content-sha256:" + EMPTY_SHA256 + "\nx-amz-date:20130524T000000Z\n\nhost;range;x-amz-content-sha256;x-amz-date\n" + EMPTY_SHA256
+check("the canonical request", canonical, expectedCanonical)
+check("its hash", sha256Hex(canonical),
+      "7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972")
+check("the string to sign",
+      stringToSign("20130524T000000Z", "20130524", "us-east-1", "s3", canonical),
+      "AWS4-HMAC-SHA256\n20130524T000000Z\n20130524/us-east-1/s3/aws4_request\n7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972")
+check("the signature",
+      sign(TEST_SECRET, "20130524", "us-east-1", "s3",
+           stringToSign("20130524T000000Z", "20130524", "us-east-1", "s3", canonical)),
+      "67fe34c8530db585abddc51067328adfedb6e42487d2566dc7d927d6e2722900")
+
+# One byte anywhere changes the whole signature -- which is the property that
+# makes the vectors above worth having.
+tampered = canonicalRequest("GET", "/test.txU", {}, getHeaders, EMPTY_SHA256)
+check("a changed path changes the hash", sha256Hex(tampered) != sha256Hex(canonical), true)
+
+check("the empty payload hash is sha256 of nothing", sha256Hex(""), EMPTY_SHA256)
+check("the scope", credentialScope("20130524", "eu-west-2", "s3"),
+      "20130524/eu-west-2/s3/aws4_request")
+
+auth = authorize({ "accessKey": TEST_KEY, "secretKey": TEST_SECRET, "sessionToken": nil },
+                 "us-east-1", "s3", "GET", "/test.txt", {}, getHeaders, EMPTY_SHA256,
+                 "20130524T000000Z")
+check("the authorization names the algorithm", startsWith(auth, "AWS4-HMAC-SHA256 "), true)
+check("carries the credential", contains(auth, "Credential=" + TEST_KEY + "/20130524/us-east-1/s3/aws4_request"), true)
+check("lists the signed headers",
+      contains(auth, "SignedHeaders=host;range;x-amz-content-sha256;x-amz-date"), true)
+check("and the signature",
+      contains(auth, "Signature=67fe34c8530db585abddc51067328adfedb6e42487d2566dc7d927d6e2722900"), true)
+# The secret seeds an HMAC chain and nothing else. It must never appear.
+check("the secret never appears in the header", contains(auth, TEST_SECRET), false)
+
+# ── canonical headers ───────────────────────────────────────────────────────
+check("header names are lower-cased and sorted",
+      canonicalHeaders({ "Zebra": "1", "Alpha": "2" }), "alpha:2\nzebra:1\n")
+check("values are trimmed", canonicalHeaders({ "a": "  x  " }), "a:x\n")
+# A server that reformats a header must still produce the same canonical form.
+check("runs of whitespace collapse", canonicalHeaders({ "a": "x    y" }), "a:x y\n")
+check("tabs collapse too", canonicalHeaders({ "a": "x\t\ty" }), "a:x y\n")
+check("nil headers are dropped", canonicalHeaders({ "a": "1", "b": nil }), "a:1\n")
+check("signed headers are the same names", signedHeaders({ "Zebra": "1", "Alpha": "2" }), "alpha;zebra")
+
+# ── canonical query ─────────────────────────────────────────────────────────
+check("sorted by name", canonicalQuery({ "b": "2", "a": "1" }), "a=1&b=2")
+check("values are encoded", canonicalQuery({ "prefix": "a b" }), "prefix=a%20b")
+check("slashes in a value are encoded", canonicalQuery({ "k": "a/b" }), "k=a%2Fb")
+check("empty", canonicalQuery({}), "")
+check("nil", canonicalQuery(nil), "")
+check("nil values are dropped", canonicalQuery({ "a": "1", "b": nil }), "a=1")
+
+# ── path encoding ───────────────────────────────────────────────────────────
+# Slashes separate segments and must survive; everything else is escaped.
+check("slashes are kept", encodePath("/a/b/c.txt"), "/a/b/c.txt")
+check("spaces are escaped", encodePath("/my file.txt"), "/my%20file.txt")
+check("a dollar is escaped", encodePath("/test$file.text"), "/test%24file.text")
+check("unreserved characters are left alone", encodePath("/a-b_c.d~e"), "/a-b_c.d~e")
+check("an empty path is the root", encodePath(""), "/")
+check("a plus is escaped", encodePath("/a+b"), "/a%2Bb")
+
+# ── timestamps ──────────────────────────────────────────────────────────────
+check("formats a timestamp", timestampFor(1369353600), "20130524T000000Z")
+check("the epoch", timestampFor(0), "19700101T000000Z")
+check("a leap day", timestampFor(1709164800), "20240229T000000Z")
+check("with a time of day", timestampFor(1369353600 + 3661), "20130524T010101Z")
+check("now looks like a timestamp", len(nowTimestamp()), 16)
+check("and ends in Z", endsWith(nowTimestamp(), "Z"), true)
+
+# ── presigned URLs ──────────────────────────────────────────────────────────
+store = S3(TEST_KEY, TEST_SECRET, "us-east-1").bucket("examplebucket")
+link = store.presignGet("test.txt", 3600)
+check("presigned url host", startsWith(link, "https://examplebucket.s3.amazonaws.com/test.txt?"), true)
+check("names the algorithm", contains(link, "X-Amz-Algorithm=AWS4-HMAC-SHA256"), true)
+check("carries the credential", contains(link, "X-Amz-Credential="), true)
+check("carries the expiry", contains(link, "X-Amz-Expires=3600"), true)
+check("names the signed headers", contains(link, "X-Amz-SignedHeaders=host"), true)
+check("and carries a signature", contains(link, "X-Amz-Signature="), true)
+# The whole point is that it needs no credentials in hand -- so the secret
+# must not be in it.
+check("the secret is not in the link", contains(link, TEST_SECRET), false)
+check("a PUT link is signed for PUT",
+      store.presignPut("up.txt", 60) != store.presignGet("up.txt", 60), true)
+# AWS caps a presigned URL at seven days; better to refuse than to hand out a
+# link that the server will reject later.
+throwsSaying("too long is refused", "7 days", || store.presignGet("x", 604801))
+throws("zero seconds is refused", || store.presignGet("x", 0))
+throws("negative is refused", || store.presignGet("x", -5))
+
+# ── addressing ──────────────────────────────────────────────────────────────
+check("virtual-hosted host", store.hostFor("examplebucket"), "examplebucket.s3.amazonaws.com")
+check("and the path has no bucket", store.pathFor("examplebucket", "a/b.txt"), "/a/b.txt")
+# us-east-1 is the one region whose endpoint has no region in it.
+check("another region is in the host",
+      S3("k", "s", "eu-west-1").bucket("b").hostFor("b"), "b.s3.eu-west-1.amazonaws.com")
+check("us-east-1 is the exception",
+      S3("k", "s", "us-east-1").bucket("b").hostFor("b"), "b.s3.amazonaws.com")
+
+# A self-hosted server has no wildcard DNS, so a custom endpoint means
+# path-style unless told otherwise.
+local = S3("k", "s", "us-east-1").withEndpoint("http://minio.local:9000").bucket("b")
+check("a custom endpoint switches to path style", local.usePathStyle, true)
+check("the scheme is stripped from the endpoint", local.hostFor("b"), "minio.local:9000")
+check("and the bucket moves into the path", local.pathFor("b", "x.txt"), "/b/x.txt")
+check("a trailing slash is stripped",
+      S3("k", "s").withEndpoint("http://x/").bucket("b").hostFor("b"), "x")
+# An explicit choice must survive setting an endpoint afterwards.
+explicit = S3("k", "s", "auto").virtualHosted().withEndpoint("acct.r2.cloudflarestorage.com").bucket("b")
+check("an explicit style is not overridden", explicit.usePathStyle, false)
+check("so the bucket stays in the host", explicit.hostFor("b"), "b.acct.r2.cloudflarestorage.com")
+
+check("urlFor", store.urlFor("a/b.png"), "https://examplebucket.s3.amazonaws.com/a/b.png")
+check("urlFor escapes", store.urlFor("a b.png"), "https://examplebucket.s3.amazonaws.com/a%20b.png")
+check("a leading slash in the key is not doubled",
+      store.urlFor("/a.png"), "https://examplebucket.s3.amazonaws.com/a.png")
+
+throwsSaying("a bucket is required", "no bucket chosen", || S3("k", "s").urlFor("x"))
+throws("an access key is required", || S3(nil, "s"))
+throws("a secret key is required", || S3("k", nil))
+throws("an empty access key is refused", || S3("", "s"))
+check("the default region", S3("k", "s").region, "us-east-1")
+
+# ── provider presets ────────────────────────────────────────────────────────
+cf = r2("acct123", "k", "s").bucket("assets")
+check("r2 endpoint", cf.hostFor("assets"), "acct123.r2.cloudflarestorage.com")
+check("r2 uses path style", cf.usePathStyle, true)
+# R2 signs against the region literal "auto".
+check("r2 region", cf.region, "auto")
+mn = minio("localhost:9000", "k", "s")
+check("minio uses path style", mn.usePathStyle, true)
+check("minio endpoint", mn.endpoint, "localhost:9000")
+dosp = spaces("fra1", "k", "s").bucket("b")
+check("spaces endpoint", dosp.hostFor("b"), "fra1.digitaloceanspaces.com")
+
+# ── content types ───────────────────────────────────────────────────────────
+# The wrong one makes a browser download an image instead of showing it, and
+# it cannot be changed later without rewriting the object.
+check("png", guessContentType("a/b/c.png"), "image/png")
+check("case does not matter", guessContentType("PHOTO.JPG"), "image/jpeg")
+check("json", guessContentType("data.json"), "application/json")
+check("gzip", guessContentType("bundle.tgz"), "application/gzip")
+check("unknown extension", guessContentType("file.xyz"), "application/octet-stream")
+check("no extension", guessContentType("README"), "application/octet-stream")
+
+# ── XML ─────────────────────────────────────────────────────────────────────
+listing = "<?xml version=\"1.0\"?><ListBucketResult><Name>b</Name><IsTruncated>true</IsTruncated><NextContinuationToken>tok123</NextContinuationToken><Contents><Key>a.txt</Key><Size>12</Size><ETag>&quot;abc&quot;</ETag><LastModified>2026-01-01T00:00:00.000Z</LastModified></Contents><Contents><Key>b/c.txt</Key><Size>340</Size><ETag>&quot;def&quot;</ETag></Contents><CommonPrefixes><Prefix>b/</Prefix></CommonPrefixes></ListBucketResult>"
+check("first tag", firstTag(listing, "Name"), "b")
+check("a missing tag is nil", firstTag(listing, "Nope"), nil)
+check("all tags", to_json(allTags(listing, "Key")), to_json(["a.txt", "b/c.txt"]))
+check("truncated", firstTag(listing, "IsTruncated"), "true")
+check("continuation token", firstTag(listing, "NextContinuationToken"), "tok123")
+check("entities are decoded", firstTag(listing, "ETag"), "\"abc\"")
+
+entries = blocks(listing, "Contents")
+check("two entries", len(entries), 2)
+# Fields read per entry, not by position across parallel lists -- the second
+# entry has no LastModified, and positional reading would misalign everything
+# after it.
+check("the first entry's key", firstTag(entries[0], "Key"), "a.txt")
+check("the first entry's size", firstTag(entries[0], "Size"), "12")
+check("the second entry's key", firstTag(entries[1], "Key"), "b/c.txt")
+check("a field missing from one entry", firstTag(entries[1], "LastModified"), nil)
+check("common prefixes", firstTag(blocks(listing, "CommonPrefixes")[0], "Prefix"), "b/")
+
+# &amp; must be decoded last, or "&amp;lt;" would come out as "<".
+check("escaped ampersand", unescapeXml("a &amp;lt; b"), "a &lt; b")
+check("escape round trips", unescapeXml(escapeXml("a<b>&\"c\"")), "a<b>&\"c\"")
+check("an error document is recognised", isErrorDocument("<Error><Code>x</Code></Error>"), true)
+check("a listing is not", isErrorDocument("<ListBucketResult></ListBucketResult>"), false)
+check("empty is not", isErrorDocument(""), false)
+
+# ── binary safety ───────────────────────────────────────────────────────────
+# Signing hashes the payload, so a body that is not byte-exact produces a
+# signature the server rejects. A real gzip file, fetched and hashed, checked
+# against the checksum the registry published for it.
+LIVE = false
+try {
+    probe = Http().withTimeout(20000).get("https://packages.ez-lang.site/api/v1/packages?limit=1")
+    LIVE = probe.status == 200
+}
+catch (e) { LIVE = false }
+
+when LIVE == false {
+    SKIPPED = 8
+    out "  (network unavailable -- 8 live assertions skipped)"
+}
+other {
+    binary = Http().withTimeout(60000).get("https://packages.ez-lang.site/api/v1/packages/ratelimit/1.0.0/download")
+    check("a binary body arrives", binary.contentLength(), 7532)
+    check("hashing it byte-exactly matches the published checksum",
+          sha256Hex(binary.body),
+          "16f472b8d4d13f843ceb521bfad8a144cd5343ff7be6df4b31cdaebb8296a1cb")
+
+    # One deliberately unauthorised request to real S3: the credentials are
+    # AWS's own documentation examples and have never been valid. This proves
+    # the request is well-formed enough to be understood and rejected, and
+    # that the XML error path works.
+    denied = S3(TEST_KEY, TEST_SECRET, "us-east-1").bucket("ez-lang-does-not-exist-9c4f")
+    try {
+        denied.get("nothing.txt")
+        FAIL = FAIL + 1
+        out "  FAIL an unauthorised request should have thrown"
+    }
+    catch (e) {
+        message = str(e.message)
+        check("real S3 answered", contains(message, "s3: GET"), true)
+        check("with a status", contains(message, "403") or contains(message, "404") or
+                               contains(message, "400") or contains(message, "301"), true)
+        # The XML explanation is far more useful than the status: an invalid
+        # key and a missing bucket are both refusals and mean different things.
+        check("and an explanation, not just a number", len(message) > 30, true)
+        check("the secret is not in the error", contains(message, TEST_SECRET), false)
+    }
+
+    # A bucket that does not resolve at all must still fail readably.
+    throwsSaying("a nonexistent endpoint is explained", "s3:",
+                 || S3("k", "s", "us-east-1").withEndpoint("no-such-host.invalid")
+                        .bucket("b").withTimeout(8000).get("x"))
+}
+
+out ""
+when SKIPPED > 0 { out `  skipped {SKIPPED}` }
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

@@ -1,0 +1,24 @@
+use "main.ez"
+
+out "=== Testing ezweb Template Engine ==="
+
+tmpl = "<h1>Welcome, {{ user }}!</h1>\n" +
+"<div>Safe content: {{ html_content | safe }}</div>\n" +
+"<div>Unsafe content: {{ html_content }}</div>\n" +
+"\n" +
+"<ul>\n" +
+"{% for item in items %}\n" +
+"  <li>{{ item }}</li>\n" +
+"{% endfor %}\n" +
+"</ul>\n"
+
+ctx = {
+    "user": "<script>alert('hacked')</script>",
+    "html_content": "<b>Bold Text</b>",
+    "items": ["Item 1", "<Item 2>", "Item & 3"]
+}
+
+result = TemplateEngine.render(tmpl, ctx)
+out "--- Rendered Output ---"
+out result
+out "-----------------------"

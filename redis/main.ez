@@ -1,0 +1,238 @@
+# ============================================================================
+# redis — a Redis client for EZ
+#
+#   use "redis"
+#
+#   r = Redis("127.0.0.1", 6379)
+#   r.set("greeting", "hello")
+#   out r.get("greeting")
+#   r.close()
+#
+# Speaks RESP over a plain TCP socket, so it needs no native library. Every
+# command goes through `command()`, which means anything this client does not
+# wrap by name is still reachable.
+# ============================================================================
+
+use "socket"
+use "redis/resp.ez"
+
+export model Redis {
+
+    init(host, port) {
+        self.host = host
+        self.port = port
+        self.conn = nil
+        self.buffer = ""
+        self.timeoutMs = 5000
+        self.connected = false
+    }
+
+    task timeout(ms) {
+        self.timeoutMs = ms
+        when self.conn != nil { self.conn.setTimeout(ms) }
+        give self
+    }
+
+    # Connections are opened on first use rather than in init, so building a
+    # client is cheap and a dead server surfaces at the call that needed it.
+    task connect() {
+        when self.connected { give self }
+        self.conn = tcp_connect(self.host, self.port, self.timeoutMs)
+        self.conn.setTimeout(self.timeoutMs)
+        self.connected = true
+        self.buffer = ""
+        give self
+    }
+
+    task close() {
+        when self.conn != nil { self.conn.close() }
+        self.conn = nil
+        self.connected = false
+        self.buffer = ""
+        give nil
+    }
+
+    # ── the one primitive ───────────────────────────────────────────────────
+
+    # Send a command and read one reply. `args` is a list: ["SET", "k", "v"].
+    #
+    # An error reply is raised rather than returned, because a Redis error is
+    # a bug in the caller's command, not a value to branch on. Use tryCommand
+    # where a failure is expected.
+    task command(args) {
+        reply = self.tryCommand(args)
+        when respIsError(reply) {
+            throw Exception("redis: " + reply["error"])
+        }
+        give reply
+    }
+
+    # As command(), but returns { error } instead of throwing.
+    task tryCommand(args) {
+        self.connect()
+        self.conn.sendAll(respEncode(args))
+        give self.readReply()
+    }
+
+    # Reads until one complete reply is buffered. TCP does not preserve
+    # message boundaries, so a reply may arrive split across reads, or two
+    # replies may arrive in one -- the leftover stays buffered for next time.
+    task readReply() {
+        while true {
+            when len(self.buffer) > 0 {
+                decoded = respDecode(self.buffer, 0)
+                when decoded != nil {
+                    self.buffer = substr(self.buffer, decoded[1], len(self.buffer) - decoded[1])
+                    give decoded[0]
+                }
+            }
+            chunk = self.conn.recv(4096)
+            when len(chunk) == 0 {
+                self.connected = false
+                throw Exception("redis: the server closed the connection")
+            }
+            self.buffer = self.buffer + chunk
+        }
+    }
+
+    # ── strings ─────────────────────────────────────────────────────────────
+
+    task ping() { give self.command(["PING"]) }
+
+    task set(key, value) { give self.command(["SET", key, value]) }
+
+    # Set with an expiry in seconds -- the usual shape for a cache entry.
+    task setEx(key, value, seconds) {
+        give self.command(["SET", key, value, "EX", str(seconds)])
+    }
+
+    # Set only if absent. Returns true when it was set.
+    task setNx(key, value) {
+        give self.command(["SET", key, value, "NX"]) != nil
+    }
+
+    task get(key) { give self.command(["GET", key]) }
+
+    task getOr(key, fallback) {
+        value = self.get(key)
+        when value == nil { give fallback }
+        give value
+    }
+
+    task delete(key) { give self.command(["DEL", key]) }
+
+    task exists(key) { give self.command(["EXISTS", key]) > 0 }
+
+    task increment(key) { give self.command(["INCR", key]) }
+    task incrementBy(key, amount) { give self.command(["INCRBY", key, str(amount)]) }
+    task decrement(key) { give self.command(["DECR", key]) }
+
+    task expire(key, seconds) { give self.command(["EXPIRE", key, str(seconds)]) == 1 }
+    task ttl(key) { give self.command(["TTL", key]) }
+    task persist(key) { give self.command(["PERSIST", key]) == 1 }
+
+    task keys(pattern) { give self.command(["KEYS", pattern]) }
+
+    # ── hashes ──────────────────────────────────────────────────────────────
+
+    task hashSet(key, field, value) { give self.command(["HSET", key, field, value]) }
+    task hashGet(key, field) { give self.command(["HGET", key, field]) }
+    task hashDelete(key, field) { give self.command(["HDEL", key, field]) }
+    task hashExists(key, field) { give self.command(["HEXISTS", key, field]) == 1 }
+
+    # Flat [field, value, field, value] becomes a dictionary, which is what
+    # callers invariably want.
+    task hashAll(key) {
+        flat = self.command(["HGETALL", key])
+        result = {}
+        when flat == nil { give result }
+        index = 0
+        while index + 1 < len(flat) {
+            result[flat[index]] = flat[index + 1]
+            index = index + 2
+        }
+        give result
+    }
+
+    # ── lists ───────────────────────────────────────────────────────────────
+
+    task listPush(key, value) { give self.command(["RPUSH", key, value]) }
+    task listPushFront(key, value) { give self.command(["LPUSH", key, value]) }
+    task listPop(key) { give self.command(["RPOP", key]) }
+    task listPopFront(key) { give self.command(["LPOP", key]) }
+    task listLength(key) { give self.command(["LLEN", key]) }
+    task listRange(key, start, stop) {
+        give self.command(["LRANGE", key, str(start), str(stop)])
+    }
+
+    # ── sets ────────────────────────────────────────────────────────────────
+
+    task setAdd(key, member) { give self.command(["SADD", key, member]) }
+    task setRemove(key, member) { give self.command(["SREM", key, member]) }
+    task setMembers(key) { give self.command(["SMEMBERS", key]) }
+    task setHas(key, member) { give self.command(["SISMEMBER", key, member]) == 1 }
+    task setSize(key) { give self.command(["SCARD", key]) }
+
+    # ── server ──────────────────────────────────────────────────────────────
+
+    task select(index) { give self.command(["SELECT", str(index)]) }
+    task auth(password) { give self.command(["AUTH", password]) }
+    task authAs(username, password) { give self.command(["AUTH", username, password]) }
+    task flushDb() { give self.command(["FLUSHDB"]) }
+    task info() { give self.command(["INFO"]) }
+    task dbSize() { give self.command(["DBSIZE"]) }
+
+    # True when the server answers. Use to check availability without
+    # treating an unreachable server as an error.
+    task isAlive() {
+        try {
+            self.ping()
+            give true
+        }
+        catch (e) { give false }
+    }
+}
+
+# Connect using a URL: redis://[[user]:password@]host[:port][/db]
+export task redisConnect(url) {
+    body = str(url)
+    when startsWith(body, "redis://") { body = substr(body, 8, len(body) - 8) }
+
+    password = ""
+    username = ""
+    atAt = indexOf(body, "@")
+    when atAt >= 0 {
+        credentials = substr(body, 0, atAt)
+        body = substr(body, atAt + 1, len(body) - atAt - 1)
+        colonAt = indexOf(credentials, ":")
+        when colonAt >= 0 {
+            username = substr(credentials, 0, colonAt)
+            password = substr(credentials, colonAt + 1, len(credentials) - colonAt - 1)
+        }
+        other { password = credentials }
+    }
+
+    database = -1
+    slashAt = indexOf(body, "/")
+    when slashAt >= 0 {
+        tail = substr(body, slashAt + 1, len(body) - slashAt - 1)
+        body = substr(body, 0, slashAt)
+        when tail != "" { database = num(tail) }
+    }
+
+    host = body
+    port = 6379
+    portAt = indexOf(body, ":")
+    when portAt >= 0 {
+        host = substr(body, 0, portAt)
+        port = num(substr(body, portAt + 1, len(body) - portAt - 1))
+    }
+
+    client = Redis(host, port)
+    when password != "" {
+        when username != "" { client.authAs(username, password) }
+        other { client.auth(password) }
+    }
+    when database >= 0 { client.select(database) }
+    give client
+}

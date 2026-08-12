@@ -1,0 +1,425 @@
+# ============================================================================
+# oauth — test suite
+#   ez test.ez
+#
+# No network. The HTTP layer is replaced with a transport that records the
+# request and returns a canned response, so the flows can be exercised exactly
+# as a provider would drive them -- including the failures.
+# ============================================================================
+
+use "oauth"
+use "oauth/pkce.ez"
+use "oauth/token.ez"
+use "oauth/providers.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task throwsSaying(label, fragment, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when contains(str(e.message), fragment) { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected the message to mention: {fragment}`
+            out `    actual:   {e.message}`
+        }
+    }
+}
+
+# ── the fake provider ───────────────────────────────────────────────────────
+NEXT_RESPONSE = "{}"
+LAST_URL = nil
+LAST_BODY = nil
+LAST_HEADERS = nil
+
+task fakePost(url, body, headers) {
+    LAST_URL = url
+    LAST_BODY = decodeForm(body)
+    LAST_HEADERS = headers
+    give NEXT_RESPONSE
+}
+task fakeGet(url, headers) {
+    LAST_URL = url
+    LAST_HEADERS = headers
+    give NEXT_RESPONSE
+}
+task fakeClient(name) {
+    c = OAuth2.provider(name, "my-client-id", "my-client-secret", "https://app.test/callback")
+    c.useTransport(fakePost, fakeGet)
+    give c
+}
+
+out "oauth tests"
+
+# ── PKCE ────────────────────────────────────────────────────────────────────
+verifier = createVerifier()
+check("verifier is the minimum legal length", len(verifier), 43)
+check("verifiers differ", createVerifier() != createVerifier(), true)
+# base64url only: + / = in a verifier would be mangled in a query string.
+clean = true
+get ch in split(verifier, "") {
+    when indexOf("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", ch) < 0 { clean = false }
+}
+check("verifier is url-safe", clean, true)
+
+# RFC 7636 appendix B. If this drifts, every PKCE exchange fails.
+check("S256 matches the RFC test vector",
+      challengeFor("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk", "S256"),
+      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+check("the challenge is unpadded", contains(challengeFor(verifier, S256), "="), false)
+check("plain returns the verifier", challengeFor(verifier, PLAIN), verifier)
+throws("unknown transform is refused", || challengeFor(verifier, "sha1"))
+throws("a short verifier is refused", || challengeFor("tooshort", S256))
+throws("a verifier over 128 characters is refused",
+       || challengeFor(createVerifierOf(96) + createVerifierOf(96), S256))
+throws("weak entropy is refused", || createVerifierOf(8))
+
+pair = createPair()
+check("pair carries the method", pair["method"], "S256")
+check("pair challenge matches its verifier",
+      pair["challenge"], challengeFor(pair["verifier"], S256))
+
+# ── state ───────────────────────────────────────────────────────────────────
+check("state is generated", len(createState()) > 20, true)
+check("states differ", createState() != createState(), true)
+check("matching state", statesMatch("abc123", "abc123"), true)
+check("different state", statesMatch("abc123", "abc124"), false)
+check("shorter state", statesMatch("abc123", "abc"), false)
+check("nil state never matches", statesMatch("abc", nil), false)
+check("nil expected never matches", statesMatch(nil, "abc"), false)
+# An empty stored state must not act as a wildcard.
+check("empty state never matches", statesMatch("", ""), false)
+
+# ── form encoding ───────────────────────────────────────────────────────────
+check("encodes a pair", encodeForm({ "a": "1" }), "a=1")
+check("escapes the value", contains(encodeForm({ "u": "a b&c" }), "a%20b%26c"), true)
+check("escapes a url", contains(encodeForm({ "r": "https://x/y" }), "https%3A%2F%2Fx%2Fy"), true)
+# A nil is an absent parameter, not the string "nil".
+check("skips nil values", encodeForm({ "a": "1", "b": nil }), "a=1")
+roundTrip = decodeForm(encodeForm({ "code": "a b&c", "state": "x=y" }))
+check("round-trips the value", roundTrip["code"], "a b&c")
+check("round-trips an = in the value", roundTrip["state"], "x=y")
+check("decodes an empty string", len(keys(decodeForm(""))), 0)
+check("decodes a nil", len(keys(decodeForm(nil))), 0)
+check("decodes a valueless key", decodeForm("a")["a"], "")
+check("decodes past a leading ?", decodeForm("http://x?a=1")["a"], "1")
+
+# ── response parsing ────────────────────────────────────────────────────────
+check("parses JSON", parseBody("{\"access_token\":\"t\"}")["access_token"], "t")
+# GitHub answers form-encoded unless asked for JSON.
+check("parses form encoding", parseBody("access_token=t&scope=read")["access_token"], "t")
+check("empty body", parseBody(""), nil)
+check("nil body", parseBody(nil), nil)
+check("garbage body", parseBody("<html>oops</html>"), nil)
+# parse_json is lenient and will produce a nonsense object from broken JSON,
+# so the token endpoint validates the shape rather than trusting the parse.
+
+# ── tokens ──────────────────────────────────────────────────────────────────
+t = Token.fromResponse({ "access_token": "abc", "token_type": "Bearer",
+                         "expires_in": 3600, "refresh_token": "r1", "scope": "a b" })
+check("access token", t.accessToken, "abc")
+check("refresh token", t.refreshToken, "r1")
+check("authorization header", t.header(), "Bearer abc")
+check("header dictionary", t.authHeaders()["Authorization"], "Bearer abc")
+check("scopes are split", to_json(t.scopes()), to_json(["a", "b"]))
+check("hasScope finds one", t.hasScope("b"), true)
+check("hasScope rejects a stranger", t.hasScope("c"), false)
+check("fresh token is not expired", t.isExpired(), false)
+check("fresh token is valid", t.isValid(), true)
+check("can refresh", t.canRefresh(), true)
+# expires_in is only meaningful at the moment of receipt, so it is stored as
+# an absolute time.
+check("expiry became absolute", t.expiresAt > (clock() / 1000) + 3000, true)
+check("seconds remaining", floor(t.secondsRemaining()) > 3500, true)
+check("token type defaults to Bearer",
+      Token.fromResponse({ "access_token": "x" }).tokenType, "Bearer")
+check("a scope array is joined",
+      Token.fromResponse({ "access_token": "x", "scope": ["a", "b"] }).scope, "a b")
+
+throwsSaying("a response without a token is refused", "access_token",
+             || Token.fromResponse({ "token_type": "Bearer" }))
+throws("a non-object response is refused", || Token.fromResponse("nope"))
+
+# Expiry, and the skew that stops a token expiring mid-request.
+expired = Token("x", "Bearer", (clock() / 1000) - 10, nil, nil, nil)
+check("past expiry is expired", expired.isExpired(), true)
+check("and not valid", expired.isValid(), false)
+soon = Token("x", "Bearer", (clock() / 1000) + 30, nil, nil, nil)
+check("expiring within the skew counts as expired", soon.isExpired(), true)
+forever = Token("x", "Bearer", nil, nil, nil, nil)
+check("no expiry means not expired", forever.isExpired(), false)
+check("no expiry has no countdown", forever.secondsRemaining(), nil)
+check("cannot refresh without a refresh token", forever.canRefresh(), false)
+
+# Storage.
+stored = t.toDict()
+check("stores absolute expiry", has_key(stored, "expires_at"), true)
+check("does not store expires_in", has_key(stored, "expires_in"), false)
+back = Token.fromDict(stored)
+check("restores the access token", back.accessToken, "abc")
+check("restores the refresh token", back.refreshToken, "r1")
+check("restores the expiry", back.expiresAt, t.expiresAt)
+check("json round trip", Token.fromJson(t.toJson()).accessToken, "abc")
+check("fromDict of nil", Token.fromDict(nil), nil)
+check("fromJson of empty", Token.fromJson(""), nil)
+
+# Printing a token must not print a live credential.
+check("printing redacts the token", contains(t.toString(), "abc"), false)
+
+# ── authorization url ───────────────────────────────────────────────────────
+gh = fakeClient("github")
+url = gh.authorizationUrl(nil)
+check("uses the provider endpoint", startsWith(url, "https://github.com/login/oauth/authorize?"), true)
+check("carries the client id", contains(url, "client_id=my-client-id"), true)
+check("asks for a code", contains(url, "response_type=code"), true)
+check("carries the redirect", contains(url, "redirect_uri=https%3A%2F%2Fapp.test%2Fcallback"), true)
+check("carries the scopes", contains(url, "scope=read%3Auser%20user%3Aemail"), true)
+# This URL goes through the user's browser. A secret in it is a leaked secret.
+check("never carries the client secret", contains(url, "my-client-secret"), false)
+
+# Provider quirks travel with the preset.
+goog = fakeClient("google")
+googUrl = goog.authorizationUrl(nil)
+check("google asks for offline access", contains(googUrl, "access_type=offline"), true)
+check("google forces consent", contains(googUrl, "prompt=consent"), true)
+
+custom = OAuth2("id", nil, "https://app.test/cb")
+custom.endpoints("https://auth.test/go?tenant=acme", "https://auth.test/token")
+check("appends to an endpoint that already has a query",
+      contains(custom.authorizationUrl(nil), "?tenant=acme&"), true)
+check("no scope parameter when none are set",
+      contains(custom.authorizationUrl(nil), "scope="), false)
+throws("no endpoint is an error", || OAuth2("id", nil, nil).authorizationUrl(nil))
+throws("a client id is required", || OAuth2(nil, "secret", "https://app.test/cb"))
+throws("an empty client id is required", || OAuth2("", "secret", "https://app.test/cb"))
+
+# ── begin ───────────────────────────────────────────────────────────────────
+start = gh.begin()
+check("returns a url", startsWith(start["url"], "https://github.com/"), true)
+check("returns a session", start["session"] != nil, true)
+check("session holds the state", len(start["session"]["state"]) > 10, true)
+check("session holds the verifier", len(start["session"]["verifier"]), 43)
+check("url carries the challenge", contains(start["url"], "code_challenge="), true)
+check("url declares S256", contains(start["url"], "code_challenge_method=S256"), true)
+# The verifier is the secret; sending it would defeat PKCE entirely.
+check("url never carries the verifier",
+      contains(start["url"], start["session"]["verifier"]), false)
+check("two logins get different state",
+      gh.begin()["session"]["state"] != gh.begin()["session"]["state"], true)
+
+noPkce = fakeClient("github").withoutPkce()
+plainStart = noPkce.begin()
+check("pkce can be turned off", contains(plainStart["url"], "code_challenge"), false)
+check("state survives without pkce", plainStart["session"]["state"] != nil, true)
+
+extra = gh.beginWith({ "login_hint": "someone@example.com" })
+check("extra parameters reach the url", contains(extra["url"], "login_hint="), true)
+
+# ── complete ────────────────────────────────────────────────────────────────
+NEXT_RESPONSE = "{\"access_token\":\"AT\",\"token_type\":\"bearer\",\"expires_in\":3600,\"refresh_token\":\"RT\",\"scope\":\"read:user\"}"
+session = gh.begin()["session"]
+token = gh.complete({ "code": "the-code", "state": session["state"] }, session)
+check("returns a token", token.accessToken, "AT")
+check("hits the token endpoint", LAST_URL, "https://github.com/login/oauth/access_token")
+check("sends the grant type", LAST_BODY["grant_type"], "authorization_code")
+check("sends the code", LAST_BODY["code"], "the-code")
+check("sends the redirect uri", LAST_BODY["redirect_uri"], "https://app.test/callback")
+# The verifier is what proves this is the same client that started the flow.
+check("sends the pkce verifier", LAST_BODY["code_verifier"], session["verifier"])
+check("sends the client secret", LAST_BODY["client_secret"], "my-client-secret")
+check("posts a form", LAST_HEADERS["Content-Type"], "application/x-www-form-urlencoded")
+# Without this header GitHub answers in a format that parses as nothing.
+check("asks github for json", LAST_HEADERS["Accept"], "application/json")
+
+# The checks that make the callback safe.
+throwsSaying("a mismatched state is refused", "state mismatch",
+             || gh.complete({ "code": "c", "state": "forged" }, session))
+throwsSaying("a missing state is refused", "state mismatch",
+             || gh.complete({ "code": "c" }, session))
+throwsSaying("a missing session is refused", "session",
+             || gh.complete({ "code": "c", "state": "x" }, nil))
+throwsSaying("a callback with no code is refused", "no authorization code",
+             || gh.complete({ "state": session["state"] }, session))
+throws("a nil callback is refused", || gh.complete(nil, session))
+# The provider reports refusal in the redirect, not the token call.
+throwsSaying("the provider's error is surfaced", "access_denied",
+             || gh.complete({ "error": "access_denied" }, session))
+throwsSaying("with its description", "user said no",
+             || gh.complete({ "error": "access_denied", "error_description": "user said no" }, session))
+
+# A form-encoded token response, which is what GitHub sends by default.
+NEXT_RESPONSE = "access_token=FORM&scope=read&token_type=bearer"
+formToken = gh.exchange("c", nil)
+check("a form-encoded token response works", formToken.accessToken, "FORM")
+
+# ── token endpoint failures ─────────────────────────────────────────────────
+# HTTP status is not visible from here, so failure is read from the body the
+# spec requires.
+NEXT_RESPONSE = "{\"error\":\"invalid_grant\",\"error_description\":\"code expired\"}"
+throwsSaying("an error response throws", "invalid_grant", || gh.exchange("c", nil))
+throwsSaying("and keeps the description", "code expired", || gh.exchange("c", nil))
+# The three failures every OAuth integration hits get an explanation.
+throwsSaying("invalid_grant is explained", "already used", || gh.exchange("c", nil))
+NEXT_RESPONSE = "{\"error\":\"invalid_client\"}"
+throwsSaying("invalid_client is explained", "HTTP Basic", || gh.exchange("c", nil))
+NEXT_RESPONSE = "{\"error\":\"redirect_uri_mismatch\"}"
+throwsSaying("redirect_uri_mismatch is explained", "exactly", || gh.exchange("c", nil))
+NEXT_RESPONSE = "<html>502 Bad Gateway</html>"
+throwsSaying("an unreadable response is reported", "unreadable", || gh.exchange("c", nil))
+
+# ── refresh ─────────────────────────────────────────────────────────────────
+NEXT_RESPONSE = "{\"access_token\":\"AT2\",\"expires_in\":3600}"
+old = Token("AT1", "Bearer", (clock() / 1000) - 10, "RT1", "read", nil)
+fresh = gh.refresh(old)
+check("refresh returns a new access token", fresh.accessToken, "AT2")
+check("sends the refresh grant", LAST_BODY["grant_type"], "refresh_token")
+check("sends the refresh token", LAST_BODY["refresh_token"], "RT1")
+# Google and others omit refresh_token from the response because the old one
+# still works. Dropping it would break every later refresh.
+check("keeps the old refresh token", fresh.refreshToken, "RT1")
+check("keeps the old scope", fresh.scope, "read")
+
+NEXT_RESPONSE = "{\"access_token\":\"AT3\",\"refresh_token\":\"RT2\"}"
+rotated = gh.refresh(old)
+check("takes a rotated refresh token", rotated.refreshToken, "RT2")
+check("a bare refresh token string works", gh.refresh("RT9").accessToken, "AT3")
+check("and sends it", LAST_BODY["refresh_token"], "RT9")
+throwsSaying("cannot refresh without one", "sign in again",
+             || gh.refresh(Token("x", "Bearer", nil, nil, nil, nil)))
+throws("cannot refresh nil", || gh.refresh(nil))
+
+# ensureFresh is the call to make before using a stored token.
+NEXT_RESPONSE = "{\"access_token\":\"AT4\"}"
+good = Token("still-good", "Bearer", (clock() / 1000) + 9000, "RT", nil, nil)
+check("a valid token is left alone", gh.ensureFresh(good).accessToken, "still-good")
+check("an expired token is refreshed", gh.ensureFresh(old).accessToken, "AT4")
+stale = Token("stale", "Bearer", (clock() / 1000) - 10, nil, nil, nil)
+check("an expired token with no refresh is returned as-is",
+      gh.ensureFresh(stale).accessToken, "stale")
+check("ensureFresh of nil", gh.ensureFresh(nil), nil)
+
+# ── client credentials ──────────────────────────────────────────────────────
+NEXT_RESPONSE = "{\"access_token\":\"SERVICE\",\"expires_in\":7200}"
+svc = fakeClient("google")
+machine = svc.clientCredentials(["api.read"])
+check("machine token", machine.accessToken, "SERVICE")
+check("sends the client credentials grant", LAST_BODY["grant_type"], "client_credentials")
+check("sends the requested scope", LAST_BODY["scope"], "api.read")
+check("there is no refresh token in this flow", machine.canRefresh(), false)
+svc.clientCredentials(nil)
+check("falls back to the configured scopes", LAST_BODY["scope"], "openid email profile")
+throwsSaying("needs a secret", "client secret",
+             || OAuth2("id", nil, nil).endpoints("a", "b").clientCredentials(nil))
+
+# ── client authentication ───────────────────────────────────────────────────
+NEXT_RESPONSE = "{\"access_token\":\"AT\"}"
+basic = fakeClient("spotify")
+check("spotify defaults to basic auth", basic.tokenAuth, "basic")
+basic.exchange("c", nil)
+check("sends an Authorization header", startsWith(LAST_HEADERS["Authorization"], "Basic "), true)
+# RFC 6749 §2.3.1: the credentials are form-encoded before being base64'd.
+check("basic credentials are id:secret",
+      LAST_HEADERS["Authorization"], "Basic " + Base64.encode("my-client-id:my-client-secret"))
+# The secret belongs in one place or the other, never both.
+check("the secret is not also in the body", has_key(LAST_BODY, "client_secret"), false)
+gh.exchange("c", nil)
+check("post auth puts it in the body", LAST_BODY["client_secret"], "my-client-secret")
+check("and not in a header", has_key(LAST_HEADERS, "Authorization"), false)
+
+manual = OAuth2("id", "sec", nil).endpoints("https://a/auth", "https://a/token").useBasicAuth()
+check("basic auth can be chosen", manual.tokenAuth, "basic")
+
+# ── user info ───────────────────────────────────────────────────────────────
+NEXT_RESPONSE = "{\"id\":42,\"login\":\"octocat\",\"name\":\"The Octocat\",\"email\":\"cat@github.test\"}"
+who = gh.userInfo(Token("AT", "Bearer", nil, nil, nil, nil))
+check("returns the profile", who["login"], "octocat")
+check("hits the user endpoint", LAST_URL, "https://api.github.com/user")
+check("sends the bearer token", LAST_HEADERS["Authorization"], "Bearer AT")
+# GitHub refuses a request without a User-Agent.
+check("sends the required user agent", LAST_HEADERS["User-Agent"], "ez-oauth")
+
+profile = gh.profile(Token("AT", "Bearer", nil, nil, nil, nil))
+check("normalises the id", profile["id"], "42")
+check("normalises the name", profile["name"], "The Octocat")
+check("normalises the email", profile["email"], "cat@github.test")
+check("keeps the raw response", profile["raw"]["login"], "octocat")
+
+# Google spells the id `sub`, and the preset knows that.
+NEXT_RESPONSE = "{\"sub\":\"g-1\",\"name\":\"Ada\",\"email\":\"ada@example.test\"}"
+googleProfile = fakeClient("google").profile(Token("AT", "Bearer", nil, nil, nil, nil))
+check("google's id field", googleProfile["id"], "g-1")
+check("google's email", googleProfile["email"], "ada@example.test")
+
+# Twitch wraps the user in a data array.
+NEXT_RESPONSE = "{\"data\":[{\"id\":\"t-1\",\"display_name\":\"streamer\"}]}"
+twitchProfile = fakeClient("twitch").profile(Token("AT", "Bearer", nil, nil, nil, nil))
+check("unwraps twitch's data array", twitchProfile["id"], "t-1")
+check("and its name field", twitchProfile["name"], "streamer")
+
+NEXT_RESPONSE = "{\"error\":\"invalid_token\"}"
+throwsSaying("an error from user info throws", "invalid_token",
+             || gh.userInfo(Token("AT", "Bearer", nil, nil, nil, nil)))
+throwsSaying("no user info endpoint is an error", "user info endpoint",
+             || OAuth2("id", nil, nil).userInfo(Token("AT", "Bearer", nil, nil, nil, nil)))
+
+# ── revoke ──────────────────────────────────────────────────────────────────
+NEXT_RESPONSE = "{}"
+check("revokes where supported", fakeClient("google").revoke(Token("AT", "Bearer", nil, nil, nil, nil)), true)
+check("sends the token", LAST_BODY["token"], "AT")
+# Revocation is optional in the spec and several providers lack it, so this
+# reports rather than throws.
+check("reports where unsupported", fakeClient("github").revoke(Token("AT", "Bearer", nil, nil, nil, nil)), false)
+
+# ── providers ───────────────────────────────────────────────────────────────
+check("providers are listed", len(providerNames()) >= 10, true)
+check("google is known", has_key(PROVIDERS, "google"), true)
+check("names are case-insensitive", OAuth2.provider("GitHub", "i", "s", "r").tokenUrl,
+      PROVIDERS["github"]["tokenUrl"])
+throwsSaying("an unknown provider lists the known ones", "google",
+             || OAuth2.provider("myspace", "i", "s", "r"))
+
+allGood = true
+get name in providerNames() {
+    preset = PROVIDERS[name]
+    when preset["authorizeUrl"] == nil { allGood = false }
+    when preset["tokenUrl"] == nil { allGood = false }
+    when startsWith(str(preset["authorizeUrl"]), "https://") == false { allGood = false }
+    when startsWith(str(preset["tokenUrl"]), "https://") == false { allGood = false }
+}
+check("every provider has https endpoints", allGood, true)
+
+tenant = microsoftTenant("contoso.onmicrosoft.com")
+check("tenant is in the authorize url",
+      contains(tenant["authorizeUrl"], "contoso.onmicrosoft.com"), true)
+check("tenant is in the token url",
+      contains(tenant["tokenUrl"], "contoso.onmicrosoft.com"), true)
+# Rewriting the preset must not corrupt the shared one.
+check("the shared preset is untouched",
+      contains(PROVIDERS["microsoft"]["authorizeUrl"], "common"), true)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

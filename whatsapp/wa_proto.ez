@@ -1,0 +1,421 @@
+# ============================================================================
+# wa_proto.ez — WABinary encoder / decoder for WhatsApp Web protocol
+# ============================================================================
+
+use "wa_crypto.ez"
+use "wa_constants.ez"
+
+# ── Protobuf varint encoding ──────────────────────────────────────────────────
+export task wap_encodeVarint(value) {
+    result = []
+    n = value
+    while n > 127 {
+        push(result, (n & 127) | 128)
+        n = n >> 7
+    }
+    push(result, n & 127)
+    give result
+}
+
+export task wap_decodeVarint(byteList, offset) {
+    result = 0
+    shift  = 0
+    i      = offset
+    done   = false
+    while i < len(byteList) and not done {
+        b = byteList[i]
+        result = result | ((b & 127) << shift)
+        i = i + 1
+        when (b & 128) == 0 { done = true }
+        when not done { shift = shift + 7 }
+    }
+    give { "value": result, "nextOffset": i }
+}
+
+export task wap_encodeField(fieldNum, wireType, valueBytes) {
+    tag = (fieldNum << 3) | wireType
+    result = wap_encodeVarint(tag)
+    get b in valueBytes { push(result, b) }
+    give result
+}
+
+export task wap_encodeBytes(fieldNum, valueBytes) {
+    lenBytes = wap_encodeVarint(len(valueBytes))
+    payload = []
+    get b in lenBytes { push(payload, b) }
+    get b in valueBytes { push(payload, b) }
+    give wap_encodeField(fieldNum, 2, payload)
+}
+
+export task wap_encodeProtobufString(fieldNum, strVal) {
+    bytes = wac_strToBytes(strVal)
+    give wap_encodeBytes(fieldNum, bytes)
+}
+
+export task wap_encodeClientPayload() {
+    # AppVersion
+    appVer = _wac_concatBytes(wap_encodeField(1, 0, wap_encodeVarint(2)),
+             _wac_concatBytes(wap_encodeField(2, 0, wap_encodeVarint(3000)),
+                              wap_encodeField(3, 0, wap_encodeVarint(10123))))
+    
+    # UserAgent (Platform=14)
+    ua = _wac_concatBytes(wap_encodeField(1, 0, wap_encodeVarint(14)),
+         _wac_concatBytes(wap_encodeBytes(2, appVer),
+         _wac_concatBytes(wap_encodeProtobufString(3, "000"),
+         _wac_concatBytes(wap_encodeProtobufString(4, "000"),
+         _wac_concatBytes(wap_encodeProtobufString(5, "0.1"),
+         _wac_concatBytes(wap_encodeProtobufString(6, ""),
+         _wac_concatBytes(wap_encodeProtobufString(7, "Desktop"),
+         _wac_concatBytes(wap_encodeProtobufString(8, "0.1"),
+         _wac_concatBytes(wap_encodeField(10, 0, wap_encodeVarint(0)),
+         _wac_concatBytes(wap_encodeProtobufString(11, "en"),
+                          wap_encodeProtobufString(12, "US")))))))))))
+
+    # WebInfo (webSubPlatform=0)
+    webInfo = wap_encodeField(4, 0, wap_encodeVarint(0))
+
+    # ClientPayload
+    # passive=true (field 3), connectType=1 (field 12), connectReason=1 (field 13)
+    cp = _wac_concatBytes(wap_encodeField(3, 0, wap_encodeVarint(1)),
+         _wac_concatBytes(wap_encodeBytes(5, ua),
+         _wac_concatBytes(wap_encodeBytes(6, webInfo),
+         _wac_concatBytes(wap_encodeField(12, 0, wap_encodeVarint(1)),
+                          wap_encodeField(13, 0, wap_encodeVarint(1))))))
+    give cp
+}
+
+export task wap_decodeProtobufField(byteList, offset, targetFieldNum) {
+    i = offset
+    while i < len(byteList) {
+        tagRes = wap_decodeVarint(byteList, i)
+        tagVal = tagRes["value"]
+        i      = tagRes["nextOffset"]
+        
+        fieldNum = tagVal >> 3
+        wireType = tagVal & 7
+        
+        when wireType == 0 {
+            valRes = wap_decodeVarint(byteList, i)
+            when fieldNum == targetFieldNum { give valRes }
+            i = valRes["nextOffset"]
+        } other when wireType == 2 {
+            lenRes = wap_decodeVarint(byteList, i)
+            length = lenRes["value"]
+            i      = lenRes["nextOffset"]
+            when fieldNum == targetFieldNum {
+                valBytes = _wac_sliceBytes(byteList, i, length)
+                give { "value": valBytes, "nextOffset": i + length }
+            }
+            i = i + length
+        } other when wireType == 1 { i = i + 8
+        } other when wireType == 5 { i = i + 4
+        } other { throw "wap_decodeProtobufField: unsupported wireType " + str(wireType) }
+    }
+    give nil
+}
+
+export task wap_buildFrame(payloadBytes, isCompressed) {
+    size = len(payloadBytes)
+    b0 = (size >> 16) & 255
+    when isCompressed { b0 = b0 | 128 }
+    result = [b0, (size >> 8) & 255, size & 255]
+    get b in payloadBytes { push(result, b) }
+    give result
+}
+
+export task wap_parseFrameHeader(byteList) {
+    when len(byteList) < 3 { give nil }
+    b0 = byteList[0]
+    b1 = byteList[1]
+    b2 = byteList[2]
+    size = ((b0 & 127) << 16) | (b1 << 8) | b2
+    isCompressed = (b0 & 128) != 0
+    give { "size": size, "isCompressed": isCompressed }
+}
+
+# ── WABinary Token Maps ────────────────────────────────────────────────────────
+task _wap_getTokenIndex(strVal) {
+    repeat i = 0 to len(_WA_SINGLE_BYTE_TOKENS) - 1 {
+        when _WA_SINGLE_BYTE_TOKENS[i] == strVal {
+            give { "dict": nil, "index": i }
+        }
+    }
+    repeat d = 0 to len(_WA_DOUBLE_BYTE_TOKENS) - 1 {
+        dict = _WA_DOUBLE_BYTE_TOKENS[d]
+        repeat i = 0 to len(dict) - 1 {
+            when dict[i] == strVal {
+                give { "dict": d, "index": i }
+            }
+        }
+    }
+    give nil
+}
+
+# ── WABinary Encoder ──────────────────────────────────────────────────────────
+
+task _wap_pushInt(result, val, n, littleEndian) {
+    repeat i = 0 to n - 1 {
+        shift = n - 1 - i
+        when littleEndian { shift = i }
+        push(result, (val >> (shift * 8)) & 255)
+    }
+}
+
+task _wap_writeByteLength(result, length) {
+    when length >= 1048576 { # 1 << 20
+        push(result, _WA_TAGS["BINARY_32"])
+        _wap_pushInt(result, length, 4, false)
+    } other when length >= 256 {
+        push(result, _WA_TAGS["BINARY_20"])
+        push(result, (length >> 16) & 15)
+        push(result, (length >> 8) & 255)
+        push(result, length & 255)
+    } other {
+        push(result, _WA_TAGS["BINARY_8"])
+        push(result, length)
+    }
+}
+
+task _wap_writeStringRaw(result, strVal) {
+    bytes = wac_strToBytes(strVal)
+    _wap_writeByteLength(result, len(bytes))
+    get b in bytes { push(result, b) }
+}
+
+task _wap_writeJid(result, user, server) {
+    push(result, _WA_TAGS["JID_PAIR"])
+    when len(user) > 0 {
+        _wap_writeString(result, user)
+    } other {
+        push(result, _WA_TAGS["LIST_EMPTY"])
+    }
+    _wap_writeString(result, server)
+}
+
+task _wap_writeString(result, strVal) {
+    when strVal == "" {
+        _wap_writeStringRaw(result, strVal)
+        give nil          # `return` is not an EZ keyword; `give` exits a task
+    }
+
+    token = _wap_getTokenIndex(strVal)
+    when token != nil {
+        when token["dict"] != nil {
+            push(result, _WA_TAGS["DICTIONARY_0"] + token["dict"])
+        }
+        push(result, token["index"])
+    } other {
+        # Check if JID
+        atIdx = -1
+        repeat i = 0 to len(strVal) - 1 {
+            when strVal[i] == "@" { atIdx = i }
+        }
+        when atIdx != -1 {
+            user = substr(strVal, 0, atIdx)
+            server = substr(strVal, atIdx + 1, len(strVal))
+            _wap_writeJid(result, user, server)
+        } other {
+            # Check nibble/hex not fully implemented yet, fallback to raw
+            _wap_writeStringRaw(result, strVal)
+        }
+    }
+}
+
+task _wap_writeListStart(result, listSize) {
+    when listSize == 0 {
+        push(result, _WA_TAGS["LIST_EMPTY"])
+    } other when listSize < 256 {
+        push(result, _WA_TAGS["LIST_8"])
+        push(result, listSize)
+    } other {
+        push(result, _WA_TAGS["LIST_16"])
+        push(result, (listSize >> 8) & 255)
+        push(result, listSize & 255)
+    }
+}
+
+export task wap_encodeNode(node) {
+    result = []
+    
+    attrs = node["attrs"]
+    attrKeys = []
+    get k in attrs {
+        when type(attrs[k]) != "nil" { push(attrKeys, k) }
+    }
+    
+    hasContent = type(node["content"]) != "nil"
+    hasChildren = type(node["children"]) != "nil" and len(node["children"]) > 0
+    
+    listSize = 2 * len(attrKeys) + 1
+    when hasContent or hasChildren { listSize = listSize + 1 }
+    
+    _wap_writeListStart(result, listSize)
+    _wap_writeString(result, node["tag"])
+    
+    get k in attrKeys {
+        _wap_writeString(result, k)
+        _wap_writeString(result, str(attrs[k]))
+    }
+    
+    when hasChildren {
+        _wap_writeListStart(result, len(node["children"]))
+        get child in node["children"] {
+            childBytes = wap_encodeNode(child)
+            get b in childBytes { push(result, b) }
+        }
+    } other when hasContent {
+        content = node["content"]
+        when type(content) == "string" {
+            _wap_writeString(result, content)
+        } other {
+            # Byte array
+            _wap_writeByteLength(result, len(content))
+            get b in content { push(result, b) }
+        }
+    }
+    
+    give result
+}
+
+# ── WABinary Decoder ──────────────────────────────────────────────────────────
+
+task _wap_readString(byteList, posObj) {
+    give _wap_decodeString(byteList, posObj)
+}
+
+task _wap_decodeString(byteList, posObj) {
+    pos = posObj["pos"]
+    when pos >= len(byteList) { throw "wap_decode: EOF" }
+    
+    tag = byteList[pos]
+    posObj["pos"] = pos + 1
+    
+    when tag >= 1 and tag < 236 {
+        give _WA_SINGLE_BYTE_TOKENS[tag]
+    }
+    
+    when tag >= 236 and tag <= 239 {
+        dictIdx = tag - 236
+        tokenIdx = byteList[posObj["pos"]]
+        posObj["pos"] = posObj["pos"] + 1
+        give _WA_DOUBLE_BYTE_TOKENS[dictIdx * 256 + tokenIdx]
+    }
+    
+    when tag == _WA_TAGS["DICTIONARY_0"] or tag == _WA_TAGS["DICTIONARY_1"] or tag == _WA_TAGS["DICTIONARY_2"] or tag == _WA_TAGS["DICTIONARY_3"] {
+        dictIdx = tag - _WA_TAGS["DICTIONARY_0"]
+        tokenIdx = byteList[posObj["pos"]]
+        posObj["pos"] = posObj["pos"] + 1
+        give _WA_DOUBLE_BYTE_TOKENS[dictIdx * 256 + tokenIdx]
+    }
+    
+    when tag == _WA_TAGS["LIST_EMPTY"] { give "" }
+    
+    when tag == _WA_TAGS["BINARY_8"] {
+        length = byteList[posObj["pos"]]
+        posObj["pos"] = posObj["pos"] + 1
+        valBytes = _wac_sliceBytes(byteList, posObj["pos"], length)
+        posObj["pos"] = posObj["pos"] + length
+        give wac_bytesToStr(valBytes)
+    }
+    
+    when tag == _WA_TAGS["BINARY_20"] {
+        b0 = byteList[posObj["pos"]]
+        b1 = byteList[posObj["pos"]+1]
+        b2 = byteList[posObj["pos"]+2]
+        length = ((b0 & 15) << 16) | (b1 << 8) | b2
+        posObj["pos"] = posObj["pos"] + 3
+        valBytes = _wac_sliceBytes(byteList, posObj["pos"], length)
+        posObj["pos"] = posObj["pos"] + length
+        give wac_bytesToStr(valBytes)
+    }
+    
+    when tag == _WA_TAGS["BINARY_32"] {
+        b0 = byteList[posObj["pos"]]
+        b1 = byteList[posObj["pos"]+1]
+        b2 = byteList[posObj["pos"]+2]
+        b3 = byteList[posObj["pos"]+3]
+        length = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        posObj["pos"] = posObj["pos"] + 4
+        valBytes = _wac_sliceBytes(byteList, posObj["pos"], length)
+        posObj["pos"] = posObj["pos"] + length
+        give wac_bytesToStr(valBytes)
+    }
+    
+    when tag == _WA_TAGS["JID_PAIR"] {
+        user = _wap_decodeString(byteList, posObj)
+        server = _wap_decodeString(byteList, posObj)
+        when user != "" { give user + "@" + server }
+        give server
+    }
+    
+    when tag == _WA_TAGS["NIBBLE_8"] or tag == _WA_TAGS["HEX_8"] {
+        lengthByte = byteList[posObj["pos"]]
+        posObj["pos"] = posObj["pos"] + 1
+        length = lengthByte & 127
+        # Simplified: not doing proper nibble unpack yet
+        byteCount = (length + 1) / 2
+        posObj["pos"] = posObj["pos"] + byteCount
+        give "[packed_string]"
+    }
+    
+    throw "wap_decodeString: Unsupported tag " + str(tag)
+}
+
+task _wap_readListSize(byteList, posObj, listTag) {
+    when listTag == _WA_TAGS["LIST_EMPTY"] { give 0 }
+    when listTag == _WA_TAGS["LIST_8"] {
+        size = byteList[posObj["pos"]]
+        posObj["pos"] = posObj["pos"] + 1
+        give size
+    }
+    when listTag == _WA_TAGS["LIST_16"] {
+        b0 = byteList[posObj["pos"]]
+        b1 = byteList[posObj["pos"]+1]
+        posObj["pos"] = posObj["pos"] + 2
+        give (b0 << 8) | b1
+    }
+    throw "wap_readListSize: Invalid list tag " + str(listTag)
+}
+
+task _wap_decodeNodeInner(byteList, posObj) {
+    listTag = byteList[posObj["pos"]]
+    posObj["pos"] = posObj["pos"] + 1
+    
+    listSize = _wap_readListSize(byteList, posObj, listTag)
+    when listSize == 0 { throw "wap_decodeNode: list size 0" }
+    
+    tag = _wap_decodeString(byteList, posObj)
+    attrs = {}
+    attrCount = (listSize - 1) / 2 # Integer division
+    hasContentOrChildren = (listSize - 1) % 2 == 1
+    
+    repeat i = 0 to attrCount - 1 {
+        key = _wap_decodeString(byteList, posObj)
+        val = _wap_decodeString(byteList, posObj)
+        attrs[key] = val
+    }
+    
+    children = []
+    content = nil
+    
+    when hasContentOrChildren {
+        nextTag = byteList[posObj["pos"]]
+        when nextTag == _WA_TAGS["LIST_EMPTY"] or nextTag == _WA_TAGS["LIST_8"] or nextTag == _WA_TAGS["LIST_16"] {
+            childListSize = _wap_readListSize(byteList, posObj, nextTag)
+            repeat i = 0 to childListSize - 1 {
+                push(children, _wap_decodeNodeInner(byteList, posObj))
+            }
+        } other {
+            # Content string/bytes
+            content = _wap_decodeString(byteList, posObj)
+        }
+    }
+    
+    give { "tag": tag, "attrs": attrs, "children": children, "content": content }
+}
+
+export task wap_decodeNode(byteList, pos) {
+    posObj = { "pos": pos }
+    node = _wap_decodeNodeInner(byteList, posObj)
+    give { "node": node, "nextOffset": posObj["pos"] }
+}

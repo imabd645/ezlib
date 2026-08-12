@@ -1,0 +1,113 @@
+# ============================================================================
+# color — test suite
+#   ez test.ez
+# ============================================================================
+
+use "color"
+use "color/codes.ez"
+
+PASS = 0
+FAIL = 0
+E = chr(27)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+
+out "color tests"
+Color.enable()
+
+# ── codes ───────────────────────────────────────────────────────────────────
+check("red wraps and resets", red("x"), E + "[31mx" + E + "[0m")
+check("green code", green("x"), E + "[32mx" + E + "[0m")
+check("bold code", bold("x"), E + "[1mx" + E + "[0m")
+# An unclosed sequence colours everything printed afterwards, including the
+# shell prompt after the program exits.
+check("always resets", endsWith(red("x"), E + "[0m"), true)
+check("empty text still resets", endsWith(red(""), E + "[0m"), true)
+
+# ── chaining ────────────────────────────────────────────────────────────────
+chained = Color().red().bold().text("x")
+check("chain applies both", contains(chained, "[31m") and contains(chained, "[1m"), true)
+check("chain resets once", len(re_find_all(chained, "\\[0m")), 1)
+check("no codes means plain text", Color().text("x"), "x")
+check("background code", contains(Color().onRed().text("x"), "[41m"), true)
+check("256 colour", contains(Color().fg256(42).text("x"), "[38;5;42m"), true)
+check("truecolor", contains(Color().rgb(1, 2, 3).text("x"), "[38;2;1;2;3m"), true)
+check("hex colour", contains(Color().hex("#ff8800").text("x"), "[38;2;255;136;0m"), true)
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("unknown colour name", || Color().foreground("chartreuse"))
+throws("unknown style name", || Color().style("sparkle"))
+
+# ── stripping and measuring ─────────────────────────────────────────────────
+# This is what table alignment depends on: a coloured string is longer in
+# bytes than it looks on screen.
+coloured = red("abc")
+check("strip removes codes", stripAnsi(coloured), "abc")
+check("visible length", visibleLength(coloured), 3)
+check("raw length is longer", len(coloured) > 3, true)
+check("strip plain text unchanged", stripAnsi("abc"), "abc")
+check("visible length of plain", visibleLength("abc"), 3)
+check("strip empty", stripAnsi(""), "")
+check("strip multiple sequences", stripAnsi(red("a") + green("b")), "ab")
+check("strip nested styles", stripAnsi(Color().red().bold().text("x")), "x")
+check("hasAnsi true", hasAnsi(coloured), true)
+check("hasAnsi false", hasAnsi("abc"), false)
+# A sequence with several parameters must be consumed whole.
+check("strip 256 colour", stripAnsi(Color().fg256(200).text("x")), "x")
+check("strip truecolor", stripAnsi(Color().rgb(1, 2, 3).text("x")), "x")
+
+# ── enable / disable ────────────────────────────────────────────────────────
+# Disabling makes every helper a no-op, so calling code needs no conditionals.
+Color.disable()
+check("disabled is plain", red("x"), "x")
+check("disabled chain is plain", Color().red().bold().text("x"), "x")
+check("isEnabled false", Color.isEnabled(), false)
+Color.enable()
+check("re-enabled", contains(red("x"), "[31m"), true)
+check("isEnabled true", Color.isEnabled(), true)
+
+# ── hex conversion ──────────────────────────────────────────────────────────
+checkVal("hex to rgb", hexToRgb("#ff8800"), [255, 136, 0])
+checkVal("hex without hash", hexToRgb("ff8800"), [255, 136, 0])
+checkVal("short hex expands", hexToRgb("#f80"), [255, 136, 0])
+checkVal("lowercase hex", hexToRgb("#aabbcc"), [170, 187, 204])
+checkVal("black", hexToRgb("#000000"), [0, 0, 0])
+checkVal("white", hexToRgb("#ffffff"), [255, 255, 255])
+check("rgb to hex", rgbToHex(255, 136, 0), "#ff8800")
+check("rgb to hex pads", rgbToHex(0, 0, 0), "#000000")
+check("hex round trip", rgbToHex(hexToRgb("#3a7bd5")[0], hexToRgb("#3a7bd5")[1],
+      hexToRgb("#3a7bd5")[2]), "#3a7bd5")
+throws("bad hex length", || hexToRgb("#ff88"))
+throws("bad hex digits", || hexToRgb("#gggggg"))
+
+# ── semantic helpers ────────────────────────────────────────────────────────
+check("success is green and bold", contains(success("x"), "[32m") and contains(success("x"), "[1m"), true)
+check("failure is red", contains(failure("x"), "[31m"), true)
+check("warning is yellow", contains(warning("x"), "[33m"), true)
+check("info is cyan", contains(info("x"), "[36m"), true)
+check("muted is gray", contains(muted("x"), "[90m"), true)
+check("semantic strips to plain", stripAnsi(success("done")), "done")
+
+check("alphabet has 8 base colours", has_key(FG, "red") and has_key(FG, "white"), true)
+check("bright variants present", FG["brightRed"], 91)
+check("background offset", BG["red"], 41)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

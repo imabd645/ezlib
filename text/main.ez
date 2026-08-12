@@ -1,0 +1,596 @@
+# ============================================================================
+# text — the string work every program ends up writing
+#
+#   use "text"
+#
+#   slug("Héllo, World!")             -> "hello-world"
+#   truncate("a long sentence", 10)   -> "a long se…"
+#   wrap(paragraph, 72)
+#   snakeCase("userFirstName")        -> "user_first_name"
+#   similarity("kitten", "sitting")   -> 0.571…
+#
+# Everything that talks about a length or a position means CHARACTERS, not
+# bytes. EZ's `len()` counts bytes, so `substr(name, 0, 10)` on a name with an
+# accent in it cuts a character in half; that class of bug is why this package
+# exists rather than everyone writing these six functions again.
+# ============================================================================
+
+use "text/unicode.ez"
+
+# ── trimming and whitespace ─────────────────────────────────────────────────
+
+# Collapses every run of whitespace to one space and trims the ends. What you
+# want before storing anything a person typed.
+export task squish(text) {
+    result = ""
+    spaced = false
+    get ch in chars(trim(str(text))) {
+        when isSpace(ch) {
+            when spaced == false { result = result + " " }
+            spaced = true
+        }
+        other {
+            result = result + ch
+            spaced = false
+        }
+    }
+    give result
+}
+
+task isSpace(ch) { give ch == " " or ch == "\t" or ch == "\n" or ch == "\r" }
+
+export task lines(text) { give split(replace(str(text), "\r\n", "\n"), "\n") }
+
+export task words(text) {
+    found = []
+    current = ""
+    get ch in chars(str(text)) {
+        when isSpace(ch) {
+            when current != "" { push(found, current) }
+            current = ""
+        }
+        other { current = current + ch }
+    }
+    when current != "" { push(found, current) }
+    give found
+}
+
+export task wordCount(text) { give len(words(text)) }
+
+export task stripPrefix(text, prefix) {
+    body = str(text)
+    when startsWith(body, prefix) { give substr(body, len(prefix), len(body) - len(prefix)) }
+    give body
+}
+
+export task stripSuffix(text, suffix) {
+    body = str(text)
+    when endsWith(body, suffix) { give substr(body, 0, len(body) - len(suffix)) }
+    give body
+}
+
+# Removes the common leading indentation, so a block quoted inside indented
+# code comes out flush without disturbing its internal structure.
+export task dedent(text) {
+    rows = lines(text)
+    smallest = -1
+    get row in rows {
+        when trim(row) != "" {
+            depth = leadingSpaces(row)
+            when smallest < 0 or depth < smallest { smallest = depth }
+        }
+    }
+    when smallest <= 0 { give str(text) }
+    trimmed = []
+    get row in rows {
+        when len(row) >= smallest { push(trimmed, substr(row, smallest, len(row) - smallest)) }
+        other { push(trimmed, trim(row)) }
+    }
+    give join(trimmed, "\n")
+}
+
+task leadingSpaces(row) {
+    count = 0
+    get ch in split(row, "") {
+        when ch == " " { count = count + 1 }
+        other when ch == "\t" { count = count + 4 }
+        other { give count }
+    }
+    give count
+}
+
+export task indent(text, spaces) {
+    prefix = repeatText(" ", spaces)
+    padded = []
+    get row in lines(text) {
+        # Indenting a blank line just leaves trailing whitespace behind.
+        when trim(row) == "" { push(padded, row) }
+        other { push(padded, prefix + row) }
+    }
+    give join(padded, "\n")
+}
+
+export task repeatText(text, times) {
+    result = ""
+    repeat i = 1 to times { result = result + str(text) }
+    give result
+}
+
+# ── length ──────────────────────────────────────────────────────────────────
+
+export task padStart(text, width, filler) {
+    pad = filler
+    when pad == nil or pad == "" { pad = " " }
+    body = str(text)
+    while charCount(body) < width { body = pad + body }
+    give body
+}
+
+export task padEnd(text, width, filler) {
+    pad = filler
+    when pad == nil or pad == "" { pad = " " }
+    body = str(text)
+    while charCount(body) < width { body = body + pad }
+    give body
+}
+
+export task center(text, width, filler) {
+    pad = filler
+    when pad == nil or pad == "" { pad = " " }
+    body = str(text)
+    while charCount(body) < width {
+        body = body + pad
+        when charCount(body) < width { body = pad + body }
+    }
+    give body
+}
+
+# `width` counts characters including the suffix, so the result never exceeds
+# it -- a truncation that overflows its column is worse than no truncation.
+export task truncate(text, width, suffix = "…") {
+    body = str(text)
+    when charCount(body) <= width { give body }
+    tail = str(suffix)
+    room = width - charCount(tail)
+    when room < 0 { give charSlice(body, 0, width) }
+    give charSlice(body, 0, room) + tail
+}
+
+# Cuts on a word boundary instead of mid-word.
+export task truncateWords(text, width, suffix = "…") {
+    body = str(text)
+    when charCount(body) <= width { give body }
+    tail = str(suffix)
+    room = width - charCount(tail)
+    when room < 1 { give truncate(body, width, suffix) }
+    cut = charSlice(body, 0, room)
+    at = lastSpaceIn(cut)
+    when at > 0 { cut = charSlice(cut, 0, at) }
+    give trim(cut) + tail
+}
+
+task lastSpaceIn(text) {
+    letters = chars(text)
+    at = -1
+    repeat i = 0 to len(letters) - 1 {
+        when isSpace(letters[i]) { at = i }
+    }
+    give at
+}
+
+# ── wrapping ────────────────────────────────────────────────────────────────
+
+# Greedy word wrap. A word longer than the width is broken rather than allowed
+# to overflow -- a URL in a paragraph should not push the whole block out.
+export task wrap(text, width) {
+    when width < 1 { throw Exception("text: a wrap width must be at least 1") }
+    wrapped = []
+    get paragraph in lines(text) {
+        when trim(paragraph) == "" { push(wrapped, "") }
+        other {
+            current = ""
+            get word in words(paragraph) {
+                piece = word
+                while charCount(piece) > width {
+                    when current != "" {
+                        push(wrapped, current)
+                        current = ""
+                    }
+                    push(wrapped, charSlice(piece, 0, width))
+                    piece = charSlice(piece, width, charCount(piece) - width)
+                }
+                when current == "" { current = piece }
+                other when charCount(current) + 1 + charCount(piece) <= width {
+                    current = current + " " + piece
+                }
+                other {
+                    push(wrapped, current)
+                    current = piece
+                }
+            }
+            when current != "" { push(wrapped, current) }
+        }
+    }
+    give join(wrapped, "\n")
+}
+
+# ── case ────────────────────────────────────────────────────────────────────
+
+# The one function the others are built on: any of camelCase, snake_case,
+# kebab-case, "Title Case" or "SCREAMING_SNAKE" into its component words.
+export task splitWords(text) {
+    body = str(text)
+    found = []
+    current = ""
+    previous = ""
+    get ch in chars(body) {
+        isBreak = ch == "_" or ch == "-" or ch == "." or isSpace(ch) or ch == "/"
+        when isBreak {
+            when current != "" { push(found, current) }
+            current = ""
+        }
+        other {
+            # A lower-to-upper transition is a word boundary in camelCase, but
+            # "HTTPServer" must come out as HTTP + Server, not H+T+T+P+Server.
+            startsWord = isUpper(ch) and previous != "" and
+                         (isLower(previous) or isDigit(previous))
+            when startsWord {
+                when current != "" { push(found, current) }
+                current = ch
+            }
+            other { current = current + ch }
+        }
+        previous = ch
+    }
+    when current != "" { push(found, current) }
+    give splitRuns(found)
+}
+
+# "HTTPServer" arrives here as one run; the acronym ends where the next
+# capitalised word begins.
+task splitRuns(pieces) {
+    result = []
+    get piece in pieces {
+        letters = chars(piece)
+        run = ""
+        index = 0
+        while index < len(letters) {
+            ch = letters[index]
+            nextCh = ""
+            when index + 1 < len(letters) { nextCh = letters[index + 1] }
+            when isUpper(ch) and isUpper(nextCh) == false and nextCh != "" and run != "" and isUpper(run) {
+                push(result, run)
+                run = ch
+            }
+            other { run = run + ch }
+            index = index + 1
+        }
+        when run != "" { push(result, run) }
+    }
+    give result
+}
+
+task isUpper(ch) { give ch != "" and ch == upper(ch) and ch != lower(ch) }
+task isLower(ch) { give ch != "" and ch == lower(ch) and ch != upper(ch) }
+task isDigit(ch) { give ch != "" and indexOf("0123456789", ch) >= 0 }
+
+export task camelCase(text) {
+    pieces = splitWords(text)
+    when len(pieces) == 0 { give "" }
+    result = lower(pieces[0])
+    repeat i = 1 to len(pieces) - 1 { result = result + capitalise(pieces[i]) }
+    give result
+}
+
+export task pascalCase(text) {
+    result = ""
+    get piece in splitWords(text) { result = result + capitalise(piece) }
+    give result
+}
+
+export task snakeCase(text) { give lower(join(splitWords(text), "_")) }
+export task kebabCase(text) { give lower(join(splitWords(text), "-")) }
+export task constantCase(text) { give upper(join(splitWords(text), "_")) }
+
+export task capitalise(text) {
+    body = str(text)
+    when body == "" { give "" }
+    first = charAt(body, 0)
+    give upper(first) + lower(charSlice(body, 1, charCount(body) - 1))
+}
+
+export task capitalize(text) { give capitalise(text) }
+
+export task titleCase(text) {
+    pieces = []
+    get piece in splitWords(text) { push(pieces, capitalise(piece)) }
+    give join(pieces, " ")
+}
+
+# Only the first letter, leaving the rest as typed -- names and acronyms in the
+# middle of a sentence should not be flattened.
+export task sentenceCase(text) {
+    body = trim(str(text))
+    when body == "" { give "" }
+    give upper(charAt(body, 0)) + charSlice(body, 1, charCount(body) - 1)
+}
+
+# "user_first_name" or "userFirstName" into "User first name".
+export task humanise(text) {
+    pieces = splitWords(text)
+    when len(pieces) == 0 { give "" }
+    lowered = []
+    get piece in pieces { push(lowered, lower(piece)) }
+    give sentenceCase(join(lowered, " "))
+}
+
+export task humanize(text) { give humanise(text) }
+
+# ── slugs ───────────────────────────────────────────────────────────────────
+
+# Accented Latin letters folded to ASCII, so "Crème Brûlée" becomes
+# "creme-brulee" rather than losing the words entirely.
+TRANSLITERATIONS = {
+    "à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a", "ā": "a", "ă": "a", "ą": "a",
+    "è": "e", "é": "e", "ê": "e", "ë": "e", "ē": "e", "ĕ": "e", "ė": "e", "ę": "e", "ě": "e",
+    "ì": "i", "í": "i", "î": "i", "ï": "i", "ī": "i", "į": "i", "ı": "i",
+    "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o", "ø": "o", "ō": "o", "ő": "o",
+    "ù": "u", "ú": "u", "û": "u", "ü": "u", "ū": "u", "ů": "u", "ű": "u", "ų": "u",
+    "ç": "c", "ć": "c", "č": "c", "ñ": "n", "ń": "n", "ň": "n",
+    "ý": "y", "ÿ": "y", "š": "s", "ś": "s", "ş": "s", "ž": "z", "ź": "z", "ż": "z",
+    "ł": "l", "đ": "d", "ď": "d", "ť": "t", "ř": "r", "ğ": "g",
+    "æ": "ae", "œ": "oe", "ß": "ss", "þ": "th", "ð": "d",
+
+    # The upper-case forms have to be listed too. EZ's `lower()` only folds
+    # ASCII, so "CAFÉ" arrives here as "cafÉ" -- without these, the É would be
+    # dropped as unmappable and the slug would come out "caf".
+    "À": "a", "Á": "a", "Â": "a", "Ã": "a", "Ä": "a", "Å": "a", "Ā": "a", "Ă": "a", "Ą": "a",
+    "È": "e", "É": "e", "Ê": "e", "Ë": "e", "Ē": "e", "Ĕ": "e", "Ė": "e", "Ę": "e", "Ě": "e",
+    "Ì": "i", "Í": "i", "Î": "i", "Ï": "i", "Ī": "i", "Į": "i", "İ": "i",
+    "Ò": "o", "Ó": "o", "Ô": "o", "Õ": "o", "Ö": "o", "Ø": "o", "Ō": "o", "Ő": "o",
+    "Ù": "u", "Ú": "u", "Û": "u", "Ü": "u", "Ū": "u", "Ů": "u", "Ű": "u", "Ų": "u",
+    "Ç": "c", "Ć": "c", "Č": "c", "Ñ": "n", "Ń": "n", "Ň": "n",
+    "Ý": "y", "Ÿ": "y", "Š": "s", "Ś": "s", "Ş": "s", "Ž": "z", "Ź": "z", "Ż": "z",
+    "Ł": "l", "Đ": "d", "Ď": "d", "Ť": "t", "Ř": "r", "Ğ": "g",
+    "Æ": "ae", "Œ": "oe", "Þ": "th", "Ð": "d",
+
+    "€": "eur", "£": "gbp", "$": "usd", "&": "and", "@": "at", "%": "percent",
+    "©": "c", "®": "r"
+}
+
+# A URL-safe, filename-safe identifier. Lower case, ASCII, single hyphens, no
+# leading or trailing hyphen.
+export task slug(text, separator = "-") {
+    # Folded before lowering, not after: the table carries both cases because
+    # `lower()` cannot fold anything outside ASCII.
+    folded = ""
+    get ch in chars(str(text)) {
+        when has_key(TRANSLITERATIONS, ch) { folded = folded + TRANSLITERATIONS[ch] }
+        other { folded = folded + ch }
+    }
+    folded = lower(folded)
+    result = ""
+    lastWasSeparator = true
+    get ch in chars(folded) {
+        # An apostrophe disappears rather than separating: "Tom's Diner" is
+        # "toms-diner", not "tom-s-diner".
+        when ch == "'" or ch == "’" { skip }
+        keep = indexOf("abcdefghijklmnopqrstuvwxyz0123456789", ch) >= 0
+        when keep {
+            result = result + ch
+            lastWasSeparator = false
+        }
+        # A run of anything else collapses to one separator, so "a -- b" is
+        # "a-b" and not "a----b".
+        other when lastWasSeparator == false {
+            result = result + separator
+            lastWasSeparator = true
+        }
+    }
+    give stripSuffix(result, separator)
+}
+
+# ── redaction ───────────────────────────────────────────────────────────────
+
+# Leaves enough to tell two values apart and not enough to use one. For
+# printing a token or a card number.
+export task mask(text, visible = 4, filler = "*") {
+    body = str(text)
+    total = charCount(body)
+    when total <= visible { give repeatText(filler, total) }
+    give repeatText(filler, total - visible) + charSlice(body, total - visible, visible)
+}
+
+export task maskEmail(address) {
+    body = str(address)
+    when contains(body, "@") == false { give mask(body, 0) }
+    at = indexOf(body, "@")
+    name = substr(body, 0, at)
+    domain = substr(body, at, len(body) - at)
+    when charCount(name) <= 1 { give repeatText("*", charCount(name)) + domain }
+    give charAt(name, 0) + repeatText("*", charCount(name) - 1) + domain
+}
+
+export task initials(name, limit = 2) {
+    letters = []
+    get word in words(str(name)) {
+        when len(letters) < limit and word != "" { push(letters, upper(charAt(word, 0))) }
+    }
+    give join(letters, "")
+}
+
+# ── counting and comparing ──────────────────────────────────────────────────
+
+export task countOccurrences(text, needle) {
+    when needle == nil or needle == "" { give 0 }
+    body = str(text)
+    total = 0
+    at = 0
+    while at <= len(body) - len(needle) {
+        when substr(body, at, len(needle)) == needle {
+            total = total + 1
+            at = at + len(needle)
+        }
+        other { at = at + 1 }
+    }
+    give total
+}
+
+# Levenshtein distance in characters: how many single-character edits turn one
+# string into the other.
+export task editDistance(a, b) {
+    left = chars(str(a))
+    right = chars(str(b))
+    when len(left) == 0 { give len(right) }
+    when len(right) == 0 { give len(left) }
+
+    # Only the previous row is needed, so this is O(len(right)) memory rather
+    # than the full matrix -- which matters when comparing paragraphs.
+    previous = []
+    repeat j = 0 to len(right) { push(previous, j) }
+
+    repeat i = 1 to len(left) {
+        current = [i]
+        repeat j = 1 to len(right) {
+            cost = 1
+            when left[i - 1] == right[j - 1] { cost = 0 }
+            best = previous[j] + 1
+            when current[j - 1] + 1 < best { best = current[j - 1] + 1 }
+            when previous[j - 1] + cost < best { best = previous[j - 1] + cost }
+            push(current, best)
+        }
+        previous = current
+    }
+    give previous[len(right)]
+}
+
+# 0 for nothing in common, 1 for identical. Useful for "did you mean…".
+export task similarity(a, b) {
+    left = str(a)
+    right = str(b)
+    when left == right { give 1 }
+    longest = charCount(left)
+    when charCount(right) > longest { longest = charCount(right) }
+    when longest == 0 { give 1 }
+    give (longest - editDistance(left, right)) / longest
+}
+
+# The closest of `options` to `text`, or nil when nothing is close enough.
+# For turning "instal" into "did you mean install?".
+export task closestMatch(text, options, threshold = 0.6) {
+    best = nil
+    bestScore = 0
+    get option in options {
+        score = similarity(lower(str(text)), lower(str(option)))
+        when score > bestScore {
+            bestScore = score
+            best = option
+        }
+    }
+    when bestScore < threshold { give nil }
+    give best
+}
+
+# ── numbers and words ───────────────────────────────────────────────────────
+
+IRREGULAR_PLURALS = {
+    "person": "people", "child": "children", "man": "men", "woman": "women",
+    "tooth": "teeth", "foot": "feet", "mouse": "mice", "goose": "geese",
+    "ox": "oxen", "leaf": "leaves", "life": "lives", "knife": "knives",
+    "wife": "wives", "half": "halves", "loaf": "loaves", "self": "selves",
+    "datum": "data", "index": "indices", "matrix": "matrices", "vertex": "vertices",
+    "analysis": "analyses", "crisis": "crises", "thesis": "theses",
+    "sheep": "sheep", "series": "series", "species": "species", "fish": "fish",
+    "deer": "deer", "aircraft": "aircraft", "information": "information"
+}
+
+export task pluralise(word, count = 2) {
+    body = str(word)
+    when count == 1 { give body }
+    key = lower(body)
+    when has_key(IRREGULAR_PLURALS, key) { give matchCase(body, IRREGULAR_PLURALS[key]) }
+    # -y after a consonant becomes -ies, but "day" is "days".
+    when endsWith(key, "y") and charCount(key) > 1 {
+        beforeY = charAt(key, charCount(key) - 2)
+        when indexOf("aeiou", beforeY) < 0 {
+            give substr(body, 0, len(body) - 1) + "ies"
+        }
+    }
+    when endsWith(key, "s") or endsWith(key, "x") or endsWith(key, "z") or
+         endsWith(key, "ch") or endsWith(key, "sh") {
+        give body + "es"
+    }
+    give body + "s"
+}
+
+export task pluralize(word, count = 2) { give pluralise(word, count) }
+
+task matchCase(original, replacement) {
+    when original == upper(original) and original != lower(original) { give upper(replacement) }
+    when charCount(original) > 0 and isUpper(charAt(original, 0)) { give capitalise(replacement) }
+    give replacement
+}
+
+# "1 file" / "2 files", which is the actual thing people want a pluraliser for.
+export task countOf(count, word) { give str(count) + " " + pluralise(word, count) }
+
+export task ordinal(n) {
+    whole = floor(n)
+    suffix = "th"
+    # 11th, 12th and 13th are the exceptions to the 1st/2nd/3rd rule.
+    when whole % 100 < 11 or whole % 100 > 13 {
+        when whole % 10 == 1 { suffix = "st" }
+        other when whole % 10 == 2 { suffix = "nd" }
+        other when whole % 10 == 3 { suffix = "rd" }
+    }
+    give str(whole) + suffix
+}
+
+# "a" or "an", by sound as far as the spelling allows.
+export task article(word) {
+    body = lower(trim(str(word)))
+    when body == "" { give "a" }
+    first = charAt(body, 0)
+    # The common cases where the spelling and the sound disagree.
+    get exception in ["hour", "honest", "honour", "honor", "heir"] {
+        when startsWith(body, exception) { give "an" }
+    }
+    get exception in ["university", "user", "unicorn", "unique", "european", "one"] {
+        when startsWith(body, exception) { give "a" }
+    }
+    when indexOf("aeiou", first) >= 0 { give "an" }
+    give "a"
+}
+
+# ── lists ───────────────────────────────────────────────────────────────────
+
+# "a, b and c" -- what you want in a sentence, where join() gives "a, b, c".
+export task listSentence(items, conjunction = "and") {
+    total = len(items)
+    when total == 0 { give "" }
+    when total == 1 { give str(items[0]) }
+    when total == 2 { give str(items[0]) + " " + conjunction + " " + str(items[1]) }
+    head = []
+    repeat i = 0 to total - 2 { push(head, str(items[i])) }
+    give join(head, ", ") + " " + conjunction + " " + str(items[total - 1])
+}
+
+# ── excerpts ────────────────────────────────────────────────────────────────
+
+# The text around a match, for a search result. Ellipses only where something
+# was actually cut off.
+export task excerpt(text, phrase, radius = 40) {
+    body = str(text)
+    at = indexOf(lower(body), lower(str(phrase)))
+    when at < 0 { give truncate(body, radius * 2) }
+    startChars = charCount(substr(body, 0, at))
+    from = startChars - radius
+    when from < 0 { from = 0 }
+    length = radius * 2 + charCount(str(phrase))
+    piece = charSlice(body, from, length)
+    prefix = ""
+    when from > 0 { prefix = "…" }
+    suffix = ""
+    when from + length < charCount(body) { suffix = "…" }
+    give prefix + piece + suffix
+}

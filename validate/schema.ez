@@ -1,0 +1,230 @@
+# ============================================================================
+# validate/schema.ez — the Schema model
+#
+# Schemas are built by chaining, then checked against a value. A check never
+# throws for invalid data: it returns every problem it found, because a form
+# that reports one error at a time is a bad form.
+#
+# Coercion is deliberately limited to what is unambiguous (the string "12" for
+# a number field, "true"/"false" for a bool). Anything looser would let bad
+# data through under the guise of helpfulness.
+# ============================================================================
+
+use "validate/rules.ez"
+
+export model Schema {
+
+    init(kind) {
+        self.kind = kind
+        self.rules = []
+        self.isOptional = false
+        self.isNullable = false
+        self.hasDefault = false
+        self.defaultValue = nil
+        self.itemSchema = nil
+        self.fields = nil
+        self.isStrict = false
+        self.doTrim = false
+        self.label = nil
+    }
+
+    # ── modifiers ───────────────────────────────────────────────────────────
+
+    task addRule(name, arg, message) {
+        push(self.rules, { "name": name, "arg": arg, "message": message })
+        give self
+    }
+
+    task min(n) { give self.addRule("min", n, nil) }
+    task max(n) { give self.addRule("max", n, nil) }
+    task length(n) { give self.addRule("length", n, nil) }
+    task integer() { give self.addRule("integer", nil, nil) }
+    task positive() { give self.addRule("positive", nil, nil) }
+    task negative() { give self.addRule("negative", nil, nil) }
+    task email() { give self.addRule("email", nil, nil) }
+    task url() { give self.addRule("url", nil, nil) }
+    task slug() { give self.addRule("slug", nil, nil) }
+    task uuid() { give self.addRule("uuid", nil, nil) }
+    task notEmpty() { give self.addRule("notEmpty", nil, nil) }
+    task oneOf(values) { give self.addRule("oneOf", values, nil) }
+    task startsWith(prefix) { give self.addRule("startsWith", prefix, nil) }
+    task endsWith(suffix) { give self.addRule("endsWith", suffix, nil) }
+    task contains(part) { give self.addRule("contains", part, nil) }
+    task pattern(re, message) { give self.addRule("pattern", re, message) }
+    task custom(fn, message) { give self.addRule("custom", fn, message) }
+
+    task optional() { self.isOptional = true  give self }
+    task nullable() { self.isNullable = true  give self }
+    task strict() { self.isStrict = true  give self }
+    task trimmed() { self.doTrim = true  give self }
+    task named(text) { self.label = text  give self }
+
+    task withDefault(value) {
+        self.hasDefault = true
+        self.defaultValue = value
+        self.isOptional = true
+        give self
+    }
+
+    # ── checking ────────────────────────────────────────────────────────────
+
+    task check(value) {
+        errors = []
+        result = self.walk(value, "", errors)
+        give { "ok": len(errors) == 0, "value": result, "errors": errors }
+    }
+
+    task addError(errors, path, message) {
+        where = path
+        when where == "" { where = "value" }
+        when self.label != nil { where = self.label }
+        push(errors, { "path": where, "message": message })
+        give nil
+    }
+
+    # Returns the coerced value, appending any problems to `errors`.
+    task walk(value, path, errors) {
+        current = value
+
+        # ── absence ─────────────────────────────────────────────────────────
+        when current == nil {
+            when self.hasDefault { give self.defaultValue }
+            when self.isNullable { give nil }
+            when self.isOptional { give nil }
+            self.addError(errors, path, "is required")
+            give nil
+        }
+
+        # ── type ────────────────────────────────────────────────────────────
+        t = typeOf(current)
+
+        when self.kind == "string" {
+            when t == "integer" or t == "float" or t == "bool" { current = str(current) }
+            other {
+                when t != "string" {
+                    self.addError(errors, path, "must be text")
+                    give nil
+                }
+            }
+            when self.doTrim { current = trim(current) }
+        }
+        when self.kind == "number" {
+            when t == "string" {
+                body = trim(current)
+                # Only a fully numeric string converts; num("12abc") is 12 in
+                # EZ, which would quietly accept nonsense.
+                when valIsNumeric(body) { current = num(body) }
+                other {
+                    self.addError(errors, path, "must be a number")
+                    give nil
+                }
+            }
+            other {
+                when t != "integer" and t != "float" {
+                    self.addError(errors, path, "must be a number")
+                    give nil
+                }
+            }
+        }
+        when self.kind == "bool" {
+            when t == "string" {
+                lowered = lower(trim(current))
+                when lowered == "true" or lowered == "1" or lowered == "yes" { current = true }
+                other {
+                    when lowered == "false" or lowered == "0" or lowered == "no" { current = false }
+                    other {
+                        self.addError(errors, path, "must be true or false")
+                        give nil
+                    }
+                }
+            }
+            other {
+                when t != "bool" {
+                    self.addError(errors, path, "must be true or false")
+                    give nil
+                }
+            }
+        }
+        when self.kind == "array" {
+            when t != "array" and t != "list" {
+                self.addError(errors, path, "must be a list")
+                give nil
+            }
+        }
+        when self.kind == "object" {
+            when t != "dictionary" {
+                self.addError(errors, path, "must be an object")
+                give nil
+            }
+        }
+
+        # ── rules ───────────────────────────────────────────────────────────
+        get rule in self.rules {
+            message = valApplyRule(rule, current)
+            when message != nil { self.addError(errors, path, message) }
+        }
+
+        # ── children ────────────────────────────────────────────────────────
+        when self.kind == "array" and self.itemSchema != nil {
+            checked = []
+            index = 0
+            get item in current {
+                childPath = `{path}[{index}]`
+                when path == "" { childPath = `[{index}]` }
+                push(checked, self.itemSchema.walk(item, childPath, errors))
+                index = index + 1
+            }
+            give checked
+        }
+        when self.kind == "object" and self.fields != nil {
+            checked = {}
+            get field in keys(self.fields) {
+                childPath = field
+                when path != "" { childPath = path + "." + field }
+                fieldSchema = self.fields[field]
+                supplied = nil
+                when has_key(current, field) { supplied = current[field] }
+                checkedValue = fieldSchema.walk(supplied, childPath, errors)
+                # Absent optional fields are left out rather than stored as
+                # nil, so has_key stays meaningful on the result.
+                when checkedValue != nil { checked[field] = checkedValue }
+                other {
+                    when has_key(current, field) and fieldSchema.isNullable {
+                        checked[field] = nil
+                    }
+                }
+            }
+            when self.isStrict {
+                get supplied in keys(current) {
+                    when has_key(self.fields, supplied) == false {
+                        childPath = supplied
+                        when path != "" { childPath = path + "." + supplied }
+                        push(errors, { "path": childPath, "message": "is not an allowed field" })
+                    }
+                }
+            }
+            give checked
+        }
+        give current
+    }
+}
+
+export task valIsNumeric(s) {
+    when len(s) == 0 { give false }
+    body = s
+    when startsWith(s, "-") or startsWith(s, "+") { body = substr(s, 1, len(s) - 1) }
+    when len(body) == 0 { give false }
+    dots = 0
+    digits = 0
+    limit = len(body)
+    repeat i = 0 to limit - 1 {
+        c = substr(body, i, 1)
+        when c == "." { dots = dots + 1 }
+        other {
+            code = ord(c)
+            when code < 48 or code > 57 { give false }
+            digits = digits + 1
+        }
+    }
+    give digits > 0 and dots <= 1
+}

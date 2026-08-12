@@ -1,0 +1,136 @@
+# ============================================================================
+# Clipboard package test suite
+#
+# Saves and restores whatever the user had on the clipboard.
+# ============================================================================
+use "clipboard"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=[" + str(got) + "] want=[" + str(want) + "]"
+    }
+}
+
+# Preserve the user's clipboard across the run.
+_saved = paste()
+_hadText = hasText()
+
+out "== round trip =="
+check("copy", copy("hello EZ"))
+checkEq("paste", paste(), "hello EZ")
+check("hasText", hasText())
+check("not empty", isEmpty() == false)
+checkEq("length in bytes", length(), 8)
+checkEq("lastError empty on success", lastError(), "")
+
+out ""
+out "== unicode survives =="
+# The old CF_TEXT (ANSI) path replaced anything outside the system code page
+# with '?'. These are read and written as CF_UNICODETEXT.
+checkEq("accents", (copy("café") ? paste() : ""), "café")
+checkEq("em dash", (copy("a — b") ? paste() : ""), "a — b")
+checkEq("CJK", (copy("日本語") ? paste() : ""), "日本語")
+checkEq("emoji (surrogate pair)", (copy("🎉") ? paste() : ""), "🎉")
+copy("mixed café 日本語 🎉 end")
+checkEq("mixed string", paste(), "mixed café 日本語 🎉 end")
+copy("🎉")
+checkEq("4-byte char is 4 bytes", length(), 4)
+
+out ""
+out "== edge cases =="
+check("empty string copies", copy(""))
+checkEq("empty round trip", paste(), "")
+check("isEmpty on empty text", isEmpty())
+check("number is stringified", copy(42))
+checkEq("number round trip", paste(), "42")
+big = ""
+repeat i = 0 to 999 { big = big + "0123456789" }
+check("10k copy", copy(big))
+checkEq("10k length", length(), 10000)
+checkEq("10k content intact", substr(paste(), 9990, 10), "0123456789")
+
+out ""
+out "== newlines =="
+copy("l1\nl2")
+checkEq("newline preserved", paste(), "l1\nl2")
+
+out ""
+out "== clear =="
+copy("something")
+check("clear", clear())
+check("hasText false after clear", hasText() == false)
+checkEq("paste is empty after clear", paste(), "")
+check("isEmpty after clear", isEmpty())
+
+out ""
+out "== append / prepend / replace =="
+copy("one")
+check("append", append(" two"))
+checkEq("appended", paste(), "one two")
+check("prepend", prepend("zero "))
+checkEq("prepended", paste(), "zero one two")
+copy("a-b-c")
+check("replace", replace("-", "+"))
+checkEq("replaced", paste(), "a+b+c")
+copy("aaa")
+replace("a", "")
+checkEq("replace with empty", paste(), "")
+copy("x")
+check("replace of empty needle is refused", replace("", "y") == false)
+
+out ""
+out "== lines =="
+check("copyLines", copyLines(["l1", "l2", "l3"]))
+ls = pasteLines()
+checkEq("line count", len(ls), 3)
+checkEq("first line", ls[0], "l1")
+checkEq("last line", ls[2], "l3")
+copy("a\r\nb")
+crlf = pasteLines()
+checkEq("CRLF splits into two", len(crlf), 2)
+checkEq("CR stripped", crlf[0], "a")
+copy("a\n")
+checkEq("trailing newline adds no blank line", len(pasteLines()), 1)
+clear()
+checkEq("pasteLines on empty", len(pasteLines()), 0)
+
+out ""
+out "== sequence number =="
+copy("first")
+s1 = sequence()
+copy("second")
+check("bumps on change", sequence() != s1)
+
+out ""
+out "== withText restores the previous contents =="
+copy("original")
+inner = withText("temporary", || { give paste() })
+checkEq("callback sees the new text", inner, "temporary")
+checkEq("previous text restored", paste(), "original")
+clear()
+withText("temp2", || { give 1 })
+check("empty clipboard restored as empty", hasText() == false)
+
+out ""
+out "== errors =="
+check("copyLines rejects a non-array", (|| {
+    try { copyLines("nope")  give false } catch (e) { give indexOf(str(e), CLIPBOARD_ERROR) == 0 }
+})())
+
+# Put the user's clipboard back.
+when _hadText { copy(_saved) } other { clear() }
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

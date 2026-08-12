@@ -1,0 +1,111 @@
+// ============================================================================
+// thread — Rate limiting and caching wrappers
+//
+// Each returns a new function that wraps the one you pass in.
+// ============================================================================
+use "errors.ez"
+
+// Calls fn() at most once per minDelayMs. Calls made inside the window are
+// dropped and return nil -- the wrapper reports whether it fired so a caller
+// that cares can tell "skipped" from "fn returned nil".
+export task throttle(fn, minDelayMs) {
+    state = {"last": 0 - minDelayMs, "fired": false}
+    give | | {
+        now = clock()
+        when now - state["last"] >= minDelayMs {
+            state["last"] = now
+            state["fired"] = true
+            give fn()
+        }
+        state["fired"] = false
+        give nil
+    }
+}
+
+// Delays fn() until waitMs has passed with no further call. The timer restarts
+// on every call, so a burst results in exactly one invocation.
+//
+// The waiter used to spin on `wait(1)` re-reading a shared timestamp; it now
+// sleeps for the remaining time and only wakes again if the deadline moved.
+export task debounce(fn, waitMs) {
+    state = {"deadline": 0, "pending": false}
+    give | | {
+        state["deadline"] = clock() + waitMs
+        when not state["pending"] {
+            state["pending"] = true
+            spawn(| | {
+                remaining = state["deadline"] - clock()
+                while remaining > 0 {
+                    wait(remaining)
+                    remaining = state["deadline"] - clock()
+                }
+                state["pending"] = false
+                fn()
+            })
+        }
+        give nil
+    }
+}
+
+// Caches fn(arg) by str(arg).
+//
+// Note this is a plain cache with no expiry and no bound: it grows with the
+// number of distinct arguments. Do not point it at unbounded input.
+export task memoize(fn) {
+    cache = {}
+    give | arg | {
+        key = str(arg)
+        when has_key(cache, key) {
+            give cache[key]
+        }
+        r = fn(arg)
+        cache[key] = r
+        give r
+    }
+}
+
+// Calls fn() no more than `limit` times per `windowMs`, blocking rather than
+// dropping when the allowance is spent -- the shape you want when talking to
+// an API that rate limits.
+export model RateLimiter {
+    init(limit, windowMs) {
+        when limit < 1 {
+            throw ThreadError("RateLimiter needs a limit of at least 1")
+        }
+        self.limit = limit
+        self.windowMs = windowMs
+        self._m = mutex()
+        self.hits = []
+    }
+
+    // Blocks until a slot is free, then records the call.
+    task acquire() {
+        while true {
+            waitFor = 0
+            self_ = self
+            lock(self._m, | | {
+                now = clock()
+                kept = []
+                get t in self_.hits {
+                    when now - t < self_.windowMs { push(kept, t) }
+                }
+                self_.hits = kept
+                when len(kept) < self_.limit {
+                    push(self_.hits, now)
+                    waitFor = 0
+                } other {
+                    // Sleep until the oldest hit leaves the window.
+                    waitFor = self_.windowMs - (now - kept[0]) + 1
+                }
+            })
+            when waitFor <= 0 { give self }
+            wait(waitFor)
+        }
+    }
+
+    // Runs fn() once a slot is available.
+    task run(fn) {
+        self.acquire()
+        give fn()
+    }
+}

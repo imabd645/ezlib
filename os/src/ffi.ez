@@ -1,0 +1,71 @@
+// ============================================================================
+// ezos / ffi.ez -- single FFI binding layer (Win32 + MSVCRT).
+// All os_load_lib / os_get_func / os_call usage lives here.
+// ============================================================================
+
+__k32 = os_load_lib("Kernel32.dll")
+__u32 = os_load_lib("User32.dll")
+__msv = os_load_lib("msvcrt.dll")
+__s32 = os_load_lib("shell32.dll")
+__adv32 = os_load_lib("Advapi32.dll")
+__ntdll = os_load_lib("ntdll.dll")
+
+when typeOf(__k32) == "nil" or __k32 == 0 {
+    throw "ezos: Kernel32.dll not available (Windows required)"
+}
+
+// Shared across submodules in this package.
+export model OSFFI {
+    // Kernel32
+    static getTickCount64 = os_get_func(__k32, "GetTickCount64")
+    static globalMemStatus = os_get_func(__k32, "GlobalMemoryStatusEx")
+    static setEnvVar = os_get_func(__k32, "SetEnvironmentVariableA")
+    static getEnvVar = os_get_func(__k32, "GetEnvironmentVariableA")
+    static getEnvStrings = os_get_func(__k32, "GetEnvironmentStringsA")
+    static freeEnvStrings = os_get_func(__k32, "FreeEnvironmentStringsA")
+    static expandEnvStrings = os_get_func(__k32, "ExpandEnvironmentStringsA")
+    static getCwd = os_get_func(__k32, "GetCurrentDirectoryA")
+    static setCwd = os_get_func(__k32, "SetCurrentDirectoryA")
+    static getTempPath = os_get_func(__k32, "GetTempPathA")
+    static getModuleFileName = os_get_func(__k32, "GetModuleFileNameA")
+    static getCurrentProcessId = os_get_func(__k32, "GetCurrentProcessId")
+    static globalAlloc = os_get_func(__k32, "GlobalAlloc")
+    static globalLock = os_get_func(__k32, "GlobalLock")
+    static globalUnlock = os_get_func(__k32, "GlobalUnlock")
+    static sleep = os_get_func(__k32, "Sleep")
+    static getSystemInfo = os_get_func(__k32, "GetSystemInfo")
+    static getNativeSystemInfo = os_get_func(__k32, "GetNativeSystemInfo")
+    static getComputerName = os_get_func(__k32, "GetComputerNameA")
+    static getVersionEx = os_get_func(__k32, "GetVersionExA")
+
+    // MSVCRT
+    static getEnv = os_get_func(__msv, "getenv")
+    static putEnv = os_get_func(__msv, "_putenv_s")
+    static system = os_get_func(__msv, "system")
+    static exitProc = os_get_func(__msv, "exit")
+    static popen = os_get_func(__msv, "_popen")
+    static pclose = os_get_func(__msv, "_pclose")
+    static fgets = os_get_func(__msv, "fgets")
+    static feof = os_get_func(__msv, "feof")
+
+    // User32 (clipboard CF_TEXT = 1)
+    static openClipboard = os_get_func(__u32, "OpenClipboard")
+    static closeClipboard = os_get_func(__u32, "CloseClipboard")
+    static emptyClipboard = os_get_func(__u32, "EmptyClipboard")
+    static getClipboardData = os_get_func(__u32, "GetClipboardData")
+    static setClipboardData = os_get_func(__u32, "SetClipboardData")
+
+    // Shell32 (SW_SHOWNORMAL = 1)
+    static shellExec = os_get_func(__s32, "ShellExecuteA")
+
+    // Advapi32
+    static getUserName = os_get_func(__adv32, "GetUserNameA")
+
+    // ntdll (accurate version info)
+    static rtlGetVersion = os_get_func(__ntdll, "RtlGetVersion")
+}
+
+export PATH_SEP = "\\"
+export GMEM_MOVEABLE = 2
+export CF_TEXT = 1
+export SW_SHOWNORMAL = 1

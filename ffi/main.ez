@@ -1,0 +1,100 @@
+// ============================================================================
+// ezffi — Python ctypes for EZ Language. Production-ready native FFI.
+//
+//   use "ffi"
+//
+//   lib = ffi.load("User32.dll")
+//   lib.func("MessageBoxA").argtypes = [ffi.c_void_p, ffi.c_char_p, ffi.c_char_p, ffi.c_uint32]
+//   lib.func("MessageBoxA").restype  = ffi.c_int
+//   lib.func("MessageBoxA")(0, "Hello", "EZ FFI", 0)
+//
+// This file is the public surface only. The work lives in src/, one concern per file:
+//
+//   src/errors.ez    FFIError, MemoryError
+//   src/types.ez     Type constants (c_int, c_double, …) and typeStr() helper
+//   src/dispatch.ez  _coerceArgs(), _dispatch() — core call routing
+//   src/pointer.ez   Pointer model — memory safety, read/write, free
+//   src/function.ez  Function model — argtypes, restype, __call__, .call()
+//   src/library.ez   Library model — DLL handle + cached function resolution
+//   src/struct.ez    Structure() factory — named C structs with pack/unpack
+//   src/callback.ez  createCallback() — EZ closure → native trampoline
+//   src/utils.ez     string_at(), cast(), alloc(), c_string(), offset()
+//
+// All raw os_* builtins are an implementation detail — callers should never
+// need them directly.
+// ============================================================================
+
+use "src/errors.ez"
+use "src/types.ez"
+use "src/dispatch.ez"
+use "src/pointer.ez"
+use "src/function.ez"
+use "src/library.ez"
+use "src/struct.ez"
+use "src/callback.ez"
+use "src/utils.ez"
+
+// ── Library loading ───────────────────────────────────────────────────────────
+
+// Load a DLL by name or path and return a Library handle.
+//
+//   lib = ffi.load("User32.dll")
+//   lib = ffi.load("C:/mylib/myffi.dll")
+//
+export task load(dll_name) {
+    handle = os_load_lib(str(dll_name))
+    when handle == 0 {
+        throw FFIError("load: failed to open '" + str(dll_name) +
+                       "' — file not found or architecture mismatch")
+    }
+    give Library(handle)
+}
+
+// ── Re-exports: type constants ────────────────────────────────────────────────
+// (Defined in src/types.ez; re-exported here for the ffi.c_int style access)
+
+export c_int8   export c_uint8
+export c_int16  export c_uint16
+export c_int32  export c_uint32
+export c_int64  export c_uint64
+export c_int    export c_uint
+export c_long   export c_ulong
+export c_byte   export c_bool
+export c_float  export c_double
+export c_void_p export c_char_p export c_void
+
+// Legacy bare-string constants (backward-compatible)
+export INT export PTR export FLOAT export DOUBLE export STR export VOID
+
+// ── Re-exports: models & factories ───────────────────────────────────────────
+
+export Pointer
+export Function
+export Library
+export Structure
+export FFIError
+export MemoryError
+
+// ── Re-exports: utility functions ────────────────────────────────────────────
+
+export alloc
+export cast
+export offset
+export c_string
+export string_at
+export createCallback
+
+// ── Backward-compatible helpers ───────────────────────────────────────────────
+
+// Wrap a raw integer address as a borrowed (non-owning) Pointer.
+export task wrap(raw_ptr_address) {
+    give Pointer(raw_ptr_address, false)
+}
+
+// Low-level struct helpers (kept for scripts that use the raw array API).
+export task packStruct(layoutArray, valuesArray, buffer = nil) {
+    give os_struct_pack(layoutArray, valuesArray, buffer)
+}
+export task unpackStruct(layoutArray, buffer_or_ptr) {
+    give os_struct_unpack(layoutArray, buffer_or_ptr)
+}

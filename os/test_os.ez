@@ -1,0 +1,48 @@
+// ============================================================================
+// ezos / test_os.ez -- smoke tests for the modular OS package
+// Run: ez.exe C:/ezlib/os/test_os.ez
+// ============================================================================
+
+use "os"
+
+passed = 0
+failed = 0
+
+task check(name, cond) {
+    when cond {
+        passed = passed + 1
+        out "[PASS] " + name
+    } other {
+        failed = failed + 1
+        out "[FAIL] " + name
+    }
+}
+
+out "=== ezos v2 smoke tests ==="
+
+check("platform is windows", os.platform() == "windows")
+check("cwd is non-empty", len(os.cwd()) > 0)
+check("cpuCores >= 1", os.cpuCores() >= 1)
+check("totalMemory > 0", os.totalMemory() > 0)
+check("pid > 0", os.pid() > 0)
+check("homedir non-empty", len(os.homedir()) > 0)
+check("tmpdir non-empty", len(os.tmpdir()) > 0)
+
+check("path join", os.path.join("C:\\Users", "test") == "C:\\Users\\test")
+check("path extname", os.path.extname("file.txt") == ".txt")
+check("path stem", os.path.stem("file.txt") == "file")
+
+v = os.version()
+check("version has major", has_key(v, "major"))
+
+os.env.set("EZOS_TEST_VAR", "ok")
+check("env set/get", os.env.get("EZOS_TEST_VAR") == "ok")
+check("env has", os.env.has("EZOS_TEST_VAR") == true)
+os.env.unset("EZOS_TEST_VAR")
+check("env unset", os.env.has("EZOS_TEST_VAR") == false)
+
+run = os.process.run("echo ezos", { "check": false })
+check("process run stdout", indexOf(run["stdout"], "ezos") != -1)
+
+out "=== Results: " + str(passed) + " passed, " + str(failed) + " failed ==="
+when failed > 0 { os.process.exit(1) }

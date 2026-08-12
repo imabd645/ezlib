@@ -1,0 +1,156 @@
+// ============================================================================
+// EZ ORM — relationship, join, eager-loading and identity-map tests
+// ============================================================================
+
+use "orm"
+
+passes = 0
+fails = 0
+task checkEq(name, actual, expected) {
+    when str(actual) == str(expected) {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+task checkThrows(name, fn) {
+    threw = false
+    try { fn() } catch (e) { threw = true }
+    when threw {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected a throw"
+    }
+}
+
+// ── Models ──────────────────────────────────────────────────────────────────
+model User extends Model {
+    static relations = { "posts": hasMany("Post", "userId") }
+    init() {
+        self.id = Column("integer", primaryKey=true, autoIncrement=true)
+        self.name = Column("string", nullable=false)
+    }
+}
+
+model Post extends Model {
+    static relations = { "author": belongsTo("User", "userId") }
+    init() {
+        self.id = Column("integer", primaryKey=true, autoIncrement=true)
+        self.title = Column("string", nullable=false)
+        self.userId = Column("integer", foreignKey="User.id")
+    }
+}
+
+engine = Engine(SQLiteDriver(":memory:"))
+engine.register(User)
+engine.register(Post)
+engine.createAll()
+
+s = Session(engine)
+
+ana = User()
+ana.name = "ana"
+bo = User()
+bo.name = "bo"
+s.addAll([ana, bo])
+s.commit()
+
+p1 = Post()
+p1.title = "first"
+p1.userId = ana.id
+p2 = Post()
+p2.title = "second"
+p2.userId = ana.id
+p3 = Post()
+p3.title = "solo"
+p3.userId = bo.id
+s.addAll([p1, p2, p3])
+s.commit()
+
+out "== Relations: lazy load =="
+s2 = Session(engine)
+u = s2.get(User, ana.id)
+checkEq("hasMany returns related rows", len(u.posts), 2)
+checkEq("hasMany content", u.posts[0].title, "first")
+checkEq("hasMany is cached after first read", len(u.posts), 2)
+
+p = s2.get(Post, p3.id)
+checkEq("belongsTo resolves", p.author.name, "bo")
+
+lonely = User()
+lonely.name = "nobody"
+s2.add(lonely)
+s2.commit()
+checkEq("hasMany with no children is empty", len(lonely.posts), 0)
+
+out ""
+out "== Identity map =="
+s3 = Session(engine)
+a1 = s3.get(User, ana.id)
+a2 = s3.get(User, ana.id)
+checkEq("same row -> same instance", a1 == a2, true)
+viaQuery = s3.query(User).filter("id", "=", ana.id).first()
+checkEq("query returns the mapped instance", viaQuery == a1, true)
+otherSession = Session(engine)
+checkEq("a different session gets its own instance", otherSession.get(User, ana.id) == a1, false)
+
+out ""
+out "== Eager loading =="
+s4 = Session(engine)
+users = s4.query(User).withRelated("posts").orderBy("id").all()
+checkEq("eager loaded all users", len(users), 3)
+checkEq("eager posts for ana", len(users[0].posts), 2)
+checkEq("eager posts for bo", len(users[1].posts), 1)
+checkEq("eager posts for nobody", len(users[2].posts), 0)
+
+s5 = Session(engine)
+posts = s5.query(Post).withRelated("author").orderBy("id").all()
+checkEq("eager belongsTo", posts[0].author.name, "ana")
+checkEq("eager belongsTo (other parent)", posts[2].author.name, "bo")
+
+out ""
+out "== Joins =="
+s6 = Session(engine)
+anasPosts = s6.query(Post).join("author").filter("author.name", "=", "ana").all()
+checkEq("join + filter on joined column", len(anasPosts), 2)
+bosPosts = s6.query(Post).join("author").filter("author.name", "=", "bo").all()
+checkEq("join finds the other parent's rows", len(bosPosts), 1)
+checkEq("joined row is the base model", bosPosts[0].title, "solo")
+
+mixed = s6.query(Post).join("author").filter("author.name", "=", "ana").filter("title", "=", "second").all()
+checkEq("join + local filter together", len(mixed), 1)
+
+withUsers = s6.query(User).join("posts").filter("posts.title", "=", "solo").all()
+checkEq("hasMany join", len(withUsers), 1)
+checkEq("hasMany join row", withUsers[0].name, "bo")
+
+out ""
+out "== Errors are clear =="
+s7 = Session(engine)
+checkThrows("unknown relation on withRelated", || { s7.query(User).withRelated("nope") })
+checkThrows("unknown relation on join", || { s7.query(User).join("nope") })
+checkThrows("qualified field without a join", || { s7.query(Post).filter("author.name", "=", "x").all() })
+checkThrows("unknown column on joined model", || { s7.query(Post).join("author").filter("author.zzz", "=", "x").all() })
+
+out ""
+out "== Dirty tracking =="
+s8 = Session(engine)
+d = s8.get(User, ana.id)
+checkEq("loading a row marks nothing dirty", len(keys(d._dirty)), 0)
+d.name = "ana-renamed"
+checkEq("assignment is recorded", has_key(d._dirty, "name"), true)
+checkEq("value still stored", d.name, "ana-renamed")
+s8.commit()
+s9 = Session(engine)
+checkEq("update persisted", s9.get(User, ana.id).name, "ana-renamed")
+
+out ""
+out "================================"
+out "passed: " + str(passes)
+out "failed: " + str(fails)
+out "================================"
+when fails > 0 { panic("relationship test failures") }

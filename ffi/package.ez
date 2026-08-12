@@ -1,0 +1,8 @@
+{
+    "name": "ffi",
+    "version": "1.0.0",
+    "description": "Production-ready native FFI for EZ — Python ctypes-style with type annotations, named structs, callbacks, and unlimited arity.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {}
+}

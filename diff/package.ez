@@ -1,0 +1,11 @@
+{
+  "name": "diff",
+  "version": "1.0.0",
+  "description": "Text and sequence diffing for EZ. LCS-based line, word and character diffs, unified patch output, statistics and reversible edit scripts.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["diff", "patch", "lcs", "compare", "unified", "text"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

@@ -1,0 +1,11 @@
+{
+  "name": "markdown",
+  "version": "1.0.0",
+  "description": "Markdown to HTML for EZ. Headings, lists, tables, code fences, links and emphasis, with escape-first rendering that cannot emit raw HTML.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["markdown", "html", "render", "docs", "content", "commonmark"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

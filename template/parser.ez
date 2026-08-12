@@ -1,0 +1,141 @@
+# ============================================================================
+# template/parser.ez — tokens to a node tree
+#
+# Blocks nest, so the token stream is parsed into a tree rather than walked
+# linearly. Every opening tag records its line number, which is what lets an
+# unclosed {% for %} report where it started instead of failing at EOF.
+#
+# Node shapes:
+#   { kind: "text",   value }
+#   { kind: "output", expr }
+#   { kind: "if",     branches: [{ cond, body }], otherwise }
+#   { kind: "for",    varName, sourceExpr, body, otherwise }
+# ============================================================================
+
+use "template/lexer.ez"
+
+task parseFail(msg, line) {
+    throw Exception(`Template error (line {line}): {msg}`)
+}
+
+task tagName(text) {
+    space = indexOf(text, " ")
+    when space < 0 { give text }
+    give substr(text, 0, space)
+}
+
+task tagRest(text) {
+    space = indexOf(text, " ")
+    when space < 0 { give "" }
+    give trim(substr(text, space + 1, len(text) - space - 1))
+}
+
+# Parses until one of `stoppers` is reached. Returns [nodes, stopTag, line].
+# The stopper is left unconsumed so the caller decides what it means.
+task parseNodes(st, stoppers) {
+    nodes = []
+    while st["pos"] < len(st["tokens"]) {
+        tok = st["tokens"][st["pos"]]
+
+        when tok["kind"] == TOK_TEXT {
+            push(nodes, { "kind": "text", "value": tok["value"] })
+            st["pos"] = st["pos"] + 1
+            skip
+        }
+        when tok["kind"] == TOK_VAR {
+            push(nodes, { "kind": "output", "expr": tok["value"] })
+            st["pos"] = st["pos"] + 1
+            skip
+        }
+
+        name = tagName(tok["value"])
+        get s in stoppers {
+            when s == name { give [nodes, name, tok["line"]] }
+        }
+
+        when name == "if" {
+            st["pos"] = st["pos"] + 1
+            push(nodes, parseIf(st, tagRest(tok["value"]), tok["line"]))
+            skip
+        }
+        when name == "for" {
+            st["pos"] = st["pos"] + 1
+            push(nodes, parseFor(st, tagRest(tok["value"]), tok["line"]))
+            skip
+        }
+        parseFail(`unknown tag '{name}'`, tok["line"])
+    }
+    give [nodes, "", 0]
+}
+
+task parseIf(st, condText, openLine) {
+    when trim(condText) == "" { parseFail("'if' needs a condition", openLine) }
+    branches = []
+    otherwise = nil
+    cond = condText
+
+    while true {
+        result = parseNodes(st, ["elif", "else", "endif"])
+        push(branches, { "cond": cond, "body": result[0] })
+        stopTag = result[1]
+
+        when stopTag == "" { parseFail("'if' was never closed with 'endif'", openLine) }
+        tok = st["tokens"][st["pos"]]
+        st["pos"] = st["pos"] + 1
+
+        when stopTag == "endif" { escape }
+        when stopTag == "elif" {
+            cond = tagRest(tok["value"])
+            when trim(cond) == "" { parseFail("'elif' needs a condition", tok["line"]) }
+            skip
+        }
+        # else: the remaining body is the fallback, then endif must follow.
+        elseResult = parseNodes(st, ["endif"])
+        otherwise = elseResult[0]
+        when elseResult[1] == "" { parseFail("'else' was never closed with 'endif'", openLine) }
+        st["pos"] = st["pos"] + 1
+        escape
+    }
+    give { "kind": "if", "branches": branches, "otherwise": otherwise }
+}
+
+task parseFor(st, spec, openLine) {
+    # `item in items`
+    marker = indexOf(spec, " in ")
+    when marker < 0 { parseFail("'for' must read: for <name> in <expression>", openLine) }
+    varName = trim(substr(spec, 0, marker))
+    sourceExpr = trim(substr(spec, marker + 4, len(spec) - marker - 4))
+    when varName == "" { parseFail("'for' is missing its loop variable", openLine) }
+    when sourceExpr == "" { parseFail("'for' is missing the expression to iterate", openLine) }
+
+    result = parseNodes(st, ["else", "endfor"])
+    body = result[0]
+    stopTag = result[1]
+    otherwise = nil
+
+    when stopTag == "" { parseFail("'for' was never closed with 'endfor'", openLine) }
+    st["pos"] = st["pos"] + 1
+
+    when stopTag == "else" {
+        elseResult = parseNodes(st, ["endfor"])
+        otherwise = elseResult[0]
+        when elseResult[1] == "" { parseFail("'else' was never closed with 'endfor'", openLine) }
+        st["pos"] = st["pos"] + 1
+    }
+    give {
+        "kind": "for",
+        "varName": varName,
+        "sourceExpr": sourceExpr,
+        "body": body,
+        "otherwise": otherwise
+    }
+}
+
+export task tplParse(source) {
+    st = { "tokens": tplTokenize(source), "pos": 0 }
+    result = parseNodes(st, [])
+    when result[1] != "" {
+        parseFail(`unexpected '{result[1]}' with no matching opening tag`, result[2])
+    }
+    give result[0]
+}

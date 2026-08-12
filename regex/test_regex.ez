@@ -1,0 +1,220 @@
+// ============================================================================
+// regex — test suite
+//
+//   ez regex/test_regex.ez        (run from C:/ezlib)
+// ============================================================================
+use "regex"
+
+passed = 0
+failed = 0
+
+task check(label, cond) {
+    when cond {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label
+    }
+}
+
+task checkEq(label, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label + " -- got " + str(actual) + ", expected " + str(expected)
+    }
+}
+
+task checkThrows(label, fn) {
+    threw = false
+    try {
+        fn()
+    } catch (e) {
+        threw = true
+    }
+    check(label, threw)
+}
+
+out "== Construction and validation =="
+p = Regex("[0-9]+")
+checkEq("pattern is kept", p.pattern, "[0-9]+")
+checkEq("toString", p.toString(), "Regex([0-9]+)")
+checkThrows("an unclosed group is rejected at construction", | | { Regex("(unclosed") })
+checkThrows("an unknown flag is rejected", | | { Regex("a", "z") })
+checkThrows("a non-string pattern is rejected", | | { Regex(42) })
+checkEq("reIsValid on good pattern", reIsValid("^a+$"), true)
+checkEq("reIsValid on bad pattern", reIsValid("(("), false)
+
+out ""
+out "== test / fullMatch =="
+checkEq("test finds anywhere", reTest("abc123", "[0-9]+"), true)
+checkEq("test on no match", reTest("abc", "[0-9]+"), false)
+checkEq("fullMatch needs the whole string", reFullMatch("abc123", "[0-9]+"), false)
+checkEq("fullMatch on the whole string", reFullMatch("123", "[0-9]+"), true)
+
+out ""
+out "== Positions are real =="
+// The previous implementation located a match by searching for its own text,
+// so \bcat\b in "concat cat" reported index 3 (inside "concat") -- and its
+// findAll returned nothing at all.
+m = reFind("concat cat", "\\bcat\\b")
+check("a word-boundary match is found", m != nil)
+checkEq("match text", m.text, "cat")
+checkEq("match starts at the real position", m.start, 7)
+checkEq("match ends correctly", m.end, 10)
+checkEq("match length", m.length(), 3)
+checkEq("findAll finds it too", len(reFindAll("concat cat", "\\bcat\\b")), 1)
+
+m2 = reFind("no digits here", "[0-9]+")
+checkEq("no match gives nil", m2, nil)
+
+out ""
+out "== findAll =="
+all = reFindAll("a1 b22 c333", "[0-9]+")
+checkEq("three matches", len(all), 3)
+checkEq("first text", all[0].text, "1")
+checkEq("second text", all[1].text, "22")
+checkEq("third text", all[2].text, "333")
+checkEq("second position", all[1].start, 4)
+checkEq("findAllText gives plain strings", str(reFindAllText("a1 b22", "[0-9]+")), str(["1", "22"]))
+checkEq("limit caps the results", len(reFindAll("a1 b2 c3", "[0-9]+", "", 2)), 2)
+checkEq("no matches gives an empty array", len(reFindAll("abc", "[0-9]+")), 0)
+checkEq("reCount", reCount("a1 b22 c333", "[0-9]+"), 3)
+
+out ""
+out "== Zero-width matches terminate =="
+// `a*` matches empty at every position. Advancing by the match length alone
+// would never move, so this must step forward by one instead of hanging.
+z = reFindAll("bbb", "a*")
+check("a zero-width pattern returns and does not hang", len(z) > 0)
+checkEq("zero-width match has no length", z[0].length(), 0)
+checkEq("zero-width split still terminates", len(reSplit("abc", "x*")), 1)
+
+out ""
+out "== Capture groups =="
+cm = reFind("2026-08-07", "([0-9]{4})-([0-9]{2})-([0-9]{2})")
+checkEq("group count", cm.groupCount(), 3)
+checkEq("group(0) is the whole match", cm.group(0), "2026-08-07")
+checkEq("group(1)", cm.group(1), "2026")
+checkEq("group(2)", cm.group(2), "08")
+checkEq("group(3)", cm.group(3), "07")
+checkThrows("an out-of-range group throws", | | { cm.group(9) })
+checkEq("reCapture shortcut", reCapture("2026-08-07", "([0-9]{4})", 1), "2026")
+
+// An optional group that did not participate must be nil, not "" -- otherwise
+// there is no way to tell it from one that matched empty.
+om = reFind("b", "(a)?b")
+checkEq("unmatched optional group is nil", om.group(1), nil)
+
+out ""
+out "== Flags =="
+checkEq("without i, case matters", reTest("HELLO", "hello"), false)
+checkEq("with i, it does not", reTest("HELLO", "hello", "i"), true)
+checkEq("without m, ^ is string-start only", reCount("a\nb", "^b"), 0)
+checkEq("with m, ^ matches after a newline", reCount("a\nb", "^b", "m"), 1)
+pi = Regex("cat", "i")
+checkEq("flags are kept on the model", pi.test("CAT"), true)
+checkEq("toString shows flags", pi.toString(), "Regex(cat, \"i\")")
+
+out ""
+out "== Replace =="
+checkEq("replace all", reReplaceAll("a1b2c3", "[0-9]", "#"), "a#b#c#")
+checkEq("replace first only", reReplaceFirst("a1b2c3", "[0-9]", "#"), "a#b2c3")
+checkEq("group reference in replacement", reReplaceAll("John Smith", "(\\w+) (\\w+)", "$2, $1"), "Smith, John")
+checkEq("whole-match reference", reReplaceAll("abc", "b", "[$&]"), "a[b]c")
+checkEq("no match leaves text alone", reReplaceAll("abc", "[0-9]", "#"), "abc")
+checkEq("case-insensitive replace", reReplaceAll("Cat cat", "cat", "dog", "i"), "dog dog")
+
+out ""
+out "== Split =="
+checkEq("split on a pattern", str(reSplit("a1b22c", "[0-9]+")), str(["a", "b", "c"]))
+checkEq("split with no match gives one piece", str(reSplit("abc", "[0-9]")), str(["abc"]))
+checkEq("split keeps empty leading piece", str(reSplit("1a", "[0-9]")), str(["", "a"]))
+checkEq("split limit leaves the remainder", str(reSplit("a1b1c", "[0-9]", "", 2)), str(["a", "b1c"]))
+
+out ""
+out "== Escaping =="
+checkEq("escaped text matches literally", reTest("a.b", reEscape("a.b")), true)
+checkEq("escaping stops . matching anything", reTest("axb", reEscape("a.b")), false)
+checkEq("reAny builds an alternation", reTest("I have a dog", reAny(["cat", "dog"])), true)
+checkEq("reAny escapes its alternatives", reTest("cost is 1+2", reAny(["1+2"])), true)
+checkEq("reWord matches whole words only", reTest("concat", reWord("cat")), false)
+checkEq("reWord matches a standalone word", reTest("a cat sat", reWord("cat")), true)
+
+out ""
+out "== Compiled patterns =="
+d = compile("([a-z]+)@([a-z]+)", "i")
+checkEq("compiled test", d.test("Bob@Example"), true)
+checkEq("compiled capture", d.capture("Bob@Example", 2), "Example")
+checkEq("compiled count", d.count("a@b c@d"), 2)
+checkEq("compiled replace", d.replace("a@b", "$2@$1"), "b@a")
+checkEq("compiled split", str(Regex(",").split("x,y,z")), str(["x", "y", "z"]))
+checkEq("compiled findAllText", str(Regex("[0-9]+").findAllText("a1 b2")), str(["1", "2"]))
+checkEq("find with a start offset", Regex("a").find("aaa", 1).start, 1)
+
+out ""
+out "== Validators =="
+checkEq("valid email", isEmail("user@example.com"), true)
+checkEq("email must be the whole string", isEmail("user@example.com and more"), false)
+checkEq("invalid email", isEmail("not-an-email"), false)
+checkEq("nil is not a valid email", isEmail(nil), false)
+checkEq("valid url", isUrl("https://example.com/a/b?c=1"), true)
+checkEq("valid ipv4", isIpv4("192.168.1.1"), true)
+// The old pattern accepted this because it only checked digit counts.
+checkEq("out-of-range ipv4 is rejected", isIpv4("999.1.1.1"), false)
+checkEq("ipv4 boundary 255", isIpv4("255.255.255.255"), true)
+checkEq("valid uuid", isUuid("123e4567-e89b-12d3-a456-426614174000"), true)
+checkEq("valid hex colour", isHexColor("#a3f2b1"), true)
+checkEq("short hex colour", isHexColor("#abc"), true)
+checkEq("bad hex colour", isHexColor("#xyz"), false)
+checkEq("digits only", isDigits("12345"), true)
+checkEq("digits rejects a sign", isDigits("-12"), false)
+checkEq("integer accepts a sign", isInteger("-12"), true)
+checkEq("number accepts a decimal", isNumber("-12.5"), true)
+checkEq("valid semver", isSemver("1.2.3-beta.1"), true)
+checkEq("valid slug", isSlug("hello-world-2"), true)
+checkEq("time 24h", isTime24("23:59"), true)
+checkEq("time 24h rejects hour 24", isTime24("24:00"), false)
+checkEq("mac address", isMac("00:1A:2B:3C:4D:5E"), true)
+
+out ""
+out "== Credit cards use Luhn =="
+checkEq("valid card passes", isCreditCard("4539 1488 0343 6467"), true)
+checkEq("one digit changed fails the checksum", isCreditCard("4539 1488 0343 6468"), false)
+checkEq("shape check alone still passes it", isCreditCardShape("4539 1488 0343 6468"), true)
+
+out ""
+out "== Extractors =="
+body = "Mail a@b.com and c@d.org about https://x.com #ez @bob"
+checkEq("emails", str(extractEmails(body)), str(["a@b.com", "c@d.org"]))
+checkEq("urls", len(extractUrls(body)), 1)
+checkEq("hashtags", str(extractHashtags(body)), str(["#ez"]))
+// The naive "@\w+" pattern pulled "@b" and "@d" out of the two email
+// addresses in `body`, so any text with an email in it produced phantom
+// mentions.
+checkEq("mentions ignore the @ inside emails", str(extractMentions(body)), str(["@bob"]))
+checkEq("a mention at the start of the text is found", str(extractMentions("@alice hi")), str(["@alice"]))
+checkEq("a hashtag mid-token is not a hashtag", len(extractHashtags("color#fff")), 0)
+checkEq("empty text extracts nothing", len(extractEmails("")), 0)
+checkEq("nil extracts nothing", len(extractEmails(nil)), 0)
+checkEq("markdown link text", str(extractLinkTexts("see [docs](http://d.io)")), str(["docs"]))
+checkEq("markdown link target", str(extractLinkTargets("see [docs](http://d.io)")), str(["http://d.io"]))
+checkEq("strip html", stripHtml("<p>hi <b>there</b></p>"), "hi there")
+checkEq("strip html comments", stripHtml("a<!-- note -->b"), "ab")
+
+out ""
+out "== Bad patterns are errors, not silent misses =="
+// A typo used to look exactly like "nothing matched", which is the worst
+// possible failure mode for a validator.
+checkThrows("re_test throws on an invalid pattern", | | { reTest("abc", "(") })
+checkThrows("re_find_all throws on an invalid pattern", | | { reFindAll("abc", "[z-a]") })
+checkThrows("an unknown flag throws", | | { reTest("abc", "a", "q") })
+
+out ""
+out "========================================"
+out " passed: " + str(passed) + "   failed: " + str(failed)
+out "========================================"
+when failed > 0 { exit(1) }

@@ -1,0 +1,108 @@
+# ============================================================================
+# xml — XML parsing and building for EZ
+#
+#   use "xml"
+#
+#   doc = XML.parse(readFile("feed.xml"))
+#   get item in doc.findAll("item") {
+#       out item.child("title").value()
+#   }
+# ============================================================================
+
+use "xml/node.ez"
+use "xml/parser.ez"
+
+export model XML {
+
+    # Parse a document and return its root element.
+    # Throws Exception with the line number when the document is malformed.
+    static task parse(source) {
+        give xmlParseDocument(str(source))
+    }
+
+    static task parseOr(source, fallback) {
+        try { give XML.parse(source) }
+        catch (e) { give fallback }
+    }
+
+    static task load(path) {
+        give XML.parse(readFile(path))
+    }
+
+    static task isValid(source) {
+        try {
+            XML.parse(source)
+            give true
+        }
+        catch (e) { give false }
+    }
+
+    # ── building ────────────────────────────────────────────────────────────
+
+    # A new element. Chain .set() for attributes and .add()/.addText() for
+    # content, or use XML.leaf() for the common tag-with-text case.
+    static task element(tag) {
+        give Element(tag)
+    }
+
+    # <tag>text</tag>
+    static task leaf(tag, content) {
+        node = Element(tag)
+        node.addText(str(content))
+        give node
+    }
+
+    # ── output ──────────────────────────────────────────────────────────────
+
+    # Compact, exactly reflecting the tree. Round-trips.
+    static task stringify(node) {
+        give node.toXml()
+    }
+
+    # Indented for reading. Adds whitespace, so it does not round-trip to an
+    # identical tree -- use stringify when the output will be parsed again.
+    static task pretty(node) {
+        give node.serialize(2, 0)
+    }
+
+    # With the XML declaration, for writing complete files.
+    static task document(node) {
+        give `<?xml version="1.0" encoding="UTF-8"?>` + chr(10) + node.serialize(2, 0)
+    }
+
+    static task save(path, node) {
+        writeFile(path, XML.document(node))
+        give true
+    }
+
+    # ── conversion ──────────────────────────────────────────────────────────
+
+    # A plain dictionary view, for feeding JSON or general traversal.
+    # Attributes are prefixed with "@", text is collected under "#text", and
+    # repeated tags become arrays. Lossy by nature -- the element tree is the
+    # accurate representation.
+    static task toDict(node) {
+        result = {}
+        get name in keys(node.attrs) { result["@" + name] = node.attrs[name] }
+
+        kids = node.elements()
+        when len(kids) == 0 {
+            text = node.value()
+            when len(keys(result)) == 0 { give text }
+            when text != "" { result["#text"] = text }
+            give result
+        }
+        get kid in kids {
+            converted = XML.toDict(kid)
+            when has_key(result, kid.tag) {
+                existing = result[kid.tag]
+                when typeOf(existing) == "array" or typeOf(existing) == "list" {
+                    push(existing, converted)
+                }
+                other { result[kid.tag] = [existing, converted] }
+            }
+            other { result[kid.tag] = converted }
+        }
+        give result
+    }
+}

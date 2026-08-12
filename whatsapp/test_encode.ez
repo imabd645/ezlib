@@ -1,0 +1,14 @@
+use "wa_proto.ez"
+
+node = {
+    "tag": "stream:start",
+    "attrs": {
+        "to": "s.whatsapp.net",
+        "version": "2.2413.51"
+    },
+    "children": [],
+    "content": nil
+}
+
+encoded = wap_encodeNode(node)
+out encoded

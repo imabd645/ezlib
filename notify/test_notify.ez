@@ -1,0 +1,147 @@
+# ============================================================================
+# Notify package test suite
+#
+# NON-INTERACTIVE by default: message boxes block until a human dismisses them,
+# so they would hang an automated run. Set EZ_NOTIFY_INTERACTIVE=1 to also open
+# the dialogs and answer them by hand.
+# ============================================================================
+use "notify"
+use "os"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=[" + str(got) + "] want=[" + str(want) + "]"
+    }
+}
+
+interactive = os.env.get("EZ_NOTIFY_INTERACTIVE") == "1"
+
+out "== FFI resolved =="
+check("MessageBoxA", NotifyFFI.messageBox != 0)
+check("MessageBeep", NotifyFFI.messageBeep != 0)
+check("WinExec", NotifyFFI.winExec != 0)
+check("popen", NotifyFFI.popen != 0)
+
+out ""
+out "== flag constants =="
+checkEq("MB_OK", MB_OK, 0)
+checkEq("MB_OKCANCEL", MB_OKCANCEL, 1)
+checkEq("MB_YESNOCANCEL", MB_YESNOCANCEL, 3)
+checkEq("MB_YESNO", MB_YESNO, 4)
+checkEq("MB_ICONERROR", MB_ICONERROR, 16)
+checkEq("MB_ICONINFORMATION", MB_ICONINFORMATION, 64)
+checkEq("MB_TOPMOST", MB_TOPMOST, 262144)
+
+out ""
+out "== sound =="
+check("beep default", beep())
+check("beep error", beep("error"))
+check("beep warning", beep("warning"))
+check("beep info", beep("info"))
+check("beep question", beep("question"))
+check("unknown kind falls back", beep("nonsense"))
+
+out ""
+out "== tray notification (Shell_NotifyIcon, no PowerShell) =="
+check("Shell_NotifyIconA resolved", NotifyFFI.notifyIcon != 0)
+check("LoadIconA resolved", NotifyFFI.loadIcon != 0)
+check("CreateWindowExA resolved", NotifyFFI.createWindowEx != 0)
+before = clock()
+check("toast shows", toast("EZ notify self-test", "EZ", 1200))
+check("returns promptly", clock() - before < 1000)
+check("reports visible", toastVisible())
+check("close removes it", toastClose())
+check("no longer visible", toastVisible() == false)
+check("closing twice is harmless", toastClose() == false)
+check("tray alias still works", tray("alias check", "EZ", 600))
+toastClose()
+
+out ""
+out "== balloon kinds =="
+get kind in ["info", "warning", "error", "question", "none"] {
+    check("kind " + kind, toast("body", "EZ", 500, kind))
+    toastClose()
+}
+
+out ""
+out "== toastWait cleans up after itself =="
+check("toastWait", toastWait("self-cleaning", "EZ", 300))
+check("nothing left in the tray", toastVisible() == false)
+
+out ""
+out "== text that broke the old PowerShell command =="
+# A single quote used to terminate the PowerShell string early, so a message
+# like "Can't open" broke the command outright -- and a crafted one could append
+# arbitrary commands to it. Going through Shell_NotifyIcon means the text is
+# never parsed by anything: it is copied into a struct field as bytes.
+check("apostrophe", toast("Can't open the file", "EZ", 400))
+toastClose()
+check("quote-semicolon payload", toast("a'; Write-Output 'x", "EZ", 400))
+toastClose()
+check("double quotes", toast("he said \"hi\"", "EZ", 400))
+toastClose()
+check("backtick", toast("a `b", "EZ", 400))
+toastClose()
+check("dollar sign", toast("cost $5", "EZ", 400))
+toastClose()
+check("apostrophe in the title", toast("body", "It's a title", 400))
+toastClose()
+
+out ""
+out "== over-long text is truncated, not overflowed =="
+# szInfo is CHAR[256] and szInfoTitle CHAR[64]; a longer string would run into
+# the next struct field.
+big = ""
+repeat i = 0 to 99 { big = big + "0123456789" }
+check("1000-char body", toast(big, "EZ", 400))
+toastClose()
+check("1000-char title", toast("body", big, 400))
+toastClose()
+
+out ""
+out "== popup has a fallback when MessageBoxTimeoutA is missing =="
+check("timeout export resolved on this system", NotifyFFI.messageBoxTimeout != 0)
+
+out ""
+out "== choose() input validation =="
+check("empty option list rejected", (|| {
+    try { choose("pick", [])  give false } catch (e) { give indexOf(str(e), NOTIFY_ERROR) == 0 }
+})())
+check("non-array rejected", (|| {
+    try { choose("pick", "nope")  give false } catch (e) { give indexOf(str(e), NOTIFY_ERROR) == 0 }
+})())
+
+when not interactive {
+    out ""
+    out "  (dialog tests skipped -- set EZ_NOTIFY_INTERACTIVE=1 to include them)"
+} other {
+    out ""
+    out "== dialogs (answer these by hand) =="
+    alert("This is an alert. Click OK.")
+    check("confirm: click YES", confirm("Click Yes."))
+    check("confirm: click NO", confirm("Click No.") == false)
+    checkEq("ask: click CANCEL", ask("Click Cancel."), "cancel")
+    checkEq("ask: click YES", ask("Click Yes."), "yes")
+    check("prompt: click OK", prompt("Click OK."))
+    typed = input("Type: hello", "Input test", "hello")
+    checkEq("input returns the text", typed, "hello")
+    cancelled = input("Press Cancel", "Input test")
+    checkEq("cancel gives nil", typeOf(cancelled), "nil")
+    popup("This closes itself in 2 seconds.", "Popup", 2000)
+    check("popup returned", true)
+}
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

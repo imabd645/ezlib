@@ -1,0 +1,290 @@
+# ============================================================================
+# text — test suite
+#   ez test.ez
+#
+# The non-ASCII cases are not decoration. `len()` counts bytes, so every
+# character-oriented function here is wrong by default until proven otherwise,
+# and a name with an accent in it is the input that finds it.
+# ============================================================================
+
+use "text"
+use "text/unicode.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+task longestLine(text) {
+    longest = 0
+    get row in lines(text) {
+        when charCount(row) > longest { longest = charCount(row) }
+    }
+    give longest
+}
+
+out "text tests"
+
+# ── characters, not bytes ───────────────────────────────────────────────────
+# The premise of the whole package.
+check("ascii is the same either way", charCount("hello"), 5)
+check("len disagrees on an accent", len("café"), 5)
+check("charCount does not", charCount("café"), 4)
+check("two-byte characters", charCount("naïve"), 5)
+check("three-byte characters", charCount("日本語"), 3)
+check("and len counts nine bytes for them", len("日本語"), 9)
+check("an emoji is one character", charCount("ok 👍"), 4)
+check("empty", charCount(""), 0)
+
+check("chars splits correctly", to_json(chars("café")), to_json(["c", "a", "f", "é"]))
+check("chars on cjk", to_json(chars("日本")), to_json(["日", "本"]))
+check("charAt", charAt("café", 3), "é")
+check("charAt past the end", charAt("abc", 9), nil)
+check("charSlice", charSlice("café au lait", 0, 4), "café")
+check("charSlice past the end is clamped", charSlice("abc", 1, 99), "bc")
+# Reversing by byte would shred every multi-byte character.
+check("reverse", reverseText("café"), "éfac")
+check("reverse cjk", reverseText("日本語"), "語本日")
+check("isAscii", isAscii("plain"), true)
+check("isAscii on an accent", isAscii("café"), false)
+
+# ── whitespace ──────────────────────────────────────────────────────────────
+check("squish collapses runs", squish("  a   b  "), "a b")
+check("squish handles newlines", squish("a\n\nb"), "a b")
+check("squish handles tabs", squish("a\t\tb"), "a b")
+check("squish of empty", squish("   "), "")
+check("lines", len(lines("a\nb\nc")), 3)
+check("lines handles CRLF", to_json(lines("a\r\nb")), to_json(["a", "b"]))
+check("words", to_json(words("  the  quick fox ")), to_json(["the", "quick", "fox"]))
+check("wordCount", wordCount("one two three"), 3)
+check("wordCount of empty", wordCount("   "), 0)
+
+check("stripPrefix", stripPrefix("prefix-body", "prefix-"), "body")
+check("stripPrefix when absent", stripPrefix("body", "prefix-"), "body")
+check("stripSuffix", stripSuffix("name.txt", ".txt"), "name")
+check("stripSuffix when absent", stripSuffix("name", ".txt"), "name")
+
+check("indent", indent("a\nb", 2), "  a\n  b")
+# Indenting a blank line just leaves trailing whitespace behind.
+check("indent leaves blank lines alone", indent("a\n\nb", 2), "  a\n\n  b")
+check("dedent", dedent("    a\n    b"), "a\nb")
+# The common indentation goes; the relative structure stays.
+check("dedent keeps relative depth", dedent("    a\n      b"), "a\n  b")
+check("dedent of unindented text", dedent("a\nb"), "a\nb")
+check("repeatText", repeatText("ab", 3), "ababab")
+check("repeatText zero", repeatText("ab", 0), "")
+
+# ── padding ─────────────────────────────────────────────────────────────────
+check("padStart", padStart("7", 3, "0"), "007")
+check("padEnd", padEnd("a", 3, "."), "a..")
+check("padding defaults to spaces", padStart("a", 3, nil), "  a")
+check("already long enough", padStart("abcd", 2, "0"), "abcd")
+# This is the case that misaligns a table when padding counts bytes.
+check("padding counts characters", padEnd("café", 6, "."), "café..")
+check("and cjk", charCount(padEnd("日本", 5, ".")), 5)
+check("center", center("ab", 6, "-"), "--ab--")
+check("center with an odd gap", center("ab", 5, "-"), "-ab--")
+
+# ── truncation ──────────────────────────────────────────────────────────────
+# The width includes the ellipsis, so the result never overflows its column.
+check("truncate", truncate("abcdefghij", 5), "abcd…")
+check("truncate counts the suffix", charCount(truncate("abcdefghij", 5)), 5)
+check("short enough is untouched", truncate("abc", 5), "abc")
+check("exactly the width is untouched", truncate("abcde", 5), "abcde")
+check("a custom suffix", truncate("abcdefghij", 6, "..."), "abc...")
+check("truncate on characters", truncate("café au lait", 5), "café…")
+check("truncateWords cuts on a boundary", truncateWords("the quick brown fox", 12), "the quick…")
+check("truncateWords when it fits", truncateWords("short", 20), "short")
+check("truncateWords with no space to cut at", charCount(truncateWords("supercalifragilistic", 8)), 8)
+
+# ── wrapping ────────────────────────────────────────────────────────────────
+wrapped = wrap("The quick brown fox jumps over the lazy dog", 20)
+check("no line exceeds the width", longestLine(wrapped) <= 20, true)
+check("nothing is lost", squish(replace(wrapped, "\n", " ")),
+      "The quick brown fox jumps over the lazy dog")
+check("it actually wrapped", len(lines(wrapped)) > 1, true)
+# A URL in a paragraph should not push the whole block out.
+broken = wrap("a supercalifragilisticexpialidocious word", 10)
+check("a long word is broken rather than overflowing", longestLine(broken) <= 10, true)
+check("blank lines are preserved", len(lines(wrap("a\n\nb", 10))), 3)
+check("short text is untouched", wrap("short", 20), "short")
+throws("a zero width is refused", || wrap("x", 0))
+
+# ── case ────────────────────────────────────────────────────────────────────
+check("splits snake_case", to_json(splitWords("user_first_name")), to_json(["user", "first", "name"]))
+check("splits camelCase", to_json(splitWords("userFirstName")), to_json(["user", "First", "Name"]))
+check("splits kebab-case", to_json(splitWords("user-first-name")), to_json(["user", "first", "name"]))
+check("splits spaces", to_json(splitWords("user first name")), to_json(["user", "first", "name"]))
+# The case that catches naive implementations: an acronym is one word, and the
+# next capitalised word starts a new one.
+check("splits an acronym correctly", to_json(splitWords("HTTPServer")), to_json(["HTTP", "Server"]))
+check("and in the middle", to_json(splitWords("parseHTTPResponse")),
+      to_json(["parse", "HTTP", "Response"]))
+check("digits do not split", to_json(splitWords("user2name")), to_json(["user2name"]))
+
+check("camelCase", camelCase("user_first_name"), "userFirstName")
+check("camelCase from spaces", camelCase("User First Name"), "userFirstName")
+check("camelCase is idempotent", camelCase(camelCase("user_name")), "userName")
+check("pascalCase", pascalCase("user_first_name"), "UserFirstName")
+check("snakeCase", snakeCase("userFirstName"), "user_first_name")
+check("snakeCase from an acronym", snakeCase("HTTPServer"), "http_server")
+check("kebabCase", kebabCase("userFirstName"), "user-first-name")
+check("constantCase", constantCase("userFirstName"), "USER_FIRST_NAME")
+check("titleCase", titleCase("hello-world"), "Hello World")
+check("capitalise", capitalise("hello"), "Hello")
+check("capitalise lowers the rest", capitalise("hELLO"), "Hello")
+check("capitalise of empty", capitalise(""), "")
+# Only the first letter, so names and acronyms mid-sentence survive.
+check("sentenceCase", sentenceCase("hello World from EZ"), "Hello World from EZ")
+check("humanise", humanise("user_first_name"), "User first name")
+check("humanise from camel", humanise("userFirstName"), "User first name")
+check("the American spellings are there too", capitalize("x"), "X")
+
+# ── slugs ───────────────────────────────────────────────────────────────────
+check("slug", slug("Hello, World!"), "hello-world")
+# Folding rather than dropping: "Crème Brûlée" must not lose its words.
+check("slug folds accents", slug("Crème Brûlée"), "creme-brulee")
+check("slug folds german", slug("Größe Straße"), "grosse-strasse")
+check("slug folds ligatures", slug("Æsop's Œuvre"), "aesops-oeuvre")
+# lower() only folds ASCII, so an upper-case accent has to be in the table in
+# its own right or it is silently dropped.
+check("slug folds upper-case accents", slug("CAFÉ"), "cafe")
+# An apostrophe disappears rather than separating.
+check("slug drops apostrophes", slug("Tom's Diner"), "toms-diner")
+check("slug folds a mixed-case name", slug("Ångström Ünit"), "angstrom-unit")
+check("slug spells out symbols", slug("Tom & Jerry"), "tom-and-jerry")
+# A run of punctuation collapses to one separator.
+check("slug collapses runs", slug("a --- b"), "a-b")
+check("slug trims the ends", slug("  !hello!  "), "hello")
+check("slug keeps digits", slug("Version 2.0"), "version-2-0")
+check("slug with a custom separator", slug("hello world", "_"), "hello_world")
+check("slug of nothing usable", slug("!!!"), "")
+check("slug drops unmappable characters", slug("日本 test"), "test")
+
+# ── masking ─────────────────────────────────────────────────────────────────
+# Enough to tell two values apart, not enough to use one.
+check("mask", mask("sk-1234567890"), "*********7890")
+check("mask keeps the length", charCount(mask("abcdefgh")), 8)
+check("mask a short value entirely", mask("abc"), "***")
+check("mask exactly at the boundary", mask("abcd"), "****")
+check("mask with a custom amount", mask("1234567890", 2), "********90")
+check("maskEmail", maskEmail("someone@example.com"), "s******@example.com")
+check("maskEmail of a one-letter name", maskEmail("a@b.com"), "*@b.com")
+check("maskEmail of a non-address", maskEmail("nonsense"), "********")
+check("initials", initials("Ada Lovelace"), "AL")
+check("initials of one name", initials("Ada"), "A")
+check("initials are capped", initials("Johann Sebastian Bach"), "JS")
+check("initials with a limit", initials("Johann Sebastian Bach", 3), "JSB")
+
+# ── comparison ──────────────────────────────────────────────────────────────
+check("counts occurrences", countOccurrences("abcabcabc", "abc"), 3)
+# Non-overlapping, which is what people expect from a count.
+check("does not double count overlaps", countOccurrences("aaaa", "aa"), 2)
+check("counts none", countOccurrences("abc", "z"), 0)
+check("an empty needle counts nothing", countOccurrences("abc", ""), 0)
+
+check("identical strings", editDistance("abc", "abc"), 0)
+check("one substitution", editDistance("abc", "abd"), 1)
+check("one insertion", editDistance("abc", "abcd"), 1)
+check("one deletion", editDistance("abcd", "abc"), 1)
+# The textbook example.
+check("kitten to sitting", editDistance("kitten", "sitting"), 3)
+check("from empty", editDistance("", "abc"), 3)
+check("both empty", editDistance("", ""), 0)
+# Distance in characters, not bytes: these differ by one letter, not three.
+check("distance counts characters", editDistance("café", "cafe"), 1)
+
+check("identical is 1", similarity("abc", "abc"), 1)
+check("both empty is 1", similarity("", ""), 1)
+check("nothing in common", similarity("abc", "xyz"), 0)
+check("kitten and sitting", round(similarity("kitten", "sitting") * 1000), 571)
+check("closestMatch finds a typo", closestMatch("instal", ["install", "publish", "list"]), "install")
+check("closestMatch is case-insensitive", closestMatch("INSTAL", ["install"]), "install")
+# Better nothing than a confidently wrong suggestion.
+check("closestMatch gives up when nothing is close",
+      closestMatch("zzzzzz", ["install", "publish"]), nil)
+check("closestMatch with a lower threshold",
+      closestMatch("inst", ["install"], 0.5), "install")
+
+# ── words and numbers ───────────────────────────────────────────────────────
+check("regular plural", pluralise("file", 2), "files")
+check("one is singular", pluralise("file", 1), "file")
+check("zero is plural", pluralise("file", 0), "files")
+check("-s takes -es", pluralise("bus", 2), "buses")
+check("-ch takes -es", pluralise("church", 2), "churches")
+check("-sh takes -es", pluralise("dish", 2), "dishes")
+check("-x takes -es", pluralise("box", 2), "boxes")
+# -y after a consonant becomes -ies, but "day" is "days".
+check("consonant + y takes -ies", pluralise("city", 2), "cities")
+check("vowel + y just takes -s", pluralise("day", 2), "days")
+check("an irregular", pluralise("person", 2), "people")
+check("another", pluralise("child", 2), "children")
+check("an unchanging one", pluralise("sheep", 2), "sheep")
+check("a latin one", pluralise("index", 2), "indices")
+# The case of the original is kept, so a heading stays a heading.
+check("capitalisation is preserved", pluralise("Person", 2), "People")
+check("and shouting", pluralise("PERSON", 2), "PEOPLE")
+check("the American spelling works", pluralize("file", 2), "files")
+
+check("countOf singular", countOf(1, "file"), "1 file")
+check("countOf plural", countOf(3, "file"), "3 files")
+check("countOf zero", countOf(0, "result"), "0 results")
+check("countOf irregular", countOf(2, "person"), "2 people")
+
+check("first", ordinal(1), "1st")
+check("second", ordinal(2), "2nd")
+check("third", ordinal(3), "3rd")
+check("fourth", ordinal(4), "4th")
+# 11, 12 and 13 are the exceptions everyone gets wrong.
+check("eleventh", ordinal(11), "11th")
+check("twelfth", ordinal(12), "12th")
+check("thirteenth", ordinal(13), "13th")
+check("twenty-first", ordinal(21), "21st")
+check("hundred and eleventh", ordinal(111), "111th")
+check("hundred and first", ordinal(101), "101st")
+
+check("a before a consonant", article("file"), "a")
+check("an before a vowel", article("apple"), "an")
+# Where the spelling and the sound disagree.
+check("an hour", article("hour"), "an")
+check("a university", article("university"), "a")
+check("a user", article("user"), "a")
+check("an honest mistake", article("honest"), "an")
+
+# ── lists ───────────────────────────────────────────────────────────────────
+check("one item", listSentence(["a"]), "a")
+check("two items", listSentence(["a", "b"]), "a and b")
+check("three items", listSentence(["a", "b", "c"]), "a, b and c")
+check("none", listSentence([]), "")
+check("a different conjunction", listSentence(["a", "b"], "or"), "a or b")
+
+# ── excerpts ────────────────────────────────────────────────────────────────
+long1 = "The quick brown fox jumps over the lazy dog and then continues running through the field"
+piece = excerpt(long1, "lazy", 10)
+check("the excerpt contains the phrase", contains(piece, "lazy"), true)
+# Ellipses only where something was actually cut.
+check("it is marked as cut at the start", startsWith(piece, "…"), true)
+check("and at the end", endsWith(piece, "…"), true)
+check("a phrase at the start is not marked", startsWith(excerpt(long1, "The", 10), "…"), false)
+check("a missing phrase falls back to the opening",
+      startsWith(excerpt(long1, "zebra", 10), "The quick"), true)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

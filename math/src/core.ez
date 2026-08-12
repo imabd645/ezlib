@@ -1,0 +1,83 @@
+use "constants.ez"
+
+export task degToRad(degrees) { give degrees * PI / 180.0 }
+export task radToDeg(radians) { give radians * 180.0 / PI }
+export task degToGrad(degrees) { give degrees * 10.0 / 9.0 }
+export task gradToDeg(grads) { give grads * 9.0 / 10.0 }
+export task radToGrad(radians) { give radToDeg(radians) * 10.0 / 9.0 }
+export task gradToRad(grads) { give degToRad(gradToDeg(grads)) }
+
+# Round halves away from zero, matching the previous math package contract.
+export task round(value) {
+    when value >= 0 { give floor(value + 0.5) }
+    give ceil(value - 0.5)
+}
+
+export task trunc(value) {
+    when value >= 0 { give floor(value) }
+    give ceil(value)
+}
+
+export task sign(value) {
+    when value > 0 { give 1 }
+    when value < 0 { give -1 }
+    give 0
+}
+
+export task frac(value) { give value - trunc(value) }
+
+export task clamp(value, minValue, maxValue) {
+    when minValue > maxValue { throw "clamp(): minValue must not exceed maxValue" }
+    when value < minValue { give minValue }
+    when value > maxValue { give maxValue }
+    give value
+}
+
+export task nearlyEqual(a, b, epsilon = EPSILON) {
+    when epsilon < 0 { throw "nearlyEqual(): epsilon must be non-negative" }
+    give abs(a - b) <= epsilon
+}
+
+export task isNaN(value) { give value != value }
+export task isFinite(value) { give value == value and abs(value) != 1 / 0 }
+
+export task sum(values) {
+    total = 0
+    get value in values { total = total + value }
+    give total
+}
+
+export task product(values) {
+    total = 1
+    get value in values { total = total * value }
+    give total
+}
+
+export task min(values) {
+    when len(values) == 0 { throw "min(): values must not be empty" }
+    result = values[0]
+    get value in values { when value < result { result = value } }
+    give result
+}
+
+export task max(values) {
+    when len(values) == 0 { throw "max(): values must not be empty" }
+    result = values[0]
+    get value in values { when value > result { result = value } }
+    give result
+}
+
+export task minMax(values) {
+    when len(values) == 0 { throw "minMax(): values must not be empty" }
+    give { "min": min(values), "max": max(values) }
+}
+
+export task average(values) {
+    when len(values) == 0 { throw "average(): values must not be empty" }
+    give sum(values) / len(values)
+}
+
+export task range(values) {
+    bounds = minMax(values)
+    give bounds["max"] - bounds["min"]
+}

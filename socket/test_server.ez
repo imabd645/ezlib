@@ -1,0 +1,21 @@
+// Minimal echo server. Run this, then test_client.ez in another terminal.
+//
+// Note there is no `socket.` prefix: EZ modules import flat, so `use "socket"`
+// puts tcp_listen/tcp_connect directly in scope. The previous version of this
+// file called socket.create(), which fails with "Cannot access property
+// 'create' on nil".
+use "socket"
+
+srv = tcp_listen("127.0.0.1", 8080)
+out "TCP echo server listening on 127.0.0.1:8080..."
+
+conn = srv.accept()
+out "Client connected from " + conn.ip + ":" + str(conn.port)
+
+msg = conn.recv(1024)
+out "Received: " + msg
+conn.sendAll("Echo: " + msg)
+conn.close()
+
+srv.close()
+out "Server shut down."

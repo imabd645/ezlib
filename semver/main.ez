@@ -1,0 +1,175 @@
+# ============================================================================
+# semver — semantic version parsing, comparison and ranges for EZ
+#
+#   use "semver"
+#   Semver.satisfies("1.4.2", "^1.2.0")     # true
+#   Semver.compare("1.10.0", "1.9.0")       # 1
+#
+# Written against the semver.org rules that actually bite: 1.10.0 is newer
+# than 1.9.0 (numeric, not lexical), and 1.0.0-beta is OLDER than 1.0.0.
+# ============================================================================
+
+use "semver/parse.ez"
+use "semver/range.ez"
+
+export model Semver {
+
+    # { major, minor, patch, prerelease, build } or nil when unparseable.
+    static task parse(version) {
+        give svParse(version)
+    }
+
+    static task isValid(version) {
+        give svParse(version) != nil
+    }
+
+    # -1 when a < b, 0 when equal, 1 when a > b.
+    # Throws when either side is not a version, because silently ordering
+    # garbage is worse than stopping.
+    static task compare(a, b) {
+        left = svParse(a)
+        right = svParse(b)
+        when left == nil { throw Exception(`semver: '{a}' is not a valid version`) }
+        when right == nil { throw Exception(`semver: '{b}' is not a valid version`) }
+        give svCompare(left, right)
+    }
+
+    static task gt(a, b) { give Semver.compare(a, b) > 0 }
+    static task lt(a, b) { give Semver.compare(a, b) < 0 }
+    static task gte(a, b) { give Semver.compare(a, b) >= 0 }
+    static task lte(a, b) { give Semver.compare(a, b) <= 0 }
+    static task eq(a, b) { give Semver.compare(a, b) == 0 }
+    static task neq(a, b) { give Semver.compare(a, b) != 0 }
+
+    # Does `version` satisfy `range`? See the README for supported syntax.
+    static task satisfies(version, range) {
+        parsed = svParse(version)
+        when parsed == nil { give false }
+        give svSatisfies(parsed, str(range))
+    }
+
+    # Highest version in `versions` that satisfies `range`, or nil.
+    # Prereleases are excluded unless the range asks for one, matching how
+    # every package manager behaves -- nobody wants 2.0.0-alpha from "^1.0.0".
+    static task maxSatisfying(versions, range) {
+        best = nil
+        bestParsed = nil
+        get candidate in versions {
+            parsed = svParse(candidate)
+            when parsed == nil { skip }
+            when svSatisfies(parsed, str(range)) == false { skip }
+            when bestParsed == nil or svCompare(parsed, bestParsed) > 0 {
+                best = candidate
+                bestParsed = parsed
+            }
+        }
+        give best
+    }
+
+    static task minSatisfying(versions, range) {
+        best = nil
+        bestParsed = nil
+        get candidate in versions {
+            parsed = svParse(candidate)
+            when parsed == nil { skip }
+            when svSatisfies(parsed, str(range)) == false { skip }
+            when bestParsed == nil or svCompare(parsed, bestParsed) < 0 {
+                best = candidate
+                bestParsed = parsed
+            }
+        }
+        give best
+    }
+
+    # Ascending. Invalid entries are dropped rather than ordered arbitrarily.
+    static task sort(versions) {
+        parsed = []
+        get v in versions {
+            p = svParse(v)
+            when p != nil { push(parsed, { "text": v, "parsed": p }) }
+        }
+        # Insertion sort: version lists are short, and this keeps the
+        # comparison explicit rather than relying on sort() with a key.
+        ordered = []
+        get entry in parsed {
+            placed = false
+            index = 0
+            get existing in ordered {
+                when svCompare(entry["parsed"], existing["parsed"]) < 0 {
+                    insert(ordered, index, entry)
+                    placed = true
+                    escape
+                }
+                index = index + 1
+            }
+            when placed == false { push(ordered, entry) }
+        }
+        result = []
+        get entry in ordered { push(result, entry["text"]) }
+        give result
+    }
+
+    static task rsort(versions) {
+        give reverse(Semver.sort(versions))
+    }
+
+    # Highest / lowest of a plain list.
+    static task max(versions) {
+        ordered = Semver.sort(versions)
+        when len(ordered) == 0 { give nil }
+        give ordered[len(ordered) - 1]
+    }
+
+    static task min(versions) {
+        ordered = Semver.sort(versions)
+        when len(ordered) == 0 { give nil }
+        give ordered[0]
+    }
+
+    # ── incrementing ────────────────────────────────────────────────────────
+
+    # part: "major" | "minor" | "patch". Increments and clears the parts
+    # below it, plus any prerelease and build metadata.
+    static task inc(version, part) {
+        parsed = svParse(version)
+        when parsed == nil { throw Exception(`semver: '{version}' is not a valid version`) }
+        major = parsed["major"]
+        minor = parsed["minor"]
+        patch = parsed["patch"]
+        when part == "major" { major = major + 1  minor = 0  patch = 0 }
+        other { when part == "minor" { minor = minor + 1  patch = 0 }
+        other { when part == "patch" {
+            # A prerelease releases to its own version: 1.2.3-beta -> 1.2.3.
+            when parsed["prerelease"] == "" { patch = patch + 1 }
+        }
+        other { throw Exception(`semver: unknown part '{part}', expected major, minor or patch`) }}}
+        give str(major) + "." + str(minor) + "." + str(patch)
+    }
+
+    # "1.2.3-beta" -> true
+    static task isPrerelease(version) {
+        parsed = svParse(version)
+        when parsed == nil { give false }
+        give parsed["prerelease"] != ""
+    }
+
+    # Version without prerelease or build metadata.
+    static task clean(version) {
+        parsed = svParse(version)
+        when parsed == nil { give nil }
+        give str(parsed["major"]) + "." + str(parsed["minor"]) + "." + str(parsed["patch"])
+    }
+
+    # "major" / "minor" / "patch" / "prerelease" / nil, describing how b
+    # differs from a. Useful for deciding whether an update is safe.
+    static task diff(a, b) {
+        left = svParse(a)
+        right = svParse(b)
+        when left == nil or right == nil { give nil }
+        when svCompare(left, right) == 0 { give nil }
+        when left["major"] != right["major"] { give "major" }
+        when left["minor"] != right["minor"] { give "minor" }
+        when left["patch"] != right["patch"] { give "patch" }
+        give "prerelease"
+    }
+}

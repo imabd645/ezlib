@@ -1,0 +1,110 @@
+# ============================================================================
+# color/codes.ez — ANSI escape sequences
+#
+# A terminal renders "\e[31mred\e[0m" as coloured text. The codes are simple;
+# the two things that need care are always emitting a reset (or the colour
+# bleeds into everything printed afterwards, including the shell prompt after
+# the program exits) and measuring width without counting the escapes.
+# ============================================================================
+
+export ESC = chr(27) + "["
+export RESET = chr(27) + "[0m"
+
+# Foreground base is 30, background 40; the bright variants are 90 and 100.
+export FG = {
+    "black": 30, "red": 31, "green": 32, "yellow": 33,
+    "blue": 34, "magenta": 35, "cyan": 36, "white": 37,
+    "gray": 90, "grey": 90,
+    "brightRed": 91, "brightGreen": 92, "brightYellow": 93,
+    "brightBlue": 94, "brightMagenta": 95, "brightCyan": 96, "brightWhite": 97
+}
+
+export BG = {
+    "black": 40, "red": 41, "green": 42, "yellow": 43,
+    "blue": 44, "magenta": 45, "cyan": 46, "white": 47,
+    "gray": 100, "grey": 100,
+    "brightRed": 101, "brightGreen": 102, "brightYellow": 103,
+    "brightBlue": 104, "brightMagenta": 105, "brightCyan": 106, "brightWhite": 107
+}
+
+export STYLE = {
+    "bold": 1, "dim": 2, "italic": 3, "underline": 4,
+    "blink": 5, "inverse": 7, "hidden": 8, "strike": 9
+}
+
+export task sgr(code) { give ESC + str(code) + "m" }
+
+# Removes every escape sequence. Needed wherever text is measured or padded:
+# a coloured string is longer in bytes than it looks on screen, so aligning
+# by len() would leave columns ragged.
+export task stripAnsi(text) {
+    body = str(text)
+    result = ""
+    total = len(body)
+    i = 0
+    while i < total {
+        c = substr(body, i, 1)
+        when c == chr(27) {
+            i = i + 1
+            # The '[' that introduces a CSI sequence must be consumed first:
+            # its code is 91, which falls inside the terminator range below,
+            # so scanning without skipping it ends the sequence immediately
+            # and leaves the parameters ("31m") in the output.
+            when i < total and substr(body, i, 1) == "[" { i = i + 1 }
+            while i < total {
+                code = ord(substr(body, i, 1))
+                i = i + 1
+                # Final byte of a CSI sequence is in the range @ to ~.
+                when code >= 64 and code <= 126 { escape }
+            }
+            skip
+        }
+        result = result + c
+        i = i + 1
+    }
+    give result
+}
+
+# Printable width, ignoring escapes.
+#
+# Counts CHARACTERS, not bytes. EZ's len() is byte-based, so a box-drawing
+# character measures 3 and an accented letter 2 -- padding a column by len()
+# would leave every line a different width on screen. A UTF-8 continuation
+# byte is 0x80-0xBF, so counting the bytes that are not continuations gives
+# the character count.
+export task visibleLength(text) {
+    body = stripAnsi(text)
+    count = 0
+    total = len(body)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(body, i, 1))
+        when code < 128 or code > 191 { count = count + 1 }
+    }
+    give count
+}
+
+# Substring by CHARACTER offset, so a multi-byte character is never split in
+# half -- a truncated UTF-8 sequence renders as a replacement glyph and can
+# corrupt everything after it on the line.
+export task visibleSubstr(text, from, count) {
+    body = str(text)
+    total = len(body)
+    start = -1
+    # NOT `stop`: builtin name, and a bare assignment would replace it.
+    stopAt = total
+    chars = 0
+    i = 0
+    while i < total {
+        code = ord(substr(body, i, 1))
+        when code < 128 or code > 191 {
+            when chars == from { start = i }
+            when chars == from + count { stopAt = i  escape }
+            chars = chars + 1
+        }
+        i = i + 1
+    }
+    when start < 0 { give "" }
+    give substr(body, start, stopAt - start)
+}
+
+export task hasAnsi(text) { give contains(str(text), chr(27)) }

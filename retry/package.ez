@@ -1,0 +1,11 @@
+{
+  "name": "retry",
+  "version": "1.0.0",
+  "description": "Retries, exponential backoff with jitter, and circuit breaking for EZ. For network calls and anything else that fails transiently.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["retry", "backoff", "jitter", "resilience", "circuit-breaker", "http"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

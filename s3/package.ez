@@ -1,0 +1,11 @@
+{
+  "name": "s3",
+  "version": "1.0.0",
+  "description": "S3-compatible object storage for EZ. AWS Signature V4, put/get/list/delete, presigned URLs, and presets for R2, Spaces and MinIO.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["s3", "storage", "aws", "r2", "minio", "upload", "files", "sigv4"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "httpx": "^1.0.0", "crypto": "^1.0.0" }
+}

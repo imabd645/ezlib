@@ -1,0 +1,191 @@
+# Regression tests for the ezweb framework.
+# Run:  ez test_web.ez     (from C:\ezlib\web)
+
+use "main.ez"
+
+passes = 0
+fails = 0
+
+task check(name, actual, expected) {
+    when str(actual) == str(expected) {
+        passes = passes + 1
+        out "  [PASS] " + name
+    } other {
+        fails = fails + 1
+        out "  [FAIL] " + name + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+
+out "=== ezweb regression tests ==="
+
+# --- URL decoding -----------------------------------------------------------
+# Was WebUtils.urlDecode, which returned nil for EVERY input: `give urlDecode(...)`
+# inside a task named urlDecode compiled to TAIL_CALL, and because the callee was
+# really the global builtin the VM took the ordinary-call path and then fell into
+# the implicit trailing LOAD_NIL + RETURN, discarding the result. Every HTML form
+# field and query parameter decoded to nil.
+check("decodeUrl percent escapes", WebUtils.decodeUrl("hello%20world%21"), "hello world!")
+check("decodeUrl reserved chars",  WebUtils.decodeUrl("a%3Db%26c"), "a=b&c")
+check("decodeUrl plus as space",   WebUtils.decodeUrl("plus+sign"), "plus sign")
+check("decodeUrl passthrough",     WebUtils.decodeUrl("plain"), "plain")
+
+# --- HTML escaping ----------------------------------------------------------
+check("escapeHtml tags",   WebUtils.escapeHtml("<b>"), "&lt;b&gt;")
+check("escapeHtml quotes", WebUtils.escapeHtml("\"'"), "&quot;&#39;")
+check("escapeHtml amp",    WebUtils.escapeHtml("&"), "&amp;")
+
+# --- Secure session tokens --------------------------------------------------
+# Session ids used to be "sess_" + clock() + "_" + counter: a millisecond
+# timestamp plus a small integer, i.e. guessable, i.e. session hijacking.
+t1 = secure_token(32)
+t2 = secure_token(32)
+check("secure_token length (32B -> 64 hex)", len(t1), 64)
+check("secure_token is not constant", t1 != t2, true)
+check("secure_token honours size", len(secure_token(8)), 16)
+
+# --- Template engine --------------------------------------------------------
+r = TemplateEngine.render("Hi {{ name }}!", {"name": "Ana", "__base_dir__": ""})
+check("template interpolation", r, "Hi Ana!")
+
+r2 = TemplateEngine.render("{{ v }}", {"v": "<script>", "__base_dir__": ""})
+check("template escapes by default", r2, "&lt;script&gt;")
+
+r3 = TemplateEngine.render("{{ v | safe }}", {"v": "<b>x</b>", "__base_dir__": ""})
+check("template | safe filter", r3, "<b>x</b>")
+
+# --- Routing ----------------------------------------------------------------
+# keys() over a dictionary is hash order, not registration order, so "first
+# match wins" made routing depend on hashing: "/users/<id>" hashes ahead of
+# "/users/new", so GET /users/new matched the parameterised route with id="new"
+# and the static route was unreachable. The matcher now scores by the number of
+# literal segments, so a static segment always beats a parameter.
+app = WebApp()
+app.get("/users/new", |req| { give "STATIC" })
+app.get("/users/<id>", |req| { give "PARAM:" + req["params"]["id"] })
+app.get("/", |req| { give "ROOT" })
+
+check("route table registered", len(keys(app.routes)), 3)
+check("debug tracing off by default", app.debug, false)
+
+# --- HTTP methods -----------------------------------------------------------
+# Only GET/POST/PUT/DELETE existed: PATCH (the normal verb for partial updates)
+# was impossible to register, and OPTIONS only answered via the CORS middleware.
+m = WebApp()
+m.get("/a", |req| { give "" })
+m.post("/a", |req| { give "" })
+m.put("/a", |req| { give "" })
+m.delete("/a", |req| { give "" })
+m.patch("/a", |req| { give "" })
+m.head("/a", |req| { give "" })
+m.options("/a", |req| { give "" })
+check("all 7 HTTP verbs registerable", len(keys(m.routes)), 7)
+
+# 405 vs 404: a path that exists under another method is Method Not Allowed.
+allowed = m._allowedMethodsFor(split("/a", "/"))
+check("_allowedMethodsFor finds every verb", len(allowed), 7)
+check("_allowedMethodsFor on unknown path", len(m._allowedMethodsFor(split("/zz", "/"))), 0)
+
+# 405's phrase was missing from the status table, so a correct 405 went out as
+# "HTTP/1.1 405 Not Found".
+check("405 has a status phrase", WebUtils.HTTP_STATUS[405], "Method Not Allowed")
+check("201 has a status phrase", WebUtils.HTTP_STATUS[201], "Created")
+
+# --- Error handlers ---------------------------------------------------------
+# on_404/on_500 wrote errorHandlers and NOTHING ever read it: both were silent
+# no-ops despite being documented and used in the README's own example.
+e = WebApp()
+check("errorHandlers empty initially", typeOf(e.errorHandlers["404"]), "nil")
+e.on_404(|req| { give "custom" })
+e.on_500(|req, err| { give "custom500" })
+check("on_404 stores a handler", typeOf(e.errorHandlers["404"]), "function")
+check("on_500 stores a handler", typeOf(e.errorHandlers["500"]), "function")
+
+# --- Content types ----------------------------------------------------------
+check("contentTypeFor png", WebUtils.contentTypeFor("a.png"), "image/png")
+check("contentTypeFor css", WebUtils.contentTypeFor("a.css"), "text/css")
+check("contentTypeFor unknown", WebUtils.contentTypeFor("a.xyz"), "application/octet-stream")
+# Binary types must NOT go through the string response path (NUL truncation).
+check("png is binary", WebUtils.isBinaryType("image/png"), true)
+check("svg is not binary", WebUtils.isBinaryType("image/svg+xml"), false)
+check("text/html is not binary", WebUtils.isBinaryType("text/html"), false)
+
+# --- Response helpers -------------------------------------------------------
+sf = send_file("x/y.png")
+check("send_file marks a file response", sf["__sendfile__"], "x/y.png")
+jr = json_response({"a": 1}, 201)
+check("json_response status", jr["status"], 201)
+check("json_response content type", jr["headers"]["Content-Type"], "application/json")
+
+# --- Cookie helper ----------------------------------------------------------
+res = { "headers": {} }
+set_cookie(res, "tok", "abc")
+c = res["headers"]["Set-Cookie"]
+check("set_cookie name=value", indexOf(c, "tok=abc") != -1, true)
+check("set_cookie HttpOnly by default", indexOf(c, "HttpOnly") != -1, true)
+check("set_cookie SameSite by default", indexOf(c, "SameSite=Lax") != -1, true)
+res2 = { "headers": {} }
+set_cookie(res2, "t", "v", {"secure": true, "maxAge": 60})
+check("set_cookie Secure opt", indexOf(res2["headers"]["Set-Cookie"], "Secure") != -1, true)
+check("set_cookie Max-Age opt", indexOf(res2["headers"]["Set-Cookie"], "Max-Age=60") != -1, true)
+
+# --- Session clear ----------------------------------------------------------
+r = { "session": {"user": "ana", "role": "admin"} }
+clear_session(r)
+check("clear_session empties the session", len(keys(r["session"])), 0)
+
+# --- Static cache bound -----------------------------------------------------
+check("static cache is capped", app.static_cache_max > 0, true)
+
+# --- Connection / caching defaults ------------------------------------------
+# These are the values README documents; keep them honest.
+check("keep-alive on by default", app.keep_alive, true)
+check("static_max_age default", app.static_max_age, 3600)
+check("static_cache_max default", app.static_cache_max, 128)
+
+# --- Session rotation / stores ----------------------------------------------
+# regenerate_session marks a request so the response mints a fresh session id and
+# retires the old one. Without it, an attacker-planted session id survives login
+# and ends up authenticated: session fixation.
+rr = { "session": {"user": "ana"} }
+regenerate_session(rr)
+check("regenerate_session marks the request", rr["__regenerate_session__"], true)
+check("regenerate_session keeps session contents", rr["session"]["user"], "ana")
+
+ms = MemorySessionStore()
+ms.set("sid1", {"a": 1})
+check("session store round-trips", ms.get("sid1")["a"], 1)
+ms.delete("sid1")
+# A retired id must come back empty, not with its old contents.
+check("session store delete retires the id", len(keys(ms.get("sid1"))), 0)
+check("deleting an unknown id is safe", typeOf(ms.delete("nope")), "nil")
+
+# --- URL encoding -----------------------------------------------------------
+# encodeUrl is the counterpart to decodeUrl; without it a value placed INTO a URL
+# could end the parameter early and inject another one.
+check("encodeUrl escapes a slash", WebUtils.encodeUrl("/a/b"), "%2Fa%2Fb")
+check("encodeUrl escapes an ampersand", indexOf(WebUtils.encodeUrl("a&b"), "&") == -1, true)
+check("encodeUrl round-trips", WebUtils.decodeUrl(WebUtils.encodeUrl("a b&c=/d")), "a b&c=/d")
+
+# --- Worker processes -------------------------------------------------------
+# `workers` runs N copies of the process, each with its own VM, so handlers
+# actually run in parallel; handlers in ONE process are serialized on the
+# interpreter's main thread. This suite runs single-process, so we are the
+# supervisor, not a worker.
+check("worker_pid is this process", worker_pid() > 0, true)
+check("test run is not a worker", os_call(HttpAccelFFI.isWorker, "int"), 0)
+# The guard in run() must accept an integer count: typeOf() reports "integer",
+# never "number", and testing for "number" silently forced every app back to a
+# single worker.
+check("typeOf(3) is integer, not number", typeOf(3), "integer")
+
+# --- Template include depth guard -------------------------------------------
+# {% include %} renders a whole file from the top, so a self-including template
+# used to recurse until the stack overflowed -- taking the process down, not just
+# the render. It must now come back as an error marker instead.
+deep = TemplateEngine.render("{% include \"__nonexistent__.html\" %}", {"__base_dir__": "."})
+check("missing include reports, does not crash", indexOf(deep, "[Error:") != -1, true)
+
+out ""
+out "========================================"
+out " passed: " + str(passes) + "   failed: " + str(fails)
+out "========================================"

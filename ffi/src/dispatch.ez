@@ -1,0 +1,60 @@
+// ============================================================================
+// src/dispatch.ez — Core call dispatching for the ezffi library.
+//
+// _coerceArgs(args, argtypes) — apply type-level coercion (e.g. bool→0/1)
+// _dispatch(ptr, retTypeStr, sigArray, args) — route to the right os_call_*
+//
+// Uses os_call_sig_arr for ALL paths (both typed and untyped), which is fully
+// variadic at the C++ level and has no argument count limit.
+// ============================================================================
+
+use "types.ez"
+
+// Coerce EZ values according to the declared argtypes.
+// Currently handles:
+//   - boolean → 0/1 for integer parameters
+// Future: could add null-safety checks, string encoding, etc.
+export task _coerceArgs(args, argtypes) {
+    when not argtypes { give args }
+    coerced = []
+    i = 0
+    get arg in args {
+        when i < len(argtypes) {
+            t = typeStr(argtypes[i])
+            // Coerce booleans to integers for C int params
+            when (t == "i8" or t == "u8" or t == "i16" or t == "u16" or
+                  t == "i32" or t == "u32" or t == "i64" or t == "u64" or t == "int") {
+                when typeOf(arg) == "boolean" {
+                    when arg { push(coerced, 1) }
+                    other    { push(coerced, 0) }
+                } other {
+                    push(coerced, arg)
+                }
+            } other {
+                push(coerced, arg)
+            }
+        } other {
+            push(coerced, arg)
+        }
+        i = i + 1
+    }
+    give coerced
+}
+
+// Route a call to the right underlying builtin.
+//
+//   sigArray — array of type strings; when nil, all args treated as ptr/int.
+//   args     — already-coerced EZ values to pass to the native function.
+//
+// Both paths use os_call_sig_arr which is fully variadic at C++ level.
+// When no sigArray, we auto-generate an all-"ptr" signature so the same
+// code path handles every case — no argument count limits.
+export task _dispatch(ptr, retTypeStr, sigArray, args) {
+    sig = sigArray
+    when not sig {
+        // Auto-generate all-pointer signature for untyped calls
+        sig = []
+        get a in args { push(sig, "ptr") }
+    }
+    give os_call_sig_arr(ptr, retTypeStr, sig, args)
+}

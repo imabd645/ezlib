@@ -1,0 +1,11 @@
+{
+  "name": "ratelimit",
+  "version": "1.0.0",
+  "description": "Request throttling for EZ. Sliding window and token bucket, in-memory or Redis-backed, with the conventional rate-limit headers.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["ratelimit", "throttle", "quota", "api", "abuse", "token-bucket"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

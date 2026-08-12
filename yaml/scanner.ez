@@ -1,0 +1,88 @@
+# ============================================================================
+# yaml/scanner.ez — source text to logical lines
+#
+# Splits YAML source into line records the parser can walk. Comments and
+# blank lines are marked rather than discarded: block scalars (| and >) need
+# the raw text of the lines they span, including blank ones, so throwing that
+# away here would make them impossible to reconstruct later.
+# ============================================================================
+
+# A line record:
+#   line   1-based number, used in error messages
+#   raw    the line exactly as written (block scalars need this)
+#   indent count of leading spaces
+#   text   content with the trailing comment removed and ends trimmed
+#   blank  true when the line has no content of its own
+
+export task yamlCountIndent(raw) {
+    n = 0
+    limit = len(raw)
+    repeat i = 0 to limit - 1 {
+        c = substr(raw, i, 1)
+        when c == " " { n = n + 1 }
+        other {
+            # Tabs cannot be used for indentation in YAML; rejecting them here
+            # gives a clear message instead of a confusing structural error.
+            when c == chr(9) {
+                throw Exception(`YAML: tabs are not allowed for indentation (line {i})`)
+            }
+            escape
+        }
+    }
+    give n
+}
+
+# Removes a trailing `# comment`, but only when the # is outside quotes and
+# preceded by whitespace or at the start. `a#b` and "a # b" both keep their #.
+export task yamlStripComment(s) {
+    quote = ""
+    n = len(s)
+    i = 0
+    while i < n {
+        c = substr(s, i, 1)
+        when quote != "" {
+            # Inside a quoted run: a backslash escape inside double quotes
+            # hides the next character, including a closing quote.
+            when quote == `"` and c == "\\" { i = i + 2  skip }
+            when c == quote { quote = "" }
+        }
+        other {
+            when c == `"` or c == "'" { quote = c }
+            other {
+                when c == "#" {
+                    prev = ""
+                    when i > 0 { prev = substr(s, i - 1, 1) }
+                    when i == 0 or prev == " " or prev == chr(9) {
+                        give trim(substr(s, 0, i))
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    give trim(s)
+}
+
+export task yamlScan(source) {
+    # Normalise line endings so CRLF files do not leave \r on every value.
+    normalized = replace(replace(source, chr(13) + chr(10), chr(10)), chr(13), chr(10))
+    rawLines = split(normalized, chr(10))
+    lines = []
+    # NOT `num`: a bare assignment inside a task writes to the global of that
+    # name, and `num` is a builtin. Assigning to it replaces the function with
+    # an integer for the rest of the process.
+    lineNo = 0
+    get raw in rawLines {
+        lineNo = lineNo + 1
+        stripped = yamlStripComment(raw)
+        rec = {
+            "line": lineNo,
+            "raw": raw,
+            "indent": yamlCountIndent(raw),
+            "text": stripped,
+            "blank": stripped == ""
+        }
+        push(lines, rec)
+    }
+    give lines
+}

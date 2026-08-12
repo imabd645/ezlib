@@ -1,0 +1,312 @@
+# ============================================================================
+# decimal — exact decimal arithmetic for EZ
+#
+#   use "decimal"
+#
+#   price = Decimal("19.99")
+#   total = price.times(3)
+#   out total.toString()            # 59.97, exactly
+#
+# Floats cannot represent tenths, so 0.1 + 0.2 != 0.3 and a running total of
+# prices drifts by cents. A Decimal is an integer count of units plus a scale,
+# so every value it can hold, it holds exactly.
+# ============================================================================
+
+use "decimal/arith.ez"
+use "decimal/parse.ez"
+
+export model Decimal {
+
+    # Accepts a string ("19.99"), an integer, another Decimal, or nil (zero).
+    #
+    # A float is accepted but goes through its decimal spelling, because the
+    # float itself is already inexact -- 0.1 is not a tenth by the time it
+    # reaches here. Prefer strings for money.
+    init(value) {
+        parsed = nil
+        when value == nil { parsed = { "units": 0, "scale": 0 } }
+        other {
+            t = typeOf(value)
+            when t == "integer" { parsed = { "units": value, "scale": 0 } }
+            other {
+                when t == "model" or t == "instance" {
+                    parsed = { "units": value.units, "scale": value.scale }
+                }
+                other { parsed = decParse(str(value)) }
+            }
+        }
+        when parsed == nil {
+            throw Exception(`decimal: '{value}' is not a number`)
+        }
+        self.units = parsed["units"]
+        self.scale = parsed["scale"]
+        self.mode = "half-up"
+    }
+
+    # Set the rounding mode used by division and rescaling. One of:
+    # half-up (default), half-even, half-down, up, down, ceil, floor.
+    task rounding(mode) {
+        self.mode = mode
+        give self
+    }
+
+    task copy() {
+        d = Decimal(nil)
+        d.units = self.units
+        d.scale = self.scale
+        d.mode = self.mode
+        give d
+    }
+
+    # ── internals ───────────────────────────────────────────────────────────
+
+    task make(units, scale) {
+        d = Decimal(nil)
+        d.units = units
+        d.scale = scale
+        d.mode = self.mode
+        give d
+    }
+
+    task coerce(value) {
+        t = typeOf(value)
+        when t == "model" or t == "instance" { give value }
+        give Decimal(value)
+    }
+
+    # Restates both operands at the finer of the two scales, so no information
+    # is lost before adding or comparing.
+    task alignScale(rhs) {
+        scale = self.scale
+        when rhs.scale > scale { scale = rhs.scale }
+        give scale
+    }
+
+    # ── arithmetic ──────────────────────────────────────────────────────────
+
+    task plus(value) {
+        rhs = self.coerce(value)
+        scale = self.alignScale(rhs)
+        a = decRescale(self.units, self.scale, scale, self.mode)
+        b = decRescale(rhs.units, rhs.scale, scale, self.mode)
+        give self.make(a + b, scale)
+    }
+
+    task minus(value) {
+        rhs = self.coerce(value)
+        scale = self.alignScale(rhs)
+        a = decRescale(self.units, self.scale, scale, self.mode)
+        b = decRescale(rhs.units, rhs.scale, scale, self.mode)
+        give self.make(a - b, scale)
+    }
+
+    # Scales add, so 1.50 * 1.50 is exact at scale 4. Round afterwards if you
+    # want fewer places.
+    task times(value) {
+        rhs = self.coerce(value)
+        give self.make(self.units * rhs.units, self.scale + rhs.scale)
+    }
+
+    # Division cannot be exact in general (1/3), so it takes a target scale.
+    # Defaults to the wider operand's scale plus 6, then rounds.
+    task dividedBy(value) {
+        rhs = self.coerce(value)
+        scale = self.alignScale(rhs) + 6
+        when scale > MAX_SCALE { scale = MAX_SCALE }
+        give self.dividedByAt(rhs, scale)
+    }
+
+    task dividedByAt(value, scale) {
+        rhs = self.coerce(value)
+        when rhs.units == 0 { throw Exception("decimal: division by zero") }
+        # Lift the numerator so the quotient lands at the requested scale.
+        lift = scale + rhs.scale - self.scale
+        numerator = self.units
+        when lift >= 0 { numerator = numerator * decPow10(lift) }
+        other { numerator = decRoundDiv(numerator, decPow10(-lift), self.mode) }
+        give self.make(decRoundDiv(numerator, rhs.units, self.mode), scale)
+    }
+
+    task negated() { give self.make(-self.units, self.scale) }
+
+    task absolute() {
+        when self.units < 0 { give self.negated() }
+        give self.copy()
+    }
+
+    # Remainder of an integer division, keeping the sign of the dividend.
+    task modulo(value) {
+        rhs = self.coerce(value)
+        scale = self.alignScale(rhs)
+        a = decRescale(self.units, self.scale, scale, self.mode)
+        b = decRescale(rhs.units, rhs.scale, scale, self.mode)
+        when b == 0 { throw Exception("decimal: division by zero") }
+        give self.make(a % b, scale)
+    }
+
+    # ── rounding ────────────────────────────────────────────────────────────
+
+    task roundTo(scale) {
+        give self.make(decRescale(self.units, self.scale, scale, self.mode), scale)
+    }
+
+    task roundWith(scale, mode) {
+        give self.make(decRescale(self.units, self.scale, scale, mode), scale)
+    }
+
+    task floorTo(scale) { give self.roundWith(scale, "floor") }
+    task ceilTo(scale) { give self.roundWith(scale, "ceil") }
+    task truncateTo(scale) { give self.roundWith(scale, "truncate") }
+
+    # ── comparison ──────────────────────────────────────────────────────────
+
+    # -1, 0 or 1. Scales are aligned first, so 1.5 and 1.50 compare equal.
+    task compare(value) {
+        rhs = self.coerce(value)
+        scale = self.alignScale(rhs)
+        a = decRescale(self.units, self.scale, scale, self.mode)
+        b = decRescale(rhs.units, rhs.scale, scale, self.mode)
+        when a < b { give -1 }
+        when a > b { give 1 }
+        give 0
+    }
+
+    task equals(value) { give self.compare(value) == 0 }
+    task isLess(value) { give self.compare(value) < 0 }
+    task isGreater(value) { give self.compare(value) > 0 }
+    task atMost(value) { give self.compare(value) <= 0 }
+    task atLeast(value) { give self.compare(value) >= 0 }
+
+    task isZero() { give self.units == 0 }
+    task isNegative() { give self.units < 0 }
+    task isPositive() { give self.units > 0 }
+    task sign() { give decSign(self.units) }
+
+    # ── output ──────────────────────────────────────────────────────────────
+
+    # Always exactly `scale` decimal places, so money keeps its trailing zero.
+    task toString() { give decToString(self.units, self.scale) }
+
+    # Grouped for display: 1234567.5 -> "1,234,567.50"
+    task format(scale) {
+        rounded = self.roundTo(scale)
+        give decGroup(rounded.units, rounded.scale, ",", ".")
+    }
+
+    task formatWith(scale, separator, decimalPoint) {
+        rounded = self.roundTo(scale)
+        give decGroup(rounded.units, rounded.scale, separator, decimalPoint)
+    }
+
+    # Prefixed money, e.g. "$1,234.50".
+    task currency(symbol, scale) {
+        rounded = self.roundTo(scale)
+        body = decGroup(rounded.units, rounded.scale, ",", ".")
+        when startsWith(body, "-") {
+            give "-" + symbol + substr(body, 1, len(body) - 1)
+        }
+        give symbol + body
+    }
+
+    # Lossy on purpose -- only for output that demands a number, never for
+    # further arithmetic.
+    task toFloat() { give num(self.toString()) }
+
+    # Exact when the value has no fractional part; throws otherwise, rather
+    # than silently discarding cents.
+    task toInteger() {
+        when self.scale == 0 { give self.units }
+        divisor = decPow10(self.scale)
+        when self.units % divisor != 0 {
+            throw Exception(`decimal: {self.toString()} is not a whole number`)
+        }
+        give decIDiv(self.units, divisor)
+    }
+
+    # ── money ───────────────────────────────────────────────────────────────
+
+    # Split into `parts` shares that sum back to exactly this value.
+    #
+    # Naive division loses or invents money: 0.10 split three ways is 0.03
+    # each, and 3 x 0.03 is 0.09. The leftover unit is handed out one at a
+    # time to the earliest shares, so the total always reconciles.
+    task split(parts) {
+        when parts <= 0 { throw Exception("decimal: split needs at least one part") }
+        base = decIDiv(self.units, parts)
+        leftover = self.units - (base * parts)
+        delta = 1
+        when leftover < 0 { delta = -1  leftover = -leftover }
+        shares = []
+        repeat i = 1 to parts {
+            units = base
+            when i <= leftover { units = units + delta }
+            push(shares, self.make(units, self.scale))
+        }
+        give shares
+    }
+
+    # Split by weight, distributing the remainder to the largest shares.
+    task allocate(weights) {
+        totalWeight = 0
+        get w in weights { totalWeight = totalWeight + w }
+        when totalWeight == 0 { throw Exception("decimal: allocation weights sum to zero") }
+
+        shares = []
+        assigned = 0
+        get w in weights {
+            units = decIDiv(self.units * w, totalWeight)
+            push(shares, units)
+            assigned = assigned + units
+        }
+        leftover = self.units - assigned
+        delta = 1
+        when leftover < 0 { delta = -1  leftover = -leftover }
+        index = 0
+        while leftover > 0 and index < len(shares) {
+            shares[index] = shares[index] + delta
+            leftover = leftover - 1
+            index = index + 1
+        }
+        result = []
+        get units in shares { push(result, self.make(units, self.scale)) }
+        give result
+    }
+
+    # Percentage of this value, e.g. tax or discount.
+    task percent(rate) {
+        give self.times(rate).dividedByAt(Decimal(100), self.scale)
+    }
+}
+
+# ── module helpers ──────────────────────────────────────────────────────────
+
+export task dec(value) { give Decimal(value) }
+
+# Money: a Decimal fixed at 2 places, which is what most currencies use.
+export task money(value) {
+    give Decimal(value).roundTo(2)
+}
+
+export task decSum(values) {
+    total = Decimal(0)
+    get v in values { total = total.plus(v) }
+    give total
+}
+
+export task decMax(values) {
+    best = nil
+    get v in values {
+        candidate = Decimal(v)
+        when best == nil or candidate.isGreater(best) { best = candidate }
+    }
+    give best
+}
+
+export task decMin(values) {
+    best = nil
+    get v in values {
+        candidate = Decimal(v)
+        when best == nil or candidate.isLess(best) { best = candidate }
+    }
+    give best
+}

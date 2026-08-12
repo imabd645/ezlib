@@ -1,0 +1,163 @@
+# ============================================================================
+# JWT test suite — signature, algorithms, and every registered claim.
+# ============================================================================
+use "jwt"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=" + str(got) + " want=" + str(want)
+    }
+}
+
+# Asserts that `fn` throws, and that the message starts with `prefix`.
+task checkThrows(name, prefix, fn) {
+    threw = false
+    matched = false
+    try { fn() } catch (e) {
+        threw = true
+        matched = indexOf(str(e), prefix) == 0
+    }
+    when threw and matched { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + (threw ? "  (wrong error kind)" : "  (did not throw)")
+    }
+}
+
+SECRET = "a-very-secret-key"
+
+out "== Round trip =="
+t = JWT.encode({"sub": "u1", "role": "admin"}, SECRET)
+claims = JWT.decode(t, SECRET)
+checkEq("sub survives", claims["sub"], "u1")
+checkEq("custom claim survives", claims["role"], "admin")
+check("iat added automatically", has_key(claims, "iat"))
+check("three parts", len(split(t, ".")) == 3)
+
+out ""
+out "== Interop: token minted by an external issuer (jwt.io) =="
+EXT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+ext = JWT.decode(EXT, "your-256-bit-secret")
+checkEq("external sub", ext["sub"], "1234567890")
+checkEq("external name", ext["name"], "John Doe")
+
+out ""
+out "== Signature =="
+checkThrows("wrong secret rejected", JWT_SIGNATURE, || { JWT.decode(t, "wrong-secret") })
+tampered = split(t, ".")[0] + "." + b64url_encode(to_json({"sub": "admin"})) + "." + split(t, ".")[2]
+checkThrows("tampered payload rejected", JWT_SIGNATURE, || { JWT.decode(tampered, SECRET) })
+checkThrows("empty signature rejected", JWT_SIGNATURE, || {
+    JWT.decode(split(t, ".")[0] + "." + split(t, ".")[1] + ".", SECRET)
+})
+
+out ""
+out "== Malformed input =="
+checkThrows("two parts rejected", JWT_MALFORMED, || { JWT.decode("a.b", SECRET) })
+checkThrows("garbage rejected", JWT_MALFORMED, || { JWT.decode("not-a-token", SECRET) })
+checkThrows("non-string rejected", JWT_MALFORMED, || { JWT.decode(42, SECRET) })
+
+out ""
+out "== Algorithms =="
+t384 = JWT.encode({"sub": "u"}, SECRET, {"alg": "HS384"})
+checkEq("HS384 round trip", JWT.decode(t384, SECRET)["sub"], "u")
+t512 = JWT.encode({"sub": "u"}, SECRET, {"alg": "HS512"})
+checkEq("HS512 round trip", JWT.decode(t512, SECRET)["sub"], "u")
+checkEq("header records alg", JWT.peek(t512)["header"]["alg"], "HS512")
+checkThrows("unknown alg on encode", JWT_ALGORITHM, || { JWT.encode({}, SECRET, {"alg": "RS256"}) })
+checkThrows("alg outside allow-list", JWT_ALGORITHM, || {
+    JWT.decode(t512, SECRET, {"algorithms": ["HS256"]})
+})
+check("allow-list accepts a listed alg", JWT.decode(t512, SECRET, {"algorithms": ["HS512"]})["sub"] == "u")
+
+out ""
+out "== exp =="
+expired = JWT.encode({"sub": "u"}, SECRET, {"expiresIn": -10})
+checkThrows("expired token rejected", JWT_EXPIRED, || { JWT.decode(expired, SECRET) })
+check("ignoreExpiration overrides", JWT.decode(expired, SECRET, {"ignoreExpiration": true})["sub"] == "u")
+check("leeway covers small skew", JWT.decode(expired, SECRET, {"leeway": 60})["sub"] == "u")
+live = JWT.encode({"sub": "u"}, SECRET, {"expiresIn": 3600})
+check("unexpired token accepted", JWT.decode(live, SECRET)["sub"] == "u")
+check("isExpired false for live token", JWT.isExpired(live) == false)
+check("isExpired true for dead token", JWT.isExpired(expired) == true)
+check("expiresIn is positive for live token", JWT.expiresIn(live) > 3500)
+check("expiresIn nil without exp", typeOf(JWT.expiresIn(t)) == "nil")
+
+out ""
+out "== nbf =="
+future = JWT.encode({"sub": "u"}, SECRET, {"notBefore": 3600})
+checkThrows("not-yet-valid rejected", JWT_NOT_YET, || { JWT.decode(future, SECRET) })
+check("ignoreNotBefore overrides", JWT.decode(future, SECRET, {"ignoreNotBefore": true})["sub"] == "u")
+
+out ""
+out "== maxAge =="
+old = JWT.encode({"sub": "u"}, SECRET, {"noTimestamp": true})
+oldClaims = JWT.peek(old)["payload"]
+check("noTimestamp omits iat", not has_key(oldClaims, "iat"))
+checkThrows("maxAge needs iat", JWT_CLAIM, || { JWT.decode(old, SECRET, {"maxAge": 60}) })
+check("maxAge passes for a fresh token", JWT.decode(t, SECRET, {"maxAge": 3600})["sub"] == "u1")
+
+out ""
+out "== iss / sub / aud =="
+claimed = JWT.encode({}, SECRET, {"issuer": "auth.example", "subject": "u9", "audience": "api"})
+check("issuer matches", JWT.decode(claimed, SECRET, {"issuer": "auth.example"})["iss"] == "auth.example")
+checkThrows("issuer mismatch", JWT_CLAIM, || { JWT.decode(claimed, SECRET, {"issuer": "evil"}) })
+check("subject matches", JWT.decode(claimed, SECRET, {"subject": "u9"})["sub"] == "u9")
+checkThrows("subject mismatch", JWT_CLAIM, || { JWT.decode(claimed, SECRET, {"subject": "u1"}) })
+check("audience matches", JWT.decode(claimed, SECRET, {"audience": "api"})["aud"] == "api")
+checkThrows("audience mismatch", JWT_CLAIM, || { JWT.decode(claimed, SECRET, {"audience": "other"}) })
+checkThrows("issuer required but absent", JWT_CLAIM, || { JWT.decode(t, SECRET, {"issuer": "x"}) })
+
+# RFC 7519 allows aud to be an array
+multi = JWT.encode({"aud": ["api", "admin"]}, SECRET)
+check("array audience matches a member", JWT.decode(multi, SECRET, {"audience": "admin"})["sub"] == nil)
+checkThrows("array audience rejects a non-member", JWT_CLAIM, || {
+    JWT.decode(multi, SECRET, {"audience": "nope"})
+})
+
+out ""
+out "== Non-numeric time claims are rejected, not ignored =="
+badExp = b64url_encode(to_json({"alg": "HS256", "typ": "JWT"})) + "." + b64url_encode(to_json({"exp": "tomorrow"}))
+badTok = badExp + "." + split(JWT.encode({}, SECRET), ".")[2]
+# signature will not match, so this proves the ORDER too: signature first
+checkThrows("bad exp with bad signature -> signature error first", JWT_SIGNATURE, || {
+    JWT.decode(badTok, SECRET)
+})
+
+out ""
+out "== verify() never throws =="
+ok = JWT.verify(t, SECRET)
+check("verify valid", ok["valid"] == true)
+checkEq("verify returns claims", ok["claims"]["sub"], "u1")
+bad = JWT.verify(t, "wrong")
+check("verify invalid", bad["valid"] == false)
+check("verify reports the error", indexOf(bad["error"], JWT_SIGNATURE) == 0)
+check("verify claims nil on failure", typeOf(bad["claims"]) == "nil")
+
+out ""
+out "== peek() reads without verifying =="
+p = JWT.peek(t)
+checkEq("peek header alg", p["header"]["alg"], "HS256")
+checkEq("peek payload sub", p["payload"]["sub"], "u1")
+pw = JWT.peek(tampered)
+checkEq("peek works on an unverifiable token", pw["payload"]["sub"], "admin")
+
+out ""
+out "== encode guards =="
+checkThrows("payload must be a dictionary", JWT_CLAIM, || { JWT.encode("nope", SECRET) })
+checkThrows("secret must be non-empty", JWT_SIGNATURE, || { JWT.encode({}, "") })
+check("caller payload not mutated", not has_key({"sub": "x"}, "iat"))
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

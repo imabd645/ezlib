@@ -1,0 +1,49 @@
+// ============================================================================
+// thread — Errors
+// ============================================================================
+
+// Readable text for a caught value, whatever shape it arrives in.
+//
+// `throw "some message"` is caught as a plain string, but a failure that
+// crossed a future boundary is caught as an exception INSTANCE -- and str() on
+// an instance gives "<instance>", throwing the message away. Anything that
+// records an error as data (allSettled, any, TaskGroup.waitSettled) has to go
+// through this or it stores nothing useful.
+export task errorText(e) {
+    when typeOf(e) == "instance" {
+        when hasattr(e, "message") {
+            give str(e.message)
+        }
+    }
+    give str(e)
+}
+
+export model ThreadError extends Exception {
+    init(message) {
+        super(message)
+        self.message = message
+    }
+
+    task toString() { give "ThreadError: " + self.message }
+}
+
+// Raised when a bounded wait runs out: withTimeout, timeoutFn, and the
+// *Timeout variants of the sync primitives.
+export model TimeoutError extends ThreadError {
+    init(message) {
+        super(message)
+    }
+
+    task toString() { give "TimeoutError: " + self.message }
+}
+
+// Raised by any() when every future failed. Carries the individual failures so
+// the caller can report why, instead of just "all of them broke".
+export model AllFailedError extends ThreadError {
+    init(message, errors) {
+        super(message)
+        self.errors = errors
+    }
+
+    task toString() { give "AllFailedError: " + self.message }
+}

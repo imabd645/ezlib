@@ -1,0 +1,634 @@
+# ============================================================================
+# wa_crypto.ez — Cryptographic primitives for the WhatsApp Noise Protocol
+# Uses Windows bcrypt.dll for:
+#   - Curve25519 ECDH key exchange
+#   - AES-256-GCM authenticated encryption / decryption
+#   - SHA-256 hash
+#   - HMAC-SHA256
+#   - HKDF (RFC 5869) — used for Noise key derivation
+#   - Secure random bytes
+#
+# No EZ file dependencies — uses only bcrypt.dll FFI directly.
+# ============================================================================
+
+__wacrypt_bcrypt = os_load_lib("bcrypt.dll")
+when __wacrypt_bcrypt == 0 {
+    throw "wa_crypto: bcrypt.dll not found"
+}
+__wacrypt_libcrypto = os_load_lib("libcrypto.dll")
+when __wacrypt_libcrypto == 0 {
+    throw "wa_crypto: libcrypto.dll not found"
+}
+
+# ── BCrypt function pointers ──────────────────────────────────────────────────
+_wac_OpenAlgo      = os_get_func(__wacrypt_bcrypt, "BCryptOpenAlgorithmProvider")
+_wac_CloseAlgo     = os_get_func(__wacrypt_bcrypt, "BCryptCloseAlgorithmProvider")
+_wac_GenRandom     = os_get_func(__wacrypt_bcrypt, "BCryptGenRandom")
+_wac_GenKeyPair    = os_get_func(__wacrypt_bcrypt, "BCryptGenerateKeyPair")
+_wac_FinalizeKP    = os_get_func(__wacrypt_bcrypt, "BCryptFinalizeKeyPair")
+_wac_DestroyKey    = os_get_func(__wacrypt_bcrypt, "BCryptDestroyKey")
+_wac_ExportKey     = os_get_func(__wacrypt_bcrypt, "BCryptExportKey")
+_wac_ImportKeyPair = os_get_func(__wacrypt_bcrypt, "BCryptImportKeyPair")
+_wac_SecretAgree   = os_get_func(__wacrypt_bcrypt, "BCryptSecretAgreement")
+_wac_DestroySecret = os_get_func(__wacrypt_bcrypt, "BCryptDestroySecret")
+_wac_DeriveKey     = os_get_func(__wacrypt_bcrypt, "BCryptDeriveKey")
+_wac_CreateHash    = os_get_func(__wacrypt_bcrypt, "BCryptCreateHash")
+_wac_HashData      = os_get_func(__wacrypt_bcrypt, "BCryptHashData")
+_wac_FinishHash    = os_get_func(__wacrypt_bcrypt, "BCryptFinishHash")
+_wac_DestroyHash   = os_get_func(__wacrypt_bcrypt, "BCryptDestroyHash")
+_wac_Encrypt       = os_get_func(__wacrypt_bcrypt, "BCryptEncrypt")
+_wac_Decrypt       = os_get_func(__wacrypt_bcrypt, "BCryptDecrypt")
+_wac_SetProp       = os_get_func(__wacrypt_bcrypt, "BCryptSetProperty")
+_wac_GetProp       = os_get_func(__wacrypt_bcrypt, "BCryptGetProperty")
+_wac_GenSymKey     = os_get_func(__wacrypt_bcrypt, "BCryptGenerateSymmetricKey")
+
+# ── BCrypt constants ──────────────────────────────────────────────────────────
+_WAC_BCRYPT_USE_SYS_RNG      = 2
+_WAC_ALG_HMAC_FLAG           = 8   # BCRYPT_ALG_HANDLE_HMAC_FLAG
+
+# ── OpenSSL function pointers ─────────────────────────────────────────────────
+_wac_X25519 = os_get_func(__wacrypt_libcrypto, "X25519")
+
+# ── Algorithm handles (opened once at module load) ────────────────────────────
+_wac_hECDH   = 0
+_wac_hSHA256 = 0
+_wac_hHMAC   = 0
+_wac_hAES    = 0
+
+# ── Critical helper: ASCII string → UTF-16LE wide string buffer ───────────────
+# BCrypt API (bcrypt.dll) expects LPCWSTR (wide char*) for all string params.
+# EZ FFI passes strings as ASCII — we must manually build wide string buffers.
+task _wac_toWide(s) {
+    buf = os_alloc((len(s) + 1) * 2)
+    repeat i = 0 to len(s) - 1 {
+        os_write_byte(buf, i * 2,     ord(substr(s, i, 1)))
+        os_write_byte(buf, i * 2 + 1, 0)
+    }
+    os_write_byte(buf, len(s) * 2,     0)
+    os_write_byte(buf, len(s) * 2 + 1, 0)
+    give buf
+}
+
+# ── Write a 32-bit ULONG into a buffer at given byte offset ───────────────────
+task _wac_writeU32(buf, offset, value) {
+    os_write_byte(buf, offset,     value & 255)
+    os_write_byte(buf, offset + 1, (value >> 8)  & 255)
+    os_write_byte(buf, offset + 2, (value >> 16) & 255)
+    os_write_byte(buf, offset + 3, (value >> 24) & 255)
+}
+
+# ── Initialize BCrypt algorithm handles ───────────────────────────────────────
+task _wac_initAlgos() {
+    # ── Open ECDH for Curve25519 ──────────────────────────────────────────────
+    hBuf    = os_alloc(8)
+    algWide = _wac_toWide("ECDH")
+    rc = os_call(_wac_OpenAlgo, "int", hBuf, algWide, 0, 0)
+    os_free(algWide)
+    when rc == 0 {
+        _wac_hECDH = os_read_uint64(hBuf, 0)
+        # Set curve to Curve25519 — both property name and value are wide strings
+        propNameW = _wac_toWide("ECCCurveName")
+        propValW  = _wac_toWide("curve25519")
+        propValLen = (len("curve25519") + 1) * 2  # bytes including null terminator
+        rcSetProp = os_call(_wac_SetProp, "int", _wac_hECDH, propNameW, propValW, propValLen, 0)
+        when rcSetProp != 0 {
+            out "WARNING: BCryptSetProperty(ECCCurveName, curve25519) failed with rc=" + str(rcSetProp)
+        }
+        os_free(propNameW)
+        os_free(propValW)
+    }
+
+    xBuf = os_alloc(8)
+    xAlg = _wac_toWide("X25519")
+    rcX = os_call(_wac_OpenAlgo, "int", xBuf, xAlg, 0, 0)
+    out "X25519 open rc=" + str(rcX)
+    os_free(xAlg)
+    when rcX == 0 {
+        _wac_hECDH = os_read_uint64(xBuf, 0)
+    }
+    os_free(xBuf)
+    os_free(hBuf)
+
+    # ── Open SHA-256 (for plain hashing) ─────────────────────────────────────
+    hBuf2   = os_alloc(8)
+    sha256W = _wac_toWide("SHA256")
+    rc2 = os_call(_wac_OpenAlgo, "int", hBuf2, sha256W, 0, 0)
+    os_free(sha256W)
+    when rc2 == 0 { _wac_hSHA256 = os_read_uint64(hBuf2, 0) }
+    os_free(hBuf2)
+
+    # ── Open SHA-256 with HMAC flag ───────────────────────────────────────────
+    hBuf3   = os_alloc(8)
+    hmacW   = _wac_toWide("SHA256")
+    rc3 = os_call(_wac_OpenAlgo, "int", hBuf3, hmacW, 0, _WAC_ALG_HMAC_FLAG)
+    os_free(hmacW)
+    when rc3 == 0 { _wac_hHMAC = os_read_uint64(hBuf3, 0) }
+    os_free(hBuf3)
+
+    # ── Open AES-GCM ─────────────────────────────────────────────────────────
+    hBuf4 = os_alloc(8)
+    aesW  = _wac_toWide("AES")
+    rc4 = os_call(_wac_OpenAlgo, "int", hBuf4, aesW, 0, 0)
+    os_free(aesW)
+    when rc4 == 0 {
+        _wac_hAES = os_read_uint64(hBuf4, 0)
+        chainPropW = _wac_toWide("ChainingMode")
+        chainValW  = _wac_toWide("ChainingModeGCM")
+        chainValLen = (len("ChainingModeGCM") + 1) * 2
+        os_call(_wac_SetProp, "int", _wac_hAES, chainPropW, chainValW, chainValLen, 0)
+        os_free(chainPropW)
+        os_free(chainValW)
+    }
+    os_free(hBuf4)
+}
+
+_wac_initAlgos()
+
+# ── Helper: write byte-array list into an FFI buffer ─────────────────────────
+task _wac_writeBytes(buf, byteList) {
+    repeat i = 0 to len(byteList) - 1 {
+        os_write_byte(buf, i, byteList[i])
+    }
+}
+
+# ── Helper: read N bytes from FFI buffer into a list ─────────────────────────
+task _wac_readBytes(buf, n) {
+    result = []
+    repeat i = 0 to n - 1 {
+        # os_read_byte, not os_read_uint64: reading a uint64 at byte offset i
+        # pulls in the 8 bytes i..i+7, so the last iterations of every call ran
+        # past the end of the allocation -- for a 32-byte hash buffer, i=31 read
+        # bytes 31..38. The `& 255` hid it by discarding the overread bytes, but
+        # the read itself was still out of bounds and now trips the FFI guard:
+        #   Error: FFI out-of-bounds access on managed allocation
+        push(result, os_read_byte(buf, i) & 255)
+    }
+    give result
+}
+
+# ── Helper: concat two byte lists ────────────────────────────────────────────
+task _wac_concatBytes(a, b) {
+    result = []
+    get v in a { push(result, v) }
+    get v in b { push(result, v) }
+    give result
+}
+
+# ── Helper: slice a byte list ────────────────────────────────────────────────
+task _wac_sliceBytes(arr, start, length) {
+    result = []
+    endIdx = start + length - 1
+    when endIdx >= len(arr) { endIdx = len(arr) - 1 }
+    when start < 0 { start = 0 }
+    when start <= endIdx {
+        repeat i = start to endIdx { push(result, arr[i]) }
+    }
+    give result
+}
+
+# ── Secure Random bytes ───────────────────────────────────────────────────────
+export task wac_randomBytes(n) {
+    buf = os_alloc(n + 4)
+    os_call(_wac_GenRandom, "int", 0, buf, n, _WAC_BCRYPT_USE_SYS_RNG)
+    result = _wac_readBytes(buf, n)
+    os_free(buf)
+    give result
+}
+
+# ── SHA-256 hash of a byte list ───────────────────────────────────────────────
+export task wac_sha256(byteList) {
+    dataLen = len(byteList)
+    dataBuf = os_alloc(dataLen + 1)
+    _wac_writeBytes(dataBuf, byteList)
+
+    hashHandleBuf = os_alloc(8)
+    os_call(_wac_CreateHash, "int", _wac_hSHA256, hashHandleBuf, 0, 0, 0, 0, 0)
+    hHash = os_read_uint64(hashHandleBuf, 0)
+    os_free(hashHandleBuf)
+
+    os_call(_wac_HashData, "int", hHash, dataBuf, dataLen, 0)
+    os_free(dataBuf)
+
+    outBuf = os_alloc(32)
+    os_call(_wac_FinishHash, "int", hHash, outBuf, 32, 0)
+    os_call(_wac_DestroyHash, "int", hHash)
+
+    result = _wac_readBytes(outBuf, 32)
+    os_free(outBuf)
+    give result
+}
+
+# ── HMAC-SHA256 ───────────────────────────────────────────────────────────────
+export task wac_hmacSha256(keyBytes, dataBytes) {
+    keyLen  = len(keyBytes)
+    dataLen = len(dataBytes)
+
+    keyBuf  = os_alloc(keyLen + 1)
+    dataBuf = os_alloc(dataLen + 1)
+    _wac_writeBytes(keyBuf,  keyBytes)
+    _wac_writeBytes(dataBuf, dataBytes)
+
+    hashHandleBuf = os_alloc(8)
+    os_call(_wac_CreateHash, "int", _wac_hHMAC, hashHandleBuf, 0, 0, keyBuf, keyLen, 0)
+    hHash = os_read_uint64(hashHandleBuf, 0)
+    os_free(hashHandleBuf)
+    os_free(keyBuf)
+
+    os_call(_wac_HashData, "int", hHash, dataBuf, dataLen, 0)
+    os_free(dataBuf)
+
+    outBuf = os_alloc(32)
+    os_call(_wac_FinishHash, "int", hHash, outBuf, 32, 0)
+    os_call(_wac_DestroyHash, "int", hHash)
+
+    result = _wac_readBytes(outBuf, 32)
+    os_free(outBuf)
+    give result
+}
+
+# ── HKDF-Extract: PRK = HMAC-SHA256(salt, ikm) ───────────────────────────────
+export task wac_hkdfExtract(salt, ikm) {
+    when len(salt) == 0 {
+        salt = []
+        repeat i = 0 to 31 { push(salt, 0) }
+    }
+    give wac_hmacSha256(salt, ikm)
+}
+
+# ── HKDF-Expand ───────────────────────────────────────────────────────────────
+export task wac_hkdfExpand(prk, info, length) {
+    output  = []
+    prev    = []
+    counter = 1
+    while len(output) < length {
+        hmacInput = _wac_concatBytes(_wac_concatBytes(prev, info), [counter])
+        prev = wac_hmacSha256(prk, hmacInput)
+        get b in prev { push(output, b) }
+        counter = counter + 1
+    }
+    give _wac_sliceBytes(output, 0, length)
+}
+
+# ── HKDF: extract + expand, returns 64 bytes ──────────────────────────────────
+export task wac_hkdf(ikm, info, salt) {
+    prk = wac_hkdfExtract(salt, ikm)
+    give wac_hkdfExpand(prk, info, 64)
+}
+
+# ── Curve25519 key pair generation ───────────────────────────────────────────
+# Returns { private: [32 bytes], public: [32 bytes] }
+export task wac_generateKeyPair() {
+    # Generate 32 bytes of secure random for private key
+    privBuf = os_alloc(32)
+    os_call(_wac_GenRandom, "int", 0, privBuf, 32, _WAC_BCRYPT_USE_SYS_RNG)
+    
+    # Basepoint for Curve25519 is 9 followed by 31 zeros
+    baseBuf = os_alloc(32)
+    os_write_byte(baseBuf, 0, 9)
+    repeat i = 1 to 31 { os_write_byte(baseBuf, i, 0) }
+
+    pubBuf = os_alloc(32)
+    rc = os_call(_wac_X25519, "int", pubBuf, privBuf, baseBuf)
+    when rc != 1 {
+        os_free(privBuf)
+        os_free(baseBuf)
+        os_free(pubBuf)
+        throw "wac_generateKeyPair: X25519 failed"
+    }
+
+    privKeyBytes = []
+    pubKeyBytes = []
+    repeat i = 0 to 31 {
+        push(privKeyBytes, os_read_byte(privBuf, i) & 255)   # one byte, not eight
+        push(pubKeyBytes, os_read_byte(pubBuf, i) & 255)
+    }
+
+    os_free(privBuf)
+    os_free(baseBuf)
+    os_free(pubBuf)
+
+    give { "public": pubKeyBytes, "private": privKeyBytes }
+}
+
+# ── Curve25519 ECDH shared secret ────────────────────────────────────────────
+# Returns the 32-byte shared secret
+export task wac_ecdh(privKeyBytes, pubKeyBytes) {
+    privBuf = os_alloc(32)
+    pubBuf = os_alloc(32)
+    secretBuf = os_alloc(32)
+
+    repeat i = 0 to 31 {
+        os_write_byte(privBuf, i, privKeyBytes[i])
+        os_write_byte(pubBuf, i, pubKeyBytes[i])
+    }
+
+    rc = os_call(_wac_X25519, "int", secretBuf, privBuf, pubBuf)
+    when rc != 1 {
+        os_free(privBuf)
+        os_free(pubBuf)
+        os_free(secretBuf)
+        throw "wac_ecdh: X25519 failed"
+    }
+
+    secretBytes = []
+    repeat i = 0 to 31 {
+        push(secretBytes, os_read_byte(secretBuf, i) & 255)  # one byte, not eight
+    }
+
+    os_free(privBuf)
+    os_free(pubBuf)
+    os_free(secretBuf)
+
+    give secretBytes
+}
+
+# ── AES-256-GCM Encrypt ───────────────────────────────────────────────────────
+# key: 32-byte list, iv: 12-byte list, plaintext: byte list, adBytes: byte list or nil
+# Returns { ciphertext: [...], tag: [16 bytes] }
+export task wac_aesGcmEncrypt(keyBytes, ivBytes, plaintextBytes, adBytes) {
+    keyLen = len(keyBytes)
+    ivLen  = len(ivBytes)
+    ptLen  = len(plaintextBytes)
+
+    # Import AES key
+    keyBuf = os_alloc(keyLen + 1)
+    _wac_writeBytes(keyBuf, keyBytes)
+
+    keyHandleBuf = os_alloc(8)
+    os_call(_wac_GenSymKey, "int", _wac_hAES, keyHandleBuf, 0, 0, keyBuf, keyLen, 0)
+    hKey = os_read_uint64(keyHandleBuf, 0)
+    os_free(keyHandleBuf)
+    os_free(keyBuf)
+
+    # ── Build BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO (88 bytes on 64-bit) ─────
+    # Layout (all offsets are byte offsets):
+    #   0:  ULONG  cbSize          = 88
+    #   4:  ULONG  dwInfoVersion   = 1
+    #   8:  PUCHAR pbNonce         = &ivBuf
+    #  16:  ULONG  cbNonce         = ivLen
+    #  20:  ULONG  (pad)
+    #  24:  PUCHAR pbAuthData      = 0
+    #  32:  ULONG  cbAuthData      = 0
+    #  36:  ULONG  (pad)
+    #  40:  PUCHAR pbTag           = &tagBuf
+    #  48:  ULONG  cbTag           = 16
+    #  52:  ULONG  (pad)
+    #  56:  PUCHAR pbMacContext    = 0
+    #  64:  ULONG  cbMacContext    = 0
+    #  68:  ULONG  cbAAD           = 0
+    #  72:  ULONGLONG cbData       = 0
+    #  80:  ULONG  dwFlags         = 0
+    infoSize = 88
+    infoBuf  = os_alloc(infoSize + 8)
+    _wac_writeU32(infoBuf, 0, infoSize)   # cbSize
+    _wac_writeU32(infoBuf, 4, 1)          # dwInfoVersion
+
+    ivBuf = os_alloc(ivLen + 1)
+    _wac_writeBytes(ivBuf, ivBytes)
+    os_write_uint64(infoBuf, 8, ivBuf)    # pbNonce
+    _wac_writeU32(infoBuf, 16, ivLen)     # cbNonce
+
+    when adBytes != nil {
+        adLen = len(adBytes)
+        when adLen > 0 {
+            adBuf = os_alloc(adLen + 1)
+            _wac_writeBytes(adBuf, adBytes)
+            os_write_uint64(infoBuf, 24, adBuf) # pbAuthData
+            _wac_writeU32(infoBuf, 32, adLen)   # cbAuthData
+        }
+    }
+
+    tagBuf = os_alloc(16 + 1)
+    os_write_uint64(infoBuf, 40, tagBuf)  # pbTag  (correct offset!)
+    _wac_writeU32(infoBuf, 48, 16)        # cbTag  (correct offset!)
+
+    # Encrypt
+    ptBuf    = os_alloc(ptLen + 1)
+    _wac_writeBytes(ptBuf, plaintextBytes)
+
+    ctBuf    = os_alloc(ptLen + 32)
+    ctLenBuf = os_alloc(8)
+
+    os_call(_wac_Encrypt, "int", hKey, ptBuf, ptLen, infoBuf, 0, 0, ctBuf, ptLen + 16, ctLenBuf, 0)
+    ctLen = os_read_uint64(ctLenBuf, 0) & 0xFFFFFFFF
+
+    ciphertext = _wac_readBytes(ctBuf, ctLen)
+    tag        = _wac_readBytes(tagBuf, 16)
+
+    os_free(ptBuf)
+    os_free(ctBuf)
+    os_free(ctLenBuf)
+    os_free(ivBuf)
+    os_free(tagBuf)
+    os_free(infoBuf)
+    os_call(_wac_DestroyKey, "int", hKey)
+
+    give { "ciphertext": ciphertext, "tag": tag }
+}
+
+# ── AES-256-GCM Decrypt ───────────────────────────────────────────────────────
+# key: 32 bytes, iv: 12 bytes, ciphertext: byte list, tag: 16 bytes, adBytes: byte list or nil
+# Returns plaintext byte list or throws on MAC failure
+export task wac_aesGcmDecrypt(keyBytes, ivBytes, ciphertextBytes, tagBytes, adBytes) {
+    keyLen = len(keyBytes)
+    ivLen  = len(ivBytes)
+    ctLen  = len(ciphertextBytes)
+
+    keyBuf = os_alloc(keyLen + 1)
+    _wac_writeBytes(keyBuf, keyBytes)
+
+    keyHandleBuf = os_alloc(8)
+    os_call(_wac_GenSymKey, "int", _wac_hAES, keyHandleBuf, 0, 0, keyBuf, keyLen, 0)
+    hKey = os_read_uint64(keyHandleBuf, 0)
+    os_free(keyHandleBuf)
+    os_free(keyBuf)
+
+    infoSize = 88
+    infoBuf  = os_alloc(infoSize + 8)
+    _wac_writeU32(infoBuf, 0, infoSize)
+    _wac_writeU32(infoBuf, 4, 1)
+
+    ivBuf = os_alloc(ivLen + 1)
+    _wac_writeBytes(ivBuf, ivBytes)
+    os_write_uint64(infoBuf, 8, ivBuf)
+    _wac_writeU32(infoBuf, 16, ivLen)
+
+    when adBytes != nil {
+        adLen = len(adBytes)
+        when adLen > 0 {
+            adBuf = os_alloc(adLen + 1)
+            _wac_writeBytes(adBuf, adBytes)
+            os_write_uint64(infoBuf, 24, adBuf)
+            _wac_writeU32(infoBuf, 32, adLen)
+        }
+    }
+
+    tagBuf = os_alloc(16 + 1)
+    _wac_writeBytes(tagBuf, tagBytes)
+    os_write_uint64(infoBuf, 40, tagBuf)  # pbTag at correct offset 40
+    _wac_writeU32(infoBuf, 48, 16)        # cbTag at correct offset 48
+
+    ctBuf = os_alloc(ctLen + 1)
+    _wac_writeBytes(ctBuf, ciphertextBytes)
+
+    ptBuf    = os_alloc(ctLen + 16)
+    ptLenBuf = os_alloc(8)
+
+    rc = os_call(_wac_Decrypt, "int", hKey, ctBuf, ctLen, infoBuf, 0, 0, ptBuf, ctLen, ptLenBuf, 0)
+
+    when rc != 0 {
+        os_free(ctBuf)
+        os_free(ptBuf)
+        os_free(ptLenBuf)
+        os_free(ivBuf)
+        os_free(tagBuf)
+        os_free(infoBuf)
+        os_call(_wac_DestroyKey, "int", hKey)
+        throw "wac_aesGcmDecrypt: authentication failed (rc=" + str(rc) + ")"
+    }
+
+    ptLen2 = os_read_uint64(ptLenBuf, 0) & 0xFFFFFFFF
+    result  = _wac_readBytes(ptBuf, ptLen2)
+
+    os_free(ctBuf)
+    os_free(ptBuf)
+    os_free(ptLenBuf)
+    os_free(ivBuf)
+    os_free(tagBuf)
+    os_free(infoBuf)
+    os_call(_wac_DestroyKey, "int", hKey)
+
+    give result
+}
+
+# ── Bytes <-> hex string helpers ─────────────────────────────────────────────
+export task wac_bytesToHex(byteList) {
+    hex = "0123456789abcdef"
+    result = ""
+    get b in byteList {
+        result = result + substr(hex, (b >> 4) & 15, 1) + substr(hex, b & 15, 1)
+    }
+    give result
+}
+
+export task wac_hexToBytes(hexStr) {
+    hex = "0123456789abcdef"
+    result = []
+    i = 0
+    while i < len(hexStr) - 1 {
+        hi = indexOf(hex, lower(substr(hexStr, i,     1)))
+        lo = indexOf(hex, lower(substr(hexStr, i + 1, 1)))
+        when hi < 0 { hi = 0 }
+        when lo < 0 { lo = 0 }
+        push(result, (hi << 4) | lo)
+        i = i + 2
+    }
+    give result
+}
+
+# ── String <-> bytes (ASCII) ──────────────────────────────────────────────────
+export task wac_strToBytes(s) {
+    result = []
+    repeat i = 0 to len(s) - 1 { push(result, ord(substr(s, i, 1))) }
+    give result
+}
+
+export task wac_bytesToStr(byteList) {
+    result = ""
+    get b in byteList { result = result + chr(b) }
+    give result
+}
+
+# ── Base64 (needed by wa_store, wa_qr) ───────────────────────────────────────
+export model Base64 {
+    static chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+    static task encode(input) {
+        isStr = type(input) == "string"
+        res   = ""
+        l     = len(input)
+        when l == 0 { give "" }
+
+        i = 0
+        while i < l - 2 {
+            b0 = 0  b1 = 0  b2 = 0
+            when isStr {
+                b0 = ord(substr(input, i,   1))
+                b1 = ord(substr(input, i+1, 1))
+                b2 = ord(substr(input, i+2, 1))
+            } other {
+                b0 = input[i]  b1 = input[i+1]  b2 = input[i+2]
+            }
+            n  = (b0 << 16) | (b1 << 8) | b2
+            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
+                        substr(Base64.chars, (n >> 12) & 63, 1) +
+                        substr(Base64.chars, (n >> 6)  & 63, 1) +
+                        substr(Base64.chars, n & 63, 1)
+            i = i + 3
+        }
+
+        rem = l - i
+        when rem == 1 {
+            b0 = 0
+            when isStr { b0 = ord(substr(input, i, 1)) } other { b0 = input[i] }
+            n  = b0 << 16
+            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
+                        substr(Base64.chars, (n >> 12) & 63, 1) + "=="
+        }
+        other when rem == 2 {
+            b0 = 0  b1 = 0
+            when isStr {
+                b0 = ord(substr(input, i,   1))
+                b1 = ord(substr(input, i+1, 1))
+            } other { b0 = input[i]  b1 = input[i+1] }
+            n  = (b0 << 16) | (b1 << 8)
+            res = res + substr(Base64.chars, (n >> 18) & 63, 1) +
+                        substr(Base64.chars, (n >> 12) & 63, 1) +
+                        substr(Base64.chars, (n >> 6)  & 63, 1) + "="
+        }
+        give res
+    }
+
+    static task decodeToBytes(encoded) {
+        l = len(encoded)
+        when l == 0 { give [] }
+
+        pad = 0
+        when substr(encoded, l-1, 1) == "=" { pad = pad + 1 }
+        when substr(encoded, l-2, 1) == "=" { pad = pad + 1 }
+
+        res   = []
+        i     = 0
+        limit = l
+        when pad > 0 { limit = l - 4 }
+
+        while i < limit {
+            n = (indexOf(Base64.chars, substr(encoded, i,   1)) << 18) |
+                (indexOf(Base64.chars, substr(encoded, i+1, 1)) << 12) |
+                (indexOf(Base64.chars, substr(encoded, i+2, 1)) <<  6) |
+                 indexOf(Base64.chars, substr(encoded, i+3, 1))
+            push(res, (n >> 16) & 255)
+            push(res, (n >>  8) & 255)
+            push(res, n & 255)
+            i = i + 4
+        }
+
+        when pad > 0 {
+            i0 = indexOf(Base64.chars, substr(encoded, i,   1))  when i0 == -1 { i0 = 0 }
+            i1 = indexOf(Base64.chars, substr(encoded, i+1, 1))  when i1 == -1 { i1 = 0 }
+            i2 = indexOf(Base64.chars, substr(encoded, i+2, 1))  when i2 == -1 { i2 = 0 }
+            i3 = indexOf(Base64.chars, substr(encoded, i+3, 1))  when i3 == -1 { i3 = 0 }
+            n = (i0 << 18) | (i1 << 12) | (i2 << 6) | i3
+            push(res, (n >> 16) & 255)
+            when pad < 2 { push(res, (n >> 8) & 255) }
+        }
+        give res
+    }
+
+    static task decode(encoded) {
+        bytes = Base64.decodeToBytes(encoded)
+        res = ""
+        get b in bytes { res = res + chr(b) }
+        give res
+    }
+}

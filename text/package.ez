@@ -1,0 +1,11 @@
+{
+  "name": "text",
+  "version": "1.0.0",
+  "description": "String utilities for EZ that count characters, not bytes. Slugs, case conversion, wrapping, truncation, pluralisation, masking and fuzzy comparison.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["text", "string", "slug", "case", "wrap", "truncate", "unicode", "levenshtein"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

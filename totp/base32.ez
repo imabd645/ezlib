@@ -1,0 +1,68 @@
+# ============================================================================
+# totp/base32.ez — RFC 4648 base32
+#
+# Authenticator apps exchange the shared secret as base32, not hex or base64,
+# because the alphabet is unambiguous when typed by hand and survives being
+# uppercased. This is the standard alphabet -- distinct from the Crockford
+# variant `ulid` uses.
+# ============================================================================
+
+export B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+# Bytes to base32 text. Padding with "=" is optional in practice and most
+# authenticator apps omit it, so it is left off.
+export task base32Encode(octets) {
+    result = ""
+    acc = 0
+    bits = 0
+    get b in octets {
+        acc = acc * 256 + b
+        bits = bits + 8
+        while bits >= 5 {
+            shift = bits - 5
+            divisor = 1
+            repeat i = 1 to shift { divisor = divisor * 2 }
+            index = (acc - (acc % divisor)) / divisor
+            result = result + substr(B32_ALPHABET, index % 32, 1)
+            acc = acc % divisor
+            bits = shift
+        }
+    }
+    # Trailing bits are padded on the right to make a final character.
+    when bits > 0 {
+        shift = 5 - bits
+        multiplier = 1
+        repeat i = 1 to shift { multiplier = multiplier * 2 }
+        result = result + substr(B32_ALPHABET, (acc * multiplier) % 32, 1)
+    }
+    give result
+}
+
+# Base32 text to bytes. Spaces and "=" padding are ignored, and the input is
+# uppercased -- secrets are routinely shown in lowercase groups of four.
+export task base32Decode(text) {
+    body = upper(replace(replace(str(text), " ", ""), "=", ""))
+    octets = []
+    acc = 0
+    bits = 0
+    total = len(body)
+    repeat i = 0 to total - 1 {
+        c = substr(body, i, 1)
+        # 0/1 are not in the alphabet but are common typos for O/I.
+        when c == "0" { c = "O" }
+        when c == "1" { c = "I" }
+        index = indexOf(B32_ALPHABET, c)
+        when index < 0 { throw Exception(`totp: '{c}' is not valid base32`) }
+        acc = acc * 32 + index
+        bits = bits + 5
+        when bits >= 8 {
+            shift = bits - 8
+            divisor = 1
+            repeat j = 1 to shift { divisor = divisor * 2 }
+            push(octets, ((acc - (acc % divisor)) / divisor) % 256)
+            acc = acc % divisor
+            bits = shift
+        }
+    }
+    give octets
+}

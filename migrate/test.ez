@@ -1,0 +1,197 @@
+// ============================================================================
+// migrate — test suite
+//   ez test.ez
+// ============================================================================
+
+use "orm"
+use "migrate"
+use "migrate/store.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out "  FAIL " + label + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+
+// A distinct file per call. Reusing one name does not work: the previous
+// driver still holds it open, so File.remove() fails silently on Windows and
+// the next "fresh" database is the old one with every earlier migration
+// still recorded in its ledger.
+DB_SEQ = 0
+DB_FILES = []
+task freshDriver() {
+    DB_SEQ = DB_SEQ + 1
+    name = "migrate_test_" + str(DB_SEQ) + ".db"
+    try { File.remove(name) } catch (e) { }
+    push(DB_FILES, name)
+    give Engine(SQLiteDriver(name)).driver
+}
+task tableExists(d, name) {
+    give len(d.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name])) > 0
+}
+task basic(d) {
+    m = Migrator(d).quiet()
+    m.add("001_a", |db| db.execute("CREATE TABLE a (x INTEGER)", []),
+                   |db| db.execute("DROP TABLE a", []))
+    m.add("002_b", |db| db.execute("CREATE TABLE b (x INTEGER)", []),
+                   |db| db.execute("DROP TABLE b", []))
+    give m
+}
+
+out "migrate tests"
+
+// ── applying ────────────────────────────────────────────────────────────────
+d = freshDriver()
+m = basic(d)
+checkVal("both pending initially", m.pending(), ["001_a", "002_b"])
+checkVal("nothing applied initially", m.applied(), [])
+
+checkVal("up applies in order", m.up(), ["001_a", "002_b"])
+check("first table created", tableExists(d, "a"), true)
+check("second table created", tableExists(d, "b"), true)
+checkVal("nothing pending after", m.pending(), [])
+checkVal("both recorded", m.applied(), ["001_a", "002_b"])
+
+// Running again must do nothing at all -- this is the property that makes it
+// safe to run on every deploy.
+checkVal("up is idempotent", m.up(), [])
+check("tables untouched", tableExists(d, "a"), true)
+
+// Declaration order must not matter; the id decides.
+d2 = freshDriver()
+m2 = Migrator(d2).quiet()
+m2.add("002_second", |db| db.execute("CREATE TABLE two (x INTEGER)", []), nil)
+m2.add("001_first", |db| db.execute("CREATE TABLE one (x INTEGER)", []), nil)
+checkVal("ordered by id, not declaration", m2.up(), ["001_first", "002_second"])
+
+// ── rolling back ────────────────────────────────────────────────────────────
+d3 = freshDriver()
+m3 = basic(d3)
+m3.up()
+checkVal("down reverts the newest", m3.down(1), ["002_b"])
+check("its table is gone", tableExists(d3, "b"), false)
+check("the older table remains", tableExists(d3, "a"), true)
+checkVal("it is pending again", m3.pending(), ["002_b"])
+
+checkVal("re-applying works", m3.up(), ["002_b"])
+check("table back", tableExists(d3, "b"), true)
+
+checkVal("down 2 reverts both", m3.down(2), ["002_b", "001_a"])
+checkVal("everything pending", m3.pending(), ["001_a", "002_b"])
+checkVal("down on an empty ledger", m3.down(1), [])
+
+m3.up()
+checkVal("reset reverts all", len(m3.reset()), 2)
+check("nothing left", tableExists(d3, "a"), false)
+
+// A migration with no down step must refuse rather than pretend.
+d4 = freshDriver()
+m4 = Migrator(d4).quiet()
+m4.add("001_x", |db| db.execute("CREATE TABLE x (i INTEGER)", []), nil)
+m4.up()
+threw = false
+try { m4.down(1) } catch (e) { threw = true }
+check("irreversible migration refuses to roll back", threw, true)
+
+// ── failure leaves nothing behind ───────────────────────────────────────────
+// The property that matters most: a migration that fails part-way must not
+// leave the schema half-changed, and must not be recorded as applied.
+d5 = freshDriver()
+m5 = Migrator(d5).quiet()
+m5.add("001_ok", |db| db.execute("CREATE TABLE ok (x INTEGER)", []), nil)
+m5.add("002_bad", |db| {
+    db.execute("CREATE TABLE partial (x INTEGER)", [])
+    db.execute("NOT VALID SQL", [])
+}, nil)
+failed = false
+try { m5.up() } catch (e) { failed = true }
+check("failure is raised", failed, true)
+check("earlier migration stands", tableExists(d5, "ok"), true)
+check("failed migration left no table", tableExists(d5, "partial"), false)
+checkVal("only the good one recorded", m5.applied(), ["001_ok"])
+checkVal("failed one still pending", m5.pending(), ["002_bad"])
+
+// ── targeted application ────────────────────────────────────────────────────
+d6 = freshDriver()
+m6 = Migrator(d6).quiet()
+m6.add("001_a", |db| db.execute("CREATE TABLE a (x INTEGER)", []), nil)
+m6.add("002_b", |db| db.execute("CREATE TABLE b (x INTEGER)", []), nil)
+m6.add("003_c", |db| db.execute("CREATE TABLE c (x INTEGER)", []), nil)
+checkVal("upTo stops at the target", m6.upTo("002_b"), ["001_a", "002_b"])
+check("later migration not applied", tableExists(d6, "c"), false)
+checkVal("the rest is still pending", m6.pending(), ["003_c"])
+
+// ── drift and orphans ───────────────────────────────────────────────────────
+// Editing an applied migration is the mistake that silently diverges
+// environments: it runs on a fresh database and does nothing on an old one.
+d7 = freshDriver()
+m7 = Migrator(d7).quiet()
+m7.addWithSource("001_a", |db| db.execute("CREATE TABLE a (x INTEGER)", []), nil, "CREATE TABLE a (x INTEGER)")
+m7.up()
+checkVal("no drift when unchanged", m7.drifted(), [])
+
+// Same id, different source: as if the file had been edited after running.
+m8 = Migrator(d7).quiet()
+m8.addWithSource("001_a", |db| db.execute("CREATE TABLE a (x INTEGER, y TEXT)", []), nil, "CREATE TABLE a (x INTEGER, y TEXT)")
+checkVal("edited migration is detected", m8.drifted(), ["001_a"])
+check("status marks it changed", m8.status()[0]["changed"], true)
+check("report says CHANGED", contains(m8.report(), "CHANGED"), true)
+
+// A migration applied but no longer declared: the database is ahead of the code.
+m9 = Migrator(d7).quiet()
+checkVal("orphan detected", m9.orphans(), ["001_a"])
+check("report mentions orphans", contains(m9.report(), "orphan"), true)
+
+// ── declaration errors ──────────────────────────────────────────────────────
+dup = false
+try {
+    m10 = Migrator(freshDriver()).quiet()
+    m10.add("001", |db| nil, nil)
+    m10.add("001", |db| nil, nil)
+}
+catch (e) { dup = true }
+check("duplicate id refused", dup, true)
+
+// ── the ledger ──────────────────────────────────────────────────────────────
+d11 = freshDriver()
+ensureLedger(d11)
+check("ledger table created", tableExists(d11, LEDGER_TABLE), true)
+ensureLedger(d11)
+check("ensureLedger is idempotent", tableExists(d11, LEDGER_TABLE), true)
+check("not applied initially", isApplied(d11, "x"), false)
+recordApplied(d11, "x", "sum", "2026-01-01 00:00:00")
+check("recorded", isApplied(d11, "x"), true)
+check("checksum stored", checksumOf(d11, "x"), "sum")
+recordReverted(d11, "x")
+check("reverted", isApplied(d11, "x"), false)
+
+check("fingerprint is stable", fingerprint("abc"), fingerprint("abc"))
+check("fingerprint differs on change", fingerprint("abc") != fingerprint("abd"), true)
+check("fingerprint differs on length", fingerprint("ab") != fingerprint("abc"), true)
+
+// ── reporting ───────────────────────────────────────────────────────────────
+d12 = freshDriver()
+m12 = basic(d12)
+check("report lists pending", contains(m12.report(), "pending"), true)
+m12.up()
+check("report lists applied", contains(m12.report(), "applied"), true)
+check("empty migrator reports nothing", contains(Migrator(freshDriver()).quiet().report(), "no migrations"), true)
+
+// Logging can be redirected rather than printed.
+LOGGED = []
+d13 = freshDriver()
+m13 = Migrator(d13).onLog(|msg| { push(LOGGED, msg)  give nil })
+m13.add("001_a", |db| db.execute("CREATE TABLE a (x INTEGER)", []), nil)
+m13.up()
+check("log handler receives output", len(LOGGED) > 0, true)
+
+get f in DB_FILES { try { File.remove(f) } catch (e) { } }
+out ""
+out "  passed " + str(PASS) + "   failed " + str(FAIL)
+when FAIL > 0 { exit(1) }

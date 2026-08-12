@@ -1,0 +1,11 @@
+{
+  "name": "template",
+  "version": "1.0.0",
+  "description": "Safe templating engine for EZ. Variables, filters, conditionals and loops with HTML autoescaping by default.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["template", "templating", "html", "render", "view", "escape"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

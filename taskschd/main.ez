@@ -1,0 +1,24 @@
+// ============================================================================
+// eztaskschd -- Windows Task Scheduler for EZ, wrapping schtasks.
+// ============================================================================
+
+use "src/types.ez"
+use "src/runner.ez"
+use "src/manager.ez"
+
+// Returns an instance of the TaskScheduler.
+export task connect() {
+    give TaskScheduler()
+}
+
+// Opens, runs fn(ts), and ensures cleanup.
+export task with_scheduler(fn) {
+    ts = connect()
+    result = nil
+    try {
+        result = fn(ts)
+    } catch (e) {
+        throw e
+    }
+    give result
+}

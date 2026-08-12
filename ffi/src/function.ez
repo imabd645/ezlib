@@ -1,0 +1,82 @@
+// ============================================================================
+// src/function.ez — Native function handle with ctypes-style type annotations.
+//
+// Usage (ctypes-style):
+//   fn = lib.func("add")
+//   fn.argtypes = [c_int, c_int]
+//   fn.restype  = c_int
+//   result = fn(10, 20)      // via __call__ — lib.add(10, 20) syntax
+//
+// Usage (explicit array):
+//   result = fn.call([10, 20])
+//
+// Both paths share the same _dispatch() core in dispatch.ez.
+// ============================================================================
+use "errors.ez"
+out "Loading function.ez..."
+use "types.ez"
+use "dispatch.ez"
+
+export model Function {
+    ptr:      any    // raw function pointer address (integer)
+    restype:  any    // return type — type descriptor or bare string (default "int")
+    argtypes: any    // array of type descriptors, or nil (untyped mode)
+    library:  any    // back-reference to parent Library (prevents GC)
+
+    init(ptr, restype = nil, argtypes = nil, library = nil) {
+        self.ptr      = ptr
+        self.restype  = restype
+        self.library  = library
+        self.argtypes = argtypes
+        give self
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────────
+
+    // Resolve the effective return type string.
+    task _retTypeStr() {
+        when self.restype { give typeStr(self.restype) }
+        give "int"   // default: treat return as integer (same as ctypes default)
+    }
+
+    // Build the EZ-level call given already-coerced args and sigArray.
+    task _invoke(sigArray, args) {
+        give _dispatch(self.ptr, self._retTypeStr(), sigArray, args)
+    }
+
+    // ── __call__ — enables lib.add(10, 20) direct-call syntax ───────────────
+    //
+    // The VM's CALL opcode looks for __call__ on instances.  When found it
+    // wraps it as a BoundMethod and dispatches with the user's args.
+    //
+    //   result = lib.add(10, 20)
+    //           ↕ VM finds __call__ on the Function instance
+    //   __call__(self, 10, 20)  →  variadic callArgs = [10, 20]
+
+    task __call__(...callArgs) {
+        sig     = buildSigArray(self.argtypes)
+        coerced = _coerceArgs(callArgs, self.argtypes)
+        give self._invoke(sig, coerced)
+    }
+
+    // ── call(argsArray) — explicit array form (backward-compatible) ──────────
+    //
+    //   fn.call([10, 20])
+
+    task call(argsArray) {
+        sig     = buildSigArray(self.argtypes)
+        coerced = _coerceArgs(argsArray, self.argtypes)
+        give self._invoke(sig, coerced)
+    }
+
+    // ── Convenience: set argtypes/restype in one call ────────────────────────
+    //
+    //   fn.sig([c_int, c_int], c_int)
+    //   result = fn(10, 20)
+
+    task sig(argtypes, restype) {
+        self.argtypes = argtypes
+        self.restype  = restype
+        give self   // chainable
+    }
+}

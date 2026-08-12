@@ -1,0 +1,222 @@
+# ============================================================================
+# password — password hashing for EZ
+#
+#   use "password"
+#
+#   stored = Password.hash(plaintext)      # store this
+#   when Password.verify(plaintext, stored) { signIn() }
+#
+# `crypto` provides PBKDF2, which is the right primitive but the wrong
+# interface: it asks the caller to choose an iteration count, generate a salt,
+# pick a key length and then store all three somewhere. Every one of those is
+# a chance to get it wrong, and the usual mistakes -- a fixed salt, 1000
+# iterations, forgetting to store the parameters -- are silent.
+#
+# This wraps it in the only two operations an application actually needs, and
+# encodes the parameters into the hash so verification never has to be told
+# what they were.
+# ============================================================================
+
+use "crypto"
+use "password/encode.ez"
+use "password/native.ez"
+
+# 600,000 iterations of PBKDF2-HMAC-SHA256 is OWASP's 2023 recommendation,
+# and the operating system does it in about 160 ms.
+#
+# That figure assumes the derivation runs at native speed. Looping in EZ costs
+# roughly 1.5 ms PER ITERATION -- 600,000 of them is about fifteen minutes --
+# so where the native call is unavailable the count drops to something a login
+# can actually wait for. Slower and weaker is still better than unusable, but
+# the difference is large and deliberate, so isNative() reports which is in
+# use and describe() records the count on every hash.
+export DEFAULT_ITERATIONS = 600000
+export FALLBACK_ITERATIONS = 20000
+export DEFAULT_SALT_BYTES = 16
+export DEFAULT_KEY_BYTES = 32
+
+export model Password {
+
+    # Hash a password for storage. The result carries its own parameters:
+    #
+    #   pbkdf2-sha256$600000$<salt>$<hash>
+    #
+    # so raising the iteration count later does not invalidate existing
+    # hashes -- each one is verified with the parameters it was made with.
+    static task hash(plaintext) {
+        give Password.hashWith(plaintext, Password.defaultIterations())
+    }
+
+    # Whether the operating system is doing the derivation.
+    static task isNative() { give isAvailable() }
+
+    # The cost factor a new hash will use here.
+    static task defaultIterations() {
+        when isAvailable() { give DEFAULT_ITERATIONS }
+        give FALLBACK_ITERATIONS
+    }
+
+    static task hashWith(plaintext, iterations) {
+        when plaintext == nil { throw Exception("password: cannot hash nil") }
+        body = str(plaintext)
+        when body == "" { throw Exception("password: cannot hash an empty password") }
+        when iterations < 1000 {
+            throw Exception(`password: {iterations} iterations is too few to be worth doing`)
+        }
+
+        saltBytes = randomBytes(DEFAULT_SALT_BYTES)
+        salt = bytesToHex(saltBytes)
+        derived = deriveKey(body, salt, iterations)
+        give encodeHash("pbkdf2-sha256", iterations, salt, toHex(derived))
+    }
+
+    # Check a password against a stored hash.
+    #
+    # Returns false for anything malformed rather than throwing: a corrupt row
+    # in the users table should fail the login, not crash the request.
+    static task verify(plaintext, stored) {
+        when plaintext == nil or stored == nil { give false }
+        parts = decodeHash(str(stored))
+        when parts == nil { give false }
+
+        derived = deriveKey(str(plaintext), parts["salt"], parts["iterations"])
+        give constantTimeEquals(toHex(derived), parts["hash"])
+    }
+
+    # True when a stored hash was made with weaker parameters than the current
+    # defaults. Rehash on the next successful login:
+    #
+    #   when Password.verify(pw, stored) {
+    #       when Password.needsRehash(stored) { save(Password.hash(pw)) }
+    #       signIn()
+    #   }
+    #
+    # This is how an application raises its cost factor over time without
+    # forcing anyone to reset a password.
+    static task needsRehash(stored) {
+        parts = decodeHash(str(stored))
+        when parts == nil { give true }
+        when parts["algorithm"] != "pbkdf2-sha256" { give true }
+        give parts["iterations"] < Password.defaultIterations()
+    }
+
+    static task isValidHash(stored) {
+        when stored == nil { give false }
+        give decodeHash(str(stored)) != nil
+    }
+
+    # The parameters a hash was made with, for auditing. nil when malformed.
+    static task describe(stored) {
+        parts = decodeHash(str(stored))
+        when parts == nil { give nil }
+        give {
+            "algorithm": parts["algorithm"],
+            "iterations": parts["iterations"],
+            "saltBytes": (len(parts["salt"]) - (len(parts["salt"]) % 2)) / 2
+        }
+    }
+
+    # ── strength ────────────────────────────────────────────────────────────
+
+    # A deliberately simple check: length dominates everything else, so that
+    # is what this weights. Returns { ok, score, problems }.
+    #
+    # Composition rules ("must contain a symbol") push people toward
+    # Password1! and are not enforced here; NIST dropped them for that reason.
+    static task strength(plaintext) {
+        body = str(plaintext)
+        problems = []
+        score = 0
+
+        when len(body) < 8 { push(problems, "must be at least 8 characters") }
+        other {
+            score = score + 1
+            when len(body) >= 12 { score = score + 1 }
+            when len(body) >= 16 { score = score + 1 }
+        }
+
+        kinds = 0
+        when re_test(body, "[a-z]") { kinds = kinds + 1 }
+        when re_test(body, "[A-Z]") { kinds = kinds + 1 }
+        when re_test(body, "[0-9]") { kinds = kinds + 1 }
+        when re_test(body, "[^A-Za-z0-9]") { kinds = kinds + 1 }
+        when kinds >= 3 { score = score + 1 }
+
+        get common in COMMON_PASSWORDS {
+            when lower(body) == common {
+                push(problems, "is one of the most common passwords")
+                score = 0
+                escape
+            }
+        }
+        when re_test(body, "^(.)\\1+$") {
+            push(problems, "is a single repeated character")
+            score = 0
+        }
+
+        give { "ok": len(problems) == 0, "score": score, "problems": problems }
+    }
+}
+
+# Not a real breach list -- that belongs in a data file, not a library. These
+# are the handful that show up constantly and are worth refusing outright.
+export COMMON_PASSWORDS = [
+    "password", "password1", "password123", "123456", "12345678", "123456789",
+    "qwerty", "abc123", "letmein", "welcome", "admin", "iloveyou", "monkey",
+    "dragon", "sunshine", "princess", "football", "baseball", "trustno1"
+]
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+# One derivation path, so a hash made natively verifies against the fallback
+# and the other way round. Both are PBKDF2-HMAC-SHA256 over the same inputs
+# and produce identical bytes; only the speed differs.
+export task deriveKey(plaintext, salt, iterations) {
+    when isAvailable() {
+        octets = derive(stringToBytes(plaintext), stringToBytes(salt), iterations, DEFAULT_KEY_BYTES)
+        when octets != nil { give octets }
+    }
+    give PBKDF2.derive(plaintext, salt, iterations, DEFAULT_KEY_BYTES)
+}
+
+export task randomBytes(count) {
+    octets = []
+    repeat i = 1 to count { push(octets, randint(0, 255)) }
+    give octets
+}
+
+export task bytesToHex(octets) {
+    digits = "0123456789abcdef"
+    body = ""
+    get b in octets {
+        v = b % 256
+        high = (v - (v % 16)) / 16
+        body = body + substr(digits, high, 1) + substr(digits, v % 16, 1)
+    }
+    give body
+}
+
+# PBKDF2.derive returns a byte array; hex is what gets stored.
+export task toHex(derived) {
+    when typeOf(derived) == "string" { give derived }
+    give bytesToHex(derived)
+}
+
+# Compares without returning early on the first difference. A comparison that
+# short-circuits leaks, through timing, how much of a guess was right.
+export task constantTimeEquals(a, b) {
+    left = str(a)
+    right = str(b)
+    when len(left) != len(right) { give false }
+    difference = 0
+    total = len(left)
+    repeat i = 0 to total - 1 {
+        when substr(left, i, 1) != substr(right, i, 1) { difference = difference + 1 }
+    }
+    give difference == 0
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task hashPassword(plaintext) { give Password.hash(plaintext) }
+export task verifyPassword(plaintext, stored) { give Password.verify(plaintext, stored) }

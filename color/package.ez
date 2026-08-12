@@ -1,0 +1,11 @@
+{
+  "name": "color",
+  "version": "1.0.0",
+  "description": "Terminal colour and styling for EZ. ANSI codes, 256-colour and truecolor, chainable styles, hex conversion and ANSI-aware width measurement.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["color", "colour", "ansi", "terminal", "cli", "style"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

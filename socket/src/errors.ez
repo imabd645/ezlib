@@ -1,0 +1,63 @@
+// ============================================================================
+// ezsocket / errors.ez -- Winsock codes turned into something readable.
+//
+// Every call used to fail as `false` or `-1`, which says that something went
+// wrong but never what. These map the codes you actually hit to a sentence, and
+// carry the numeric code along for the ones you do not.
+// ============================================================================
+
+use "ffi.ez"
+
+export model SocketError {
+    init(message = "", code = 0) {
+        self._isSocketError = true
+        self.message = str(message)
+        self.code = code
+    }
+    task str() {
+        when self.code != 0 {
+            give "SocketError: " + self.message + " (WSA " + str(self.code) + ": " + wsa_message(self.code) + ")"
+        }
+        give "SocketError: " + self.message
+    }
+}
+
+// The Winsock codes a network program realistically meets.
+export task wsa_message(code) {
+    when code == 10004 { give "interrupted" }
+    when code == 10013 { give "permission denied" }
+    when code == 10014 { give "bad address" }
+    when code == 10022 { give "invalid argument" }
+    when code == 10024 { give "too many open sockets" }
+    when code == 10035 { give "would block" }
+    when code == 10036 { give "operation now in progress" }
+    when code == 10038 { give "not a socket" }
+    when code == 10040 { give "message too long" }
+    when code == 10047 { give "address family not supported" }
+    when code == 10048 { give "address already in use -- another process holds this port, or a previous server has not released it (enable reuseAddr)" }
+    when code == 10049 { give "cannot assign requested address" }
+    when code == 10050 { give "network is down" }
+    when code == 10051 { give "network unreachable" }
+    when code == 10052 { give "network dropped the connection on reset" }
+    when code == 10053 { give "connection aborted by this host" }
+    when code == 10054 { give "connection reset by peer" }
+    when code == 10055 { give "no buffer space available" }
+    when code == 10056 { give "already connected" }
+    when code == 10057 { give "socket is not connected" }
+    when code == 10058 { give "socket has been shut down" }
+    when code == 10060 { give "timed out" }
+    when code == 10061 { give "connection refused -- nothing is listening on that address and port" }
+    when code == 10064 { give "host is down" }
+    when code == 10065 { give "no route to host" }
+    when code == 10091 { give "network subsystem unavailable" }
+    when code == 10093 { give "WSAStartup was not called" }
+    when code == 11001 { give "host not found" }
+    when code == 11002 { give "temporary DNS failure -- try again" }
+    when code == 11004 { give "valid name, but no address of the requested type" }
+    give "unknown error"
+}
+
+// Raise the current Winsock error, prefixed with what was being attempted.
+export task raise_socket(what) {
+    throw SocketError(str(what), wsa_last_error())
+}

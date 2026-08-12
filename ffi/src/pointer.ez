@@ -1,0 +1,153 @@
+// ============================================================================
+// src/pointer.ez — Safe raw memory pointer model for the ezffi library.
+//
+// Pointer wraps a raw address with:
+//   - use-after-free detection (freed flag)
+//   - ownership tracking (owned flag) — borrowed ptrs can't be free()'d
+//   - callback awareness (_isCallback flag) — routes free() correctly
+//   - typed read/write methods for every C numeric type
+//   - bounded string reads via os_read_string_ptr_n
+// ============================================================================
+
+use "errors.ez"
+
+export model Pointer {
+    ptr:         any
+    freed:       bool
+    owned:       bool
+    _isCallback: bool
+
+    init(ptr, owned = true, isCallback = false) {
+        self.ptr         = ptr
+        self.freed       = false
+        self.owned       = owned
+        self._isCallback = isCallback
+        give self
+    }
+
+    // ── Lifecycle ────────────────────────────────────────────────────────────
+
+    // Release the memory owned by this pointer.
+    // Callbacks use os_ffi_free_callback; normal allocations use os_free.
+    task free() {
+        when self.freed  { throw MemoryError("double free: pointer already freed") }
+        when not self.owned { throw MemoryError("cannot free borrowed pointer") }
+        self.freed = true
+        when self._isCallback {
+            os_ffi_free_callback(self.ptr)
+        } other {
+            os_free(self.ptr)
+        }
+    }
+
+    // Return the raw integer address (useful when passing to os_* directly)
+    task addr() {
+        give self.ptr
+    }
+
+    // Return a new borrowed Pointer offset by n bytes (no ownership)
+    task offset(n) {
+        give Pointer(self.ptr + n, false)
+    }
+
+    // ── String I/O ───────────────────────────────────────────────────────────
+
+    // Read a null-terminated C string. maxlen caps the read (default 64 KB).
+    task readString(maxlen = 65536) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_string_ptr_n(self.ptr, maxlen)
+    }
+
+    // Write a string into this memory at byte offset (including trailing NUL).
+    task writeString(offset, text) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_string(self.ptr, offset, str(text))
+    }
+
+    // ── Byte ─────────────────────────────────────────────────────────────────
+
+    task readByte(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_byte(self.ptr, offset)
+    }
+    task writeByte(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_byte(self.ptr, offset, val)
+    }
+
+    // ── 16-bit ───────────────────────────────────────────────────────────────
+
+    task readInt16(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int16(self.ptr, offset)
+    }
+    task writeInt16(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int16(self.ptr, offset, val)
+    }
+    task readUInt16(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint16(self.ptr, offset)
+    }
+    task writeUInt16(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint16(self.ptr, offset, val)
+    }
+
+    // ── 32-bit ───────────────────────────────────────────────────────────────
+
+    task readInt32(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int32(self.ptr, offset)
+    }
+    task writeInt32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int32(self.ptr, offset, val)
+    }
+    task readUInt32(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint32(self.ptr, offset)
+    }
+    task writeUInt32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint32(self.ptr, offset, val)
+    }
+
+    // ── 64-bit ───────────────────────────────────────────────────────────────
+
+    task readInt64(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_int64(self.ptr, offset)
+    }
+    task writeInt64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_int64(self.ptr, offset, val)
+    }
+    task readUInt64(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_uint64(self.ptr, offset)
+    }
+    task writeUInt64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_uint64(self.ptr, offset, val)
+    }
+
+    // ── Floating point ───────────────────────────────────────────────────────
+
+    task readFloat32(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_float32(self.ptr, offset)
+    }
+    task writeFloat32(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_float32(self.ptr, offset, val)
+    }
+    task readFloat64(offset) {
+        when self.freed { throw MemoryError("use after free") }
+        give os_read_float64(self.ptr, offset)
+    }
+    task writeFloat64(offset, val) {
+        when self.freed { throw MemoryError("use after free") }
+        os_write_float64(self.ptr, offset, val)
+    }
+}

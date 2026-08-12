@@ -1,0 +1,28 @@
+use "constants.ez"
+use "trigonometry.ez"
+
+# Deterministic LCG for simulations and tests. It is not cryptographic.
+__randSeed = abs(floor(clock() * 1000000)) % 2147483647
+export task seedRand(seed) { __randSeed = abs(floor(seed)) % 2147483647 }
+export task _nextRandom() {
+    __randSeed = (1103515245 * __randSeed + 12345) % 2147483647
+    give __randSeed
+}
+export task randInt(minValue, maxValue) {
+    when floor(minValue) != minValue or floor(maxValue) != maxValue or minValue > maxValue { throw "randInt(): bounds must be ordered integers" }
+    give minValue + (_nextRandom() % (maxValue - minValue + 1))
+}
+export task randFloat(minValue, maxValue) {
+    when minValue > maxValue { throw "randFloat(): minValue must not exceed maxValue" }
+    give minValue + _nextRandom() / 2147483647.0 * (maxValue - minValue)
+}
+export task randBool() { give randInt(0, 1) == 1 }
+export task randChoice(values) { when len(values) == 0 { throw "randChoice(): values must not be empty" }  give values[randInt(0, len(values) - 1)] }
+export task randNormal(mean, stddev) {
+    when stddev < 0 { throw "randNormal(): stddev must be non-negative" }
+    # The generator may produce zero; resample so ln() remains defined.
+    u1 = 0
+    while u1 == 0 { u1 = randFloat(0, 1) }
+    u2 = randFloat(0, 1)
+    give mean + stddev * sqrt(-2 * ln(u1)) * cos(TAU * u2)
+}

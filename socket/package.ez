@@ -1,0 +1,8 @@
+{
+    "name": "socket",
+    "version": "1.0.0",
+    "description": "TCP and UDP sockets for EZ over pure FFI -- hostname resolution, timeouts, binary-safe transfers, UDP. No C++.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {}
+}

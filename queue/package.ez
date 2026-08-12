@@ -1,0 +1,11 @@
+{
+  "name": "queue",
+  "version": "1.0.0",
+  "description": "Background job queues for EZ. In-memory and Redis drivers, delayed jobs, retries with backoff, failure handling and stalled-job recovery.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["queue", "jobs", "background", "worker", "redis", "async"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "redis": "^1.0.0" }
+}

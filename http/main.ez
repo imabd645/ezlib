@@ -1,0 +1,613 @@
+# ============================================================================
+# EZHTTP - Production-Ready HTTP Client for EZ Language (v2.0)
+# Features: Request/Response models, all HTTP methods, query params,
+#           retries, timeouts, interceptors, file upload/download
+# ============================================================================
+
+# --- HTTP Status Codes ---
+export HTTP_CONTINUE = 100
+export HTTP_SWITCHING_PROTOCOLS = 101
+export HTTP_OK = 200
+export HTTP_CREATED = 201
+export HTTP_ACCEPTED = 202
+export HTTP_NO_CONTENT = 204
+export HTTP_RESET_CONTENT = 205
+export HTTP_PARTIAL_CONTENT = 206
+export HTTP_MULTIPLE_CHOICES = 300
+export HTTP_MOVED_PERMANENTLY = 301
+export HTTP_FOUND = 302
+export HTTP_SEE_OTHER = 303
+export HTTP_NOT_MODIFIED = 304
+export HTTP_TEMPORARY_REDIRECT = 307
+export HTTP_PERMANENT_REDIRECT = 308
+export HTTP_BAD_REQUEST = 400
+export HTTP_UNAUTHORIZED = 401
+export HTTP_PAYMENT_REQUIRED = 402
+export HTTP_FORBIDDEN = 403
+export HTTP_NOT_FOUND = 404
+export HTTP_METHOD_NOT_ALLOWED = 405
+export HTTP_NOT_ACCEPTABLE = 406
+export HTTP_PROXY_AUTH_REQUIRED = 407
+export HTTP_REQUEST_TIMEOUT = 408
+export HTTP_CONFLICT = 409
+export HTTP_GONE = 410
+export HTTP_LENGTH_REQUIRED = 411
+export HTTP_PRECONDITION_FAILED = 412
+export HTTP_PAYLOAD_TOO_LARGE = 413
+export HTTP_URI_TOO_LONG = 414
+export HTTP_UNSUPPORTED_MEDIA_TYPE = 415
+export HTTP_RANGE_NOT_SATISFIABLE = 416
+export HTTP_EXPECTATION_FAILED = 417
+export HTTP_IM_A_TEAPOT = 418
+export HTTP_UNPROCESSABLE_ENTITY = 422
+export HTTP_TOO_MANY_REQUESTS = 429
+export HTTP_INTERNAL_SERVER_ERROR = 500
+export HTTP_NOT_IMPLEMENTED = 501
+export HTTP_BAD_GATEWAY = 502
+export HTTP_SERVICE_UNAVAILABLE = 503
+export HTTP_GATEWAY_TIMEOUT = 504
+
+# --- Response Model ---
+# Represents an HTTP response returned by the HTTPClient.
+# Contains the status code, response body, headers, and request duration.
+export model HTTPResponse {
+    init(statusCode, body, headers, url, duration) {
+        self.statusCode = statusCode
+        self.body = body
+        self.headers = headers
+        self.url = url
+        self.duration = duration
+        self.ok = statusCode >= 200 and statusCode < 300
+    }
+    
+    # Checks if the HTTP response status code indicates success.
+    # Returns `true` if the status code is between 200 and 299 inclusive, otherwise `false`.
+    task isOk() {
+        give self.ok
+    }
+    
+    # Checks if the HTTP response status code matches a specific integer code.
+    # Returns `true` if the status code exactly matches `statusCode`.
+    task is(statusCode) {
+        give self.statusCode == statusCode
+    }
+    
+    # Parses the HTTP response body as a JSON string.
+    # Returns the parsed JSON as an EZ dictionary or array, or `nil` if the body is empty.
+    task json() {
+        when self.body == nil or self.body == "" {
+            give nil
+        }
+        give parse_json(self.body)
+    }
+    
+    # Retrieves the value of an HTTP header from the response.
+    # The `name` is case-insensitive. Returns `nil` if the header does not exist.
+    task header(name) {
+        get key in self.headers {
+            when lower(key) == lower(name) {
+                give self.headers[key]
+            }
+        }
+        give nil
+    }
+    
+    # Retrieves the Content-Type of the HTTP response.
+    # Strips away any charset parameters, returning only the MIME type (e.g., "application/json").
+    task contentType() {
+        ct = self.header("Content-Type")
+        when ct {
+            parts = split(ct, ";")
+            give trim(parts[0])
+        }
+        give nil
+    }
+    
+    # Raises a runtime exception if the HTTP response indicates a failure (status code 4xx or 5xx).
+    # Useful for failing fast on bad requests.
+    task raiseForStatus() {
+        when not self.ok {
+            throw "HTTP " + str(self.statusCode) + ": " + self.body
+        }
+        give self
+    }
+}
+
+# --- Request Builder Model ---
+export model HTTPRequest {
+    init(method, url) {
+        self.method = upper(method)
+        self.url = url
+        self.headers = {}
+        self.body = nil
+        self.params = {}
+        self.timeout = 30000  # 30 seconds default
+        self.retries = 3
+        self.retryDelay = 1000  # 1 second
+        self.followRedirects = true
+        self.maxRedirects = 10
+    }
+    
+    # Add header
+    task header(key, value) {
+        self.headers[key] = value
+        give self
+    }
+    
+    # Add multiple headers
+    task headers(hdrs) {
+        get key in hdrs {
+            self.headers[key] = hdrs[key]
+        }
+        give self
+    }
+    
+    # Set body (auto-serializes JSON)
+    task data(body) {
+        when typeOf(body) == "dictionary" or typeOf(body) == "array" {
+            self.body = to_json(body)
+            self.headers["Content-Type"] = "application/json"
+        } other {
+            self.body = str(body)
+        }
+        give self
+    }
+    
+    # Set raw body without auto-serialization
+    task raw(body) {
+        self.body = body
+        give self
+    }
+    
+    # Set Bearer Token Authentication
+    task bearerAuth(token) {
+        self.headers["Authorization"] = "Bearer " + str(token)
+        give self
+    }
+    
+    # Set Basic Authentication (requires base64 encoding conceptually, but we can set the header)
+    task basicAuth(base64Credentials) {
+        self.headers["Authorization"] = "Basic " + str(base64Credentials)
+        give self
+    }
+    
+    # Set form data (x-www-form-urlencoded)
+    task form(formData) {
+        self.headers["Content-Type"] = "application/x-www-form-urlencoded"
+        bodyStr = ""
+        first = true
+        get key in formData {
+            when not first { bodyStr = bodyStr + "&" }
+            first = false
+            bodyStr = bodyStr + url_encode(str(key)) + "=" + url_encode(str(formData[key]))
+        }
+        self.body = bodyStr
+        give self
+    }
+    
+    # Add query parameter
+    task param(key, value) {
+        self.params[key] = value
+        give self
+    }
+    
+    # Add multiple query params
+    task query(params) {
+        get key in params {
+            self.params[key] = params[key]
+        }
+        give self
+    }
+    
+    # Set timeout (milliseconds)
+    task timeout(ms) {
+        self.timeout = ms
+        give self
+    }
+    
+    # Set retry count
+    task retries(count) {
+        self.retries = count
+        give self
+    }
+    
+    # Disable redirects
+    task noRedirect() {
+        self.followRedirects = false
+        give self
+    }
+    
+    # Build final URL with query params
+    task buildUrl() {
+        when len(self.params) == 0 {
+            give self.url
+        }
+        
+        queryString = ""
+        first = true
+        get key in self.params {
+            when not first {
+                queryString = queryString + "&"
+            }
+            first = false
+            encodedKey = url_encode(str(key))
+            encodedVal = url_encode(str(self.params[key]))
+            queryString = queryString + encodedKey + "=" + encodedVal
+        }
+        
+        separator = "?"
+        when indexOf(self.url, "?") > -1 {
+            separator = "&"
+        }
+        
+        give self.url + separator + queryString
+    }
+    
+    # Execute the request
+    task send() {
+        give __executeRequest(self)
+    }
+    
+    # Download response directly to a file
+    task download(filepath) {
+        res = self.send()
+        when res.isOk() {
+            # EZ file I/O (assuming write_file or similar built-in exists, or use ezfs)
+            try {
+                writeFile(filepath, res.body)
+                give true
+            } catch e {
+                print("Failed to save file: " + str(e))
+                give false
+            }
+        }
+        give false
+    }
+}
+
+# --- Internal Request Execution ---
+export task __executeRequest(request) {
+    url = request.buildUrl()
+    method = request.method
+    body = request.body
+    headers = request.headers
+    retries = request.retries
+    retryDelay = request.retryDelay
+    
+    lastError = nil
+    attempt = 0
+    
+    # `loop` is not an EZ keyword -- the infinite form is `while true`. As written
+    # this parsed as a bare identifier followed by a block, so the retry loop was
+    # never a loop: the body ran once and `retries` did nothing.
+    # Exits are `give` on success and `throw` once the retries are exhausted.
+    while true {
+        attempt = attempt + 1
+        start = clock()
+        
+        try {
+            # Execute based on method
+            statusCode = 0
+            responseBody = ""
+            responseHeaders = {}
+            
+            when method == "GET" {
+                # Use native http_get
+                responseBody = http_get(url, headers)
+                statusCode = 200  // Native doesn't return status
+            }
+            
+            when method == "POST" {
+                when body == nil { body = "" }
+                responseBody = http_post(url, str(body), headers)
+                statusCode = 200
+            }
+            
+            when method == "PUT" or method == "PATCH" or method == "DELETE" or method == "HEAD" or method == "OPTIONS" {
+                # For methods not directly supported, use fetch with method override
+                # Native EZ may not support all, so we use POST with X-HTTP-Method-Override
+                tempHeaders = headers
+                tempHeaders["X-HTTP-Method-Override"] = method
+                responseBody = http_post(url, str(body), tempHeaders)
+                statusCode = 200
+            }
+            
+            // Try to extract status from response if it's JSON
+            when typeOf(responseBody) == "string" {
+                try {
+                    parsed = parse_json(responseBody)
+                    when has_key(parsed, "status") {
+                        statusCode = parsed["status"]
+                    }
+                    when has_key(parsed, "statusCode") {
+                        statusCode = parsed["statusCode"]
+                    }
+                } catch e {
+                    # Not JSON or no status field
+                }
+            }
+            
+            duration = (clock() - start) * 1000  # Convert to ms
+            
+            give HTTPResponse(statusCode, responseBody, responseHeaders, url, duration)
+            
+        } catch e {
+            lastError = e
+            
+            # Retry on network errors
+            when attempt < retries {
+                stop(retryDelay / 1000)  # Convert ms to seconds
+            } other {
+                # All retries exhausted
+                throw "Request failed after " + str(attempt) + " attempts: " + str(e)
+            }
+        }
+    }
+}
+
+# --- HTTP Client Model ---
+export model HTTPClient {
+    init(baseUrl) {
+        self.baseUrl = baseUrl
+        self.defaultHeaders = {}
+        self.timeout = 30000
+        self.retries = 3
+        self.interceptors = {
+            "request": [],
+            "response": []
+        }
+    }
+    
+    # Set default header
+    task header(key, value) {
+        self.defaultHeaders[key] = value
+        give self
+    }
+    
+    # Set default timeout
+    task timeout(ms) {
+        self.timeout = ms
+        give self
+    }
+    
+    # Add request interceptor
+    task onRequest(fn) {
+        push(self.interceptors["request"], fn)
+        give self
+    }
+    
+    # Add response interceptor
+    task onResponse(fn) {
+        push(self.interceptors["response"], fn)
+        give self
+    }
+    
+    # Build request with defaults and interceptors
+    task buildRequest(method, path) {
+        url = self.baseUrl + path
+        request = HTTPRequest(method, url)
+        
+        # Apply default headers
+        get key in self.defaultHeaders {
+            request.header(key, self.defaultHeaders[key])
+        }
+        
+        # Apply default timeout and retries
+        request.timeout(self.timeout)
+        request.retries(self.retries)
+        
+        # Run request interceptors
+        get interceptor in self.interceptors["request"] {
+            interceptor(request)
+        }
+        
+        give request
+    }
+    
+    # HTTP methods
+    task get(path) {
+        give self.buildRequest("GET", path)
+    }
+    
+    task post(path) {
+        give self.buildRequest("POST", path)
+    }
+    
+    task put(path) {
+        give self.buildRequest("PUT", path)
+    }
+    
+    task patch(path) {
+        give self.buildRequest("PATCH", path)
+    }
+    
+    task delete(path) {
+        give self.buildRequest("DELETE", path)
+    }
+    
+    task head(path) {
+        give self.buildRequest("HEAD", path)
+    }
+    
+    task options(path) {
+        give self.buildRequest("OPTIONS", path)
+    }
+}
+
+# --- Fluent HTTP Functions ---
+
+# Performs a quick GET request to the specified `url`.
+# Automatically serializes the `params` dictionary into query string format.
+# Returns the `HTTPResponse` object directly.
+export task httpGet(url, params) {
+    request = HTTPRequest("GET", url)
+    when params {
+        request.query(params)
+    }
+    give request.send()
+}
+
+# Performs a quick POST request to the specified `url`.
+# You can supply an optional `body` (JSON string or dictionary) and `headers`.
+# Returns the `HTTPResponse` object directly.
+export task httpPost(url, body, headers) {
+    request = HTTPRequest("POST", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# Quick PUT request
+export task httpPut(url, body, headers) {
+    request = HTTPRequest("PUT", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# Quick DELETE request
+export task httpDelete(url, headers) {
+    request = HTTPRequest("DELETE", url)
+    when headers {
+        request.headers(headers)
+    }
+    give request.send()
+}
+
+# Quick PATCH request
+export task httpPatch(url, body, headers) {
+    request = HTTPRequest("PATCH", url)
+    when headers {
+        request.headers(headers)
+    }
+    when body {
+        request.data(body)
+    }
+    give request.send()
+}
+
+# --- URL Utilities ---
+export task buildUrl(base, params) {
+    when len(params) == 0 {
+        give base
+    }
+    
+    queryString = ""
+    first = true
+    get key in params {
+        when not first {
+            queryString = queryString + "&"
+        }
+        first = false
+        encodedKey = url_encode(str(key))
+        encodedVal = url_encode(str(params[key]))
+        queryString = queryString + encodedKey + "=" + encodedVal
+    }
+    
+    separator = "?"
+    when indexOf(base, "?") > -1 {
+        separator = "&"
+    }
+    
+    give base + separator + queryString
+}
+
+# Parse query string into dictionary
+export task parseQuery(url) {
+    result = {}
+    
+    # Find query part
+    qIndex = indexOf(url, "?")
+    when qIndex == -1 {
+        give result
+    }
+    
+    # substr() takes (string, start, length) -- there is no 2-argument
+    # "rest of the string" form, so both calls below raised
+    # "substr() expects numbers for start and length" and query parsing
+    # never worked at all.
+    queryPart = substr(url, qIndex + 1, len(url) - (qIndex + 1))
+    pairs = split(queryPart, "&")
+
+    get pair in pairs {
+        eqIndex = indexOf(pair, "=")
+        when eqIndex > -1 {
+            key = url_decode(substr(pair, 0, eqIndex))
+            value = url_decode(substr(pair, eqIndex + 1, len(pair) - (eqIndex + 1)))
+            result[key] = value
+        }
+    }
+    
+    give result
+}
+
+# --- Async HTTP with Tasks ---
+export task asyncGet(url, callback) {
+    task runner() {
+        try {
+            response = httpGet(url, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncPost(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPost(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncPut(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPut(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncDelete(url, callback) {
+    task runner() {
+        try {
+            response = httpDelete(url, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+export task asyncPatch(url, body, callback) {
+    task runner() {
+        try {
+            response = httpPatch(url, body, nil)
+            callback(nil, response)
+        } catch e {
+            callback(e, nil)
+        }
+    }
+    give spawn(runner)
+}
+
+

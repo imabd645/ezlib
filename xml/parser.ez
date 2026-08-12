@@ -1,0 +1,203 @@
+# ============================================================================
+# xml/parser.ez — XML text to an element tree
+#
+# Single pass with an explicit stack. Mismatched tags are an error rather than
+# something to recover from: XML is not HTML, and silently repairing a
+# document hides the bug that produced it.
+# ============================================================================
+
+use "xml/node.ez"
+
+task xmlFail(msg, pos, source) {
+    line = 1
+    limit = pos
+    when limit > len(source) { limit = len(source) }
+    repeat i = 0 to limit - 1 {
+        when substr(source, i, 1) == chr(10) { line = line + 1 }
+    }
+    throw Exception(`XML parse error (line {line}): {msg}`)
+}
+
+task xmlIndexFrom(haystack, needle, from) {
+    hLen = len(haystack)
+    nLen = len(needle)
+    when nLen == 0 { give -1 }
+    last = hLen - nLen
+    when from > last { give -1 }
+    repeat i = from to last {
+        when substr(haystack, i, nLen) == needle { give i }
+    }
+    give -1
+}
+
+task xmlIsSpace(c) {
+    give c == " " or c == chr(9) or c == chr(10) or c == chr(13)
+}
+
+task xmlIsNameChar(c) {
+    when xmlIsSpace(c) { give false }
+    get bad in ["/", ">", "<", "=", `"`, "'"] {
+        when c == bad { give false }
+    }
+    give true
+}
+
+# Reads a tag or attribute name starting at `pos`. Returns [name, nextPos].
+task xmlReadName(source, pos) {
+    total = len(source)
+    start = pos
+    i = pos
+    while i < total and xmlIsNameChar(substr(source, i, 1)) { i = i + 1 }
+    give [substr(source, start, i - start), i]
+}
+
+task xmlSkipSpace(source, pos) {
+    total = len(source)
+    i = pos
+    while i < total and xmlIsSpace(substr(source, i, 1)) { i = i + 1 }
+    give i
+}
+
+# Reads attributes up to `>` or `/>`. Returns [attrs, nextPos, selfClosing].
+task xmlReadAttrs(source, pos) {
+    total = len(source)
+    attrs = {}
+    i = pos
+    while i < total {
+        i = xmlSkipSpace(source, i)
+        when i >= total { xmlFail("unterminated start tag", pos, source) }
+        c = substr(source, i, 1)
+        when c == ">" { give [attrs, i + 1, false] }
+        when c == "/" {
+            when i + 1 < total and substr(source, i + 1, 1) == ">" {
+                give [attrs, i + 2, true]
+            }
+            xmlFail("expected '>' after '/'", i, source)
+        }
+
+        nameResult = xmlReadName(source, i)
+        name = nameResult[0]
+        when name == "" { xmlFail(`unexpected '{c}' in start tag`, i, source) }
+        i = nameResult[1]
+        i = xmlSkipSpace(source, i)
+        when i >= total or substr(source, i, 1) != "=" {
+            xmlFail(`attribute '{name}' has no value`, i, source)
+        }
+        i = xmlSkipSpace(source, i + 1)
+        when i >= total { xmlFail(`attribute '{name}' has no value`, i, source) }
+        quote = substr(source, i, 1)
+        when quote != `"` and quote != "'" {
+            xmlFail(`attribute '{name}' must be quoted`, i, source)
+        }
+        closeAt = xmlIndexFrom(source, quote, i + 1)
+        when closeAt < 0 { xmlFail(`attribute '{name}' is not closed`, i, source) }
+        attrs[name] = xmlDecodeEntities(substr(source, i + 1, closeAt - i - 1))
+        i = closeAt + 1
+    }
+    xmlFail("unterminated start tag", pos, source)
+}
+
+export task xmlParseDocument(source) {
+    total = len(source)
+    root = nil
+    stack = []
+    pos = 0
+
+    while pos < total {
+        openAt = xmlIndexFrom(source, "<", pos)
+
+        when openAt < 0 {
+            # Trailing text. Only meaningful inside an element.
+            rest = substr(source, pos, total - pos)
+            when len(stack) > 0 and trim(rest) != "" {
+                stack[len(stack) - 1].addText(xmlDecodeEntities(rest))
+            }
+            escape
+        }
+
+        when openAt > pos {
+            chunk = substr(source, pos, openAt - pos)
+            # Whitespace between elements is formatting, not content, so it is
+            # dropped at the top level and between child elements.
+            when len(stack) > 0 and trim(chunk) != "" {
+                stack[len(stack) - 1].addText(xmlDecodeEntities(chunk))
+            }
+        }
+
+        # ── declarations, comments, CDATA ───────────────────────────────────
+        when xmlIndexFrom(source, "<!--", openAt) == openAt {
+            closeAt = xmlIndexFrom(source, "-->", openAt + 4)
+            when closeAt < 0 { xmlFail("unterminated comment", openAt, source) }
+            pos = closeAt + 3
+            skip
+        }
+        when xmlIndexFrom(source, "<![CDATA[", openAt) == openAt {
+            closeAt = xmlIndexFrom(source, "]]>", openAt + 9)
+            when closeAt < 0 { xmlFail("unterminated CDATA section", openAt, source) }
+            # CDATA is literal: no entity decoding.
+            when len(stack) > 0 {
+                stack[len(stack) - 1].addText(substr(source, openAt + 9, closeAt - openAt - 9))
+            }
+            pos = closeAt + 3
+            skip
+        }
+        when xmlIndexFrom(source, "<?", openAt) == openAt {
+            closeAt = xmlIndexFrom(source, "?>", openAt + 2)
+            when closeAt < 0 { xmlFail("unterminated processing instruction", openAt, source) }
+            pos = closeAt + 2
+            skip
+        }
+        when xmlIndexFrom(source, "<!", openAt) == openAt {
+            closeAt = xmlIndexFrom(source, ">", openAt + 2)
+            when closeAt < 0 { xmlFail("unterminated declaration", openAt, source) }
+            pos = closeAt + 1
+            skip
+        }
+
+        # ── end tag ────────────────────────────────────────────────────────
+        when xmlIndexFrom(source, "</", openAt) == openAt {
+            nameResult = xmlReadName(source, openAt + 2)
+            name = nameResult[0]
+            after = xmlSkipSpace(source, nameResult[1])
+            when after >= total or substr(source, after, 1) != ">" {
+                xmlFail(`end tag '{name}' is not closed`, openAt, source)
+            }
+            when len(stack) == 0 {
+                xmlFail(`end tag '</{name}>' has no matching start tag`, openAt, source)
+            }
+            top = stack[len(stack) - 1]
+            when top.tag != name {
+                xmlFail(`end tag '</{name}>' does not match '<{top.tag}>'`, openAt, source)
+            }
+            pop(stack)
+            pos = after + 1
+            skip
+        }
+
+        # ── start tag ──────────────────────────────────────────────────────
+        nameResult = xmlReadName(source, openAt + 1)
+        tag = nameResult[0]
+        when tag == "" { xmlFail("expected a tag name after '<'", openAt, source) }
+
+        attrResult = xmlReadAttrs(source, nameResult[1])
+        node = Element(tag)
+        node.attrs = attrResult[0]
+
+        when len(stack) > 0 { stack[len(stack) - 1].add(node) }
+        other {
+            when root != nil {
+                xmlFail(`'<{tag}>' is a second root element; XML allows only one`, openAt, source)
+            }
+            root = node
+        }
+        when attrResult[2] == false { push(stack, node) }
+        pos = attrResult[1]
+    }
+
+    when len(stack) > 0 {
+        unclosed = stack[len(stack) - 1]
+        throw Exception(`XML parse error: '<{unclosed.tag}>' was never closed`)
+    }
+    when root == nil { throw Exception("XML parse error: the document has no root element") }
+    give root
+}

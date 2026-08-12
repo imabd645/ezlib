@@ -1,0 +1,11 @@
+{
+  "name": "table",
+  "version": "1.0.0",
+  "description": "Terminal tables for EZ. Auto-sized columns, alignment, truncation, several border styles including markdown, and ANSI-aware width measurement.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["table", "terminal", "cli", "format", "ascii", "report"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "color": "^1.0.0" }
+}

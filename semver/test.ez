@@ -1,0 +1,147 @@
+# ============================================================================
+# semver — test suite
+#   ez test.ez
+# ============================================================================
+
+use "semver"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task sat(v, r, expected) { check(`{v} satisfies {r}`, Semver.satisfies(v, r), expected) }
+
+out "semver tests"
+
+# ── parsing ─────────────────────────────────────────────────────────────────
+check("valid", Semver.isValid("1.2.3"), true)
+check("valid with v", Semver.isValid("v1.2.3"), true)
+check("valid prerelease", Semver.isValid("1.2.3-beta.1"), true)
+check("valid build", Semver.isValid("1.2.3+sha.1"), true)
+check("two parts invalid", Semver.isValid("1.2"), false)
+check("four parts invalid", Semver.isValid("1.2.3.4"), false)
+check("letters invalid", Semver.isValid("a.b.c"), false)
+check("leading zero invalid", Semver.isValid("01.0.0"), false)
+check("empty prerelease invalid", Semver.isValid("1.0.0-"), false)
+check("empty invalid", Semver.isValid(""), false)
+check("nil invalid", Semver.isValid(nil), false)
+check("parse major", Semver.parse("1.2.3")["major"], 1)
+check("parse patch", Semver.parse("1.2.3")["patch"], 3)
+check("parse prerelease", Semver.parse("1.2.3-rc.1")["prerelease"], "rc.1")
+check("parse build", Semver.parse("1.2.3+abc")["build"], "abc")
+
+# ── comparison ──────────────────────────────────────────────────────────────
+check("equal", Semver.compare("1.2.3", "1.2.3"), 0)
+check("major greater", Semver.compare("2.0.0", "1.9.9"), 1)
+check("minor greater", Semver.compare("1.2.0", "1.1.9"), 1)
+check("patch less", Semver.compare("1.2.3", "1.2.4"), -1)
+# Numeric, not lexical -- the single most common versioning bug.
+check("10 beats 9", Semver.compare("1.10.0", "1.9.0"), 1)
+check("100 beats 99", Semver.compare("1.100.0", "1.99.0"), 1)
+# Prerelease ranks below its release.
+check("prerelease older", Semver.compare("1.0.0-beta", "1.0.0"), -1)
+check("alpha before beta", Semver.compare("1.0.0-alpha", "1.0.0-beta"), -1)
+check("numeric prerelease", Semver.compare("1.0.0-1", "1.0.0-2"), -1)
+check("numeric ranks below alpha", Semver.compare("1.0.0-1", "1.0.0-alpha"), -1)
+check("more identifiers wins", Semver.compare("1.0.0-a", "1.0.0-a.1"), -1)
+check("build ignored", Semver.compare("1.0.0+a", "1.0.0+b"), 0)
+check("gt helper", Semver.gt("2.0.0", "1.0.0"), true)
+check("lte helper", Semver.lte("1.0.0", "1.0.0"), true)
+check("neq helper", Semver.neq("1.0.0", "1.0.1"), true)
+
+# ── exact and comparators ───────────────────────────────────────────────────
+sat("1.2.3", "1.2.3", true)
+sat("1.2.4", "1.2.3", false)
+sat("1.2.3", "=1.2.3", true)
+sat("1.2.4", ">1.2.3", true)
+sat("1.2.3", ">1.2.3", false)
+sat("1.2.3", ">=1.2.3", true)
+sat("1.2.2", "<1.2.3", true)
+sat("1.2.3", "<=1.2.3", true)
+
+# ── caret ───────────────────────────────────────────────────────────────────
+sat("1.2.3", "^1.2.3", true)
+sat("1.9.0", "^1.2.3", true)
+sat("1.2.2", "^1.2.3", false)
+sat("2.0.0", "^1.2.3", false)
+sat("0.9.0", "^1.2.3", false)
+# 0.x: minor is breaking.
+sat("0.2.9", "^0.2.3", true)
+sat("0.3.0", "^0.2.3", false)
+sat("0.0.3", "^0.0.3", true)
+sat("0.0.4", "^0.0.3", false)
+
+# ── tilde ───────────────────────────────────────────────────────────────────
+sat("1.2.9", "~1.2.3", true)
+sat("1.2.3", "~1.2.3", true)
+sat("1.2.2", "~1.2.3", false)
+sat("1.3.0", "~1.2.3", false)
+
+# ── wildcards ───────────────────────────────────────────────────────────────
+sat("1.2.9", "1.2.x", true)
+sat("1.3.0", "1.2.x", false)
+sat("1.9.9", "1.x", true)
+sat("2.0.0", "1.x", false)
+sat("9.9.9", "*", true)
+sat("9.9.9", "", true)
+
+# ── intervals, groups, unions ───────────────────────────────────────────────
+sat("1.5.0", "1.2.3 - 2.0.0", true)
+sat("2.0.1", "1.2.3 - 2.0.0", false)
+sat("1.5.0", ">=1.0.0 <2.0.0", true)
+sat("2.0.0", ">=1.0.0 <2.0.0", false)
+sat("1.0.0", "^1.0.0 || ^2.0.0", true)
+sat("2.5.0", "^1.0.0 || ^2.0.0", true)
+sat("3.0.0", "^1.0.0 || ^2.0.0", false)
+
+# A prerelease must not satisfy a plain range -- nobody wants 2.0.0-alpha
+# from "^1.0.0" or "*".
+sat("2.0.0-alpha", "*", false)
+sat("1.5.0-beta", "^1.0.0", false)
+sat("1.5.0-beta", ">=1.0.0-alpha", true)
+
+# ── selection ───────────────────────────────────────────────────────────────
+VS = ["1.0.0", "1.5.0", "1.9.2", "2.0.0", "2.1.0"]
+check("maxSatisfying", Semver.maxSatisfying(VS, "^1.0.0"), "1.9.2")
+check("maxSatisfying none", Semver.maxSatisfying(VS, "^5.0.0"), nil)
+check("minSatisfying", Semver.minSatisfying(VS, "^1.0.0"), "1.0.0")
+check("max", Semver.max(VS), "2.1.0")
+check("min", Semver.min(VS), "1.0.0")
+check("sort numeric", to_json(Semver.sort(["1.10.0", "1.2.0", "1.9.0"])),
+      to_json(["1.2.0", "1.9.0", "1.10.0"]))
+check("rsort", Semver.rsort(["1.0.0", "2.0.0"])[0], "2.0.0")
+check("sort drops invalid", len(Semver.sort(["1.0.0", "nope", "2.0.0"])), 2)
+
+# ── incrementing ────────────────────────────────────────────────────────────
+check("inc major", Semver.inc("1.2.3", "major"), "2.0.0")
+check("inc minor", Semver.inc("1.2.3", "minor"), "1.3.0")
+check("inc patch", Semver.inc("1.2.3", "patch"), "1.2.4")
+check("prerelease releases", Semver.inc("1.2.3-beta", "patch"), "1.2.3")
+check("clean", Semver.clean("v1.2.3-beta+build"), "1.2.3")
+check("isPrerelease true", Semver.isPrerelease("1.0.0-rc"), true)
+check("isPrerelease false", Semver.isPrerelease("1.0.0"), false)
+
+# ── diff ────────────────────────────────────────────────────────────────────
+check("diff major", Semver.diff("1.0.0", "2.0.0"), "major")
+check("diff minor", Semver.diff("1.0.0", "1.1.0"), "minor")
+check("diff patch", Semver.diff("1.0.0", "1.0.1"), "patch")
+check("diff prerelease", Semver.diff("1.0.0-a", "1.0.0-b"), "prerelease")
+check("diff none", Semver.diff("1.0.0", "1.0.0"), nil)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+threw = false
+try { Semver.compare("nope", "1.0.0") } catch (e) { threw = true }
+check("compare throws on garbage", threw, true)
+check("satisfies is false on garbage", Semver.satisfies("nope", "^1.0.0"), false)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

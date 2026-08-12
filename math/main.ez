@@ -1,0 +1,11 @@
+# EZ Math public entry point.
+# Keep this file intentionally small: importing "math" loads the supported API.
+use "src/constants.ez"
+use "src/core.ez"
+use "src/trigonometry.ez"
+use "src/number_theory.ez"
+use "src/statistics.ez"
+use "src/interpolation.ez"
+use "src/random.ez"
+use "src/geometry.ez"
+use "src/linear_algebra.ez"

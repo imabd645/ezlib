@@ -1,0 +1,48 @@
+// ============================================================================
+// ezos / errors.ez -- structured errors for the OS package.
+// ============================================================================
+
+export model OSError {
+    init(message, code = nil) {
+        self.message = message
+        self.code = code
+    }
+
+    task toString() { give "OSError: " + self.message }
+}
+
+export model EnvError {
+    init(message, key = nil) {
+        self.message = message
+        self.key = key
+    }
+
+    task toString() {
+        when typeOf(self.key) != "nil" {
+            give "EnvError(" + self.key + "): " + self.message
+        }
+        give "EnvError: " + self.message
+    }
+}
+
+export model ProcessError {
+    init(message, cmd = nil, exitCode = nil) {
+        self.message = message
+        self.cmd = cmd
+        self.exitCode = exitCode
+    }
+
+    task toString() { give "ProcessError: " + self.message }
+}
+
+export task raise_os(message, code = nil) {
+    throw OSError(message, code)
+}
+
+export task raise_env(message, key = nil) {
+    throw EnvError(message, key)
+}
+
+export task raise_process(message, cmd = nil, exitCode = nil) {
+    throw ProcessError(message, cmd, exitCode)
+}

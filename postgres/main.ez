@@ -1,0 +1,760 @@
+# ============================================================================
+# postgres — PostgreSQL for EZ, over libpq
+#
+#   use "postgres"
+#
+#   db = connect("postgres://user:pass@localhost/appdb")
+#
+#   rows = db.query("select * from users where age > $1", [18])
+#   user = db.queryOne("select * from users where email = $1", [email])
+#   db.execute("update users set seen_at = now() where id = $1", [id])
+#
+#   db.transaction(|tx| {
+#       tx.execute("insert into orders (user_id) values ($1)", [id])
+#       tx.execute("update stock set n = n - 1 where id = $1", [item])
+#   })
+#
+# There is no API here that builds SQL by concatenation. Values always travel
+# beside the statement as parameters, so a value containing a quote or a
+# semicolon is data and can never become syntax. That is not a convenience --
+# it is the single thing a database layer most has to get right.
+# ============================================================================
+
+use "postgres/native.ez"
+use "postgres/types.ez"
+use "postgres/errors.ez"
+
+export DEFAULT_PORT = 5432
+
+# ============================================================================
+# Result — what a query returns
+# ============================================================================
+
+export model Result {
+
+    init(rows, columns, affected, command) {
+        self.rows = rows
+        self.columns = columns
+        self.affected = affected
+        self.command = command
+    }
+
+    task count() { give len(self.rows) }
+    task isEmpty() { give len(self.rows) == 0 }
+    task first() {
+        when len(self.rows) == 0 { give nil }
+        give self.rows[0]
+    }
+    task last() {
+        when len(self.rows) == 0 { give nil }
+        give self.rows[len(self.rows) - 1]
+    }
+
+    # One column across every row, for "select id from …".
+    task column(name) {
+        collected = []
+        get row in self.rows { push(collected, row[name]) }
+        give collected
+    }
+
+    # The single value of a single-row, single-column result -- count(*), a
+    # returned id, an exists check.
+    task scalar() {
+        when len(self.rows) == 0 { give nil }
+        when len(self.columns) == 0 { give nil }
+        give self.rows[0][self.columns[0]["name"]]
+    }
+
+    task columnNames() {
+        names = []
+        get c in self.columns { push(names, c["name"]) }
+        give names
+    }
+
+    task toString() { give `Result({len(self.rows)} rows, {self.affected} affected)` }
+}
+
+# ============================================================================
+# Postgres — a connection
+# ============================================================================
+
+export model Postgres {
+
+    init(conninfo) {
+        self.conninfo = conninfo
+        self.handle = nil
+        self.inTransaction = false
+        self.savepointDepth = 0
+        self.statementTimeoutMs = 0
+        self.closed = false
+        self.logger = nil
+        self.queryCount = 0
+    }
+
+    # ── connecting ──────────────────────────────────────────────────────────
+
+    task open() {
+        requireLibrary()
+        self.handle = connectRaw(self.conninfo)
+        when connectionOk(self.handle) == false {
+            reason = connectionError(self.handle)
+            closeConnection(self.handle)
+            self.handle = nil
+            throw Exception("postgres: could not connect -- " + reason)
+        }
+        self.closed = false
+        # NOTICE messages otherwise go to the process's stderr, uninvited and
+        # unattributable.
+        self.runSilent("set client_min_messages = warning")
+        when self.statementTimeoutMs > 0 {
+            self.runSilent(`set statement_timeout = {floor(self.statementTimeoutMs)}`)
+        }
+        give self
+    }
+
+    task runSilent(sql) {
+        res = execRaw(self.handle, sql)
+        clearResult(res)
+        give nil
+    }
+
+    task isOpen() {
+        when self.closed or self.handle == nil { give false }
+        give connectionOk(self.handle)
+    }
+
+    # A round trip, not just a socket check: a connection can look fine and be
+    # unusable after the server restarts.
+    task ping() {
+        try { give self.queryValue("select 1") == 1 }
+        catch (e) { give false }
+    }
+
+    # Reconnects if the server went away. Worth calling on a pooled connection
+    # that has been idle.
+    task ensureOpen() {
+        when self.isOpen() { give self }
+        when self.handle != nil {
+            resetConnection(self.handle)
+            when connectionOk(self.handle) {
+                self.closed = false
+                give self
+            }
+            closeConnection(self.handle)
+            self.handle = nil
+        }
+        give self.open()
+    }
+
+    task close() {
+        when self.handle != nil {
+            closeConnection(self.handle)
+            self.handle = nil
+        }
+        self.closed = true
+        self.inTransaction = false
+        give nil
+    }
+
+    # Cancel any statement that runs longer than this. Zero disables it.
+    task withStatementTimeout(milliseconds) {
+        self.statementTimeoutMs = milliseconds
+        when self.isOpen() {
+            self.runSilent(`set statement_timeout = {floor(milliseconds)}`)
+        }
+        give self
+    }
+
+    # Called with (sql, params, milliseconds) after every statement.
+    task onQuery(handler) {
+        self.logger = handler
+        give self
+    }
+
+    task serverVersionText() {
+        raw = serverVersion(self.handle)
+        major = floor(raw / 10000)
+        minor = raw % 100
+        give `{major}.{minor}`
+    }
+
+    # ── running statements ──────────────────────────────────────────────────
+
+    # Every row as a dictionary keyed by column name. Parameters are $1, $2 …
+    task query(sql, params = nil) { give self.run(sql, params).rows }
+
+    # The full Result, when you want the affected count or the column types.
+    task queryResult(sql, params = nil) { give self.run(sql, params) }
+
+    # The first row, or nil. For a lookup by primary key.
+    task queryOne(sql, params = nil) { give self.run(sql, params).first() }
+
+    # A single value: count(*), a returned id, an exists check.
+    task queryValue(sql, params = nil) { give self.run(sql, params).scalar() }
+
+    # One column across every row.
+    task queryColumn(sql, params = nil, name = nil) {
+        result = self.run(sql, params)
+        when name != nil { give result.column(name) }
+        when len(result.columns) == 0 { give [] }
+        give result.column(result.columns[0]["name"])
+    }
+
+    # For INSERT/UPDATE/DELETE/DDL: returns how many rows were affected.
+    task execute(sql, params = nil) { give self.run(sql, params).affected }
+
+    task exists(sql, params = nil) {
+        give self.run("select exists(" + sql + ") as present", params).scalar() == true
+    }
+
+    # The one place a statement is actually sent.
+    task run(sql, params) {
+        when self.closed { throw Exception("postgres: this connection is closed") }
+        when self.handle == nil { self.open() }
+
+        encoded = []
+        when params != nil {
+            get p in params { push(encoded, encode(p)) }
+        }
+
+        started = clock()
+        res = execParams(self.handle, sql, encoded)
+        elapsed = clock() - started
+        self.queryCount = self.queryCount + 1
+        when self.logger != nil {
+            handler = self.logger
+            handler(sql, params, elapsed)
+        }
+
+        when res == nil or res == 0 {
+            # A null result means libpq could not send at all -- the connection
+            # is gone rather than the statement being wrong.
+            throw Exception("postgres: the statement could not be sent -- " + connectionError(self.handle))
+        }
+
+        status = resultStatus(res)
+        when status == PGRES_FATAL_ERROR or status == PGRES_BAD_RESPONSE {
+            info = resultError(res)
+            clearResult(res)
+            throw self.buildError(info, sql)
+        }
+
+        result = self.readResult(res)
+        clearResult(res)
+        give result
+    }
+
+    # The SQLSTATE is attached to the exception so callers can branch on it
+    # without matching on message text, which is localised.
+    task buildError(info, sql) {
+        failure = Exception(describe(info, sql))
+        failure.sqlstate = info["sqlstate"]
+        failure.constraint = info["constraint"]
+        failure.table = info["table"]
+        failure.column = info["column"]
+        failure.detail = info["detail"]
+        give failure
+    }
+
+    task readResult(res) {
+        columns = []
+        width = columnCount(res)
+        repeat c = 0 to width - 1 {
+            push(columns, { "name": columnName(res, c), "oid": columnType(res, c),
+                            "type": typeName(columnType(res, c)) })
+        }
+        rows = []
+        height = rowCount(res)
+        repeat r = 0 to height - 1 {
+            row = {}
+            repeat c = 0 to width - 1 {
+                info = columns[c]
+                # Only libpq can tell NULL from an empty string, so this has to
+                # be asked before the text is looked at.
+                when valueIsNull(res, r, c) { row[info["name"]] = nil }
+                other { row[info["name"]] = decode(rawValue(res, r, c), info["oid"]) }
+            }
+            push(rows, row)
+        }
+        give Result(rows, columns, affectedRows(res), "")
+    }
+
+    # ── writing rows ────────────────────────────────────────────────────────
+
+    # Builds the parameter list for you. Column NAMES are checked against a
+    # strict identifier pattern rather than escaped, because they cannot be
+    # parameterised -- and a column name taken from user input is a mistake in
+    # any case.
+    task insert(table, values, returning = nil) {
+        names = keys(values)
+        when len(names) == 0 { throw Exception("postgres: nothing to insert") }
+        checkIdentifier(table)
+        placeholders = []
+        params = []
+        index = 1
+        columnList = []
+        get name in names {
+            checkIdentifier(name)
+            push(columnList, quoteIdent(name))
+            push(placeholders, "$" + str(index))
+            push(params, values[name])
+            index = index + 1
+        }
+        sql = `insert into {quoteIdent(table)} ({join(columnList, ", ")}) values ({join(placeholders, ", ")})`
+        when returning != nil { sql = sql + " returning " + returning }
+        when returning == nil { give self.execute(sql, params) }
+        give self.queryOne(sql, params)
+    }
+
+    task update(table, values, where, whereParams = nil, returning = nil) {
+        names = keys(values)
+        when len(names) == 0 { throw Exception("postgres: nothing to update") }
+        checkIdentifier(table)
+        assignments = []
+        params = []
+        index = 1
+        get name in names {
+            checkIdentifier(name)
+            push(assignments, quoteIdent(name) + " = $" + str(index))
+            push(params, values[name])
+            index = index + 1
+        }
+        # The caller's placeholders start after ours, so their $1 has to be
+        # renumbered -- otherwise the two sets collide silently.
+        clause = shiftPlaceholders(where, len(names))
+        when whereParams != nil {
+            get p in whereParams { push(params, p) }
+        }
+        sql = `update {quoteIdent(table)} set {join(assignments, ", ")} where {clause}`
+        when returning != nil {
+            give self.query(sql + " returning " + returning, params)
+        }
+        give self.execute(sql, params)
+    }
+
+    task delete(table, where, whereParams = nil) {
+        checkIdentifier(table)
+        give self.execute(`delete from {quoteIdent(table)} where {where}`, whereParams)
+    }
+
+    # ── transactions ────────────────────────────────────────────────────────
+
+    # Runs `body` inside BEGIN/COMMIT. Any throw rolls back and re-raises, so a
+    # half-finished transaction can never be committed by accident.
+    #
+    # Nested calls become savepoints rather than a second BEGIN, which Postgres
+    # would reject.
+    task transaction(body) { give self.transactionWith(nil, body) }
+
+    # `mode` is passed to BEGIN: "isolation level serializable", "read only".
+    task transactionWith(mode, body) {
+        when self.inTransaction { give self.savepoint(body) }
+        statement = "begin"
+        when mode != nil { statement = "begin " + mode }
+        self.runSilent(statement)
+        self.inTransaction = true
+        try {
+            outcome = body(self)
+            self.runSilent("commit")
+            self.inTransaction = false
+            give outcome
+        }
+        catch (failure) {
+            try { self.runSilent("rollback") } catch (ignored) { }
+            self.inTransaction = false
+            throw failure
+        }
+    }
+
+    task savepoint(body) {
+        self.savepointDepth = self.savepointDepth + 1
+        name = "ez_sp_" + str(self.savepointDepth)
+        self.runSilent("savepoint " + name)
+        try {
+            outcome = body(self)
+            self.runSilent("release savepoint " + name)
+            self.savepointDepth = self.savepointDepth - 1
+            give outcome
+        }
+        catch (failure) {
+            try { self.runSilent("rollback to savepoint " + name) } catch (ignored) { }
+            self.savepointDepth = self.savepointDepth - 1
+            throw failure
+        }
+    }
+
+    # A transaction that retries when it loses a race.
+    #
+    # Only serialization failures and deadlocks are retried: those mean "the
+    # database is fine, you lost", and the whole transaction has to run again
+    # from the start. Retrying anything else just produces the same error.
+    task withRetry(attempts, body) { give self.withRetryMode(attempts, nil, body) }
+
+    task withRetryMode(attempts, mode, body) {
+        tries = 0
+        while true {
+            tries = tries + 1
+            try { give self.transactionWith(mode, body) }
+            catch (failure) {
+                code = failure.sqlstate
+                when code == nil or isRetryable(code) == false or tries >= attempts {
+                    throw failure
+                }
+                # A little longer each time, so two transactions retrying into
+                # each other do not simply collide again.
+                sleepMs(20 * tries)
+            }
+        }
+    }
+
+    task begin() {
+        self.runSilent("begin")
+        self.inTransaction = true
+        give nil
+    }
+
+    task commit() {
+        self.runSilent("commit")
+        self.inTransaction = false
+        give nil
+    }
+
+    task rollback() {
+        self.runSilent("rollback")
+        self.inTransaction = false
+        give nil
+    }
+
+    # Postgres refuses every statement after an error until the transaction is
+    # rolled back; this is how you find out that is why.
+    task isAborted() { give transactionStatus(self.handle) == PQTRANS_INERROR }
+
+    # ── bulk ────────────────────────────────────────────────────────────────
+
+    # One INSERT with many VALUES rows rather than many INSERTs. The round trip
+    # is what costs, so this is dramatically faster for a few thousand rows.
+    task insertMany(table, rows) {
+        when len(rows) == 0 { give 0 }
+        checkIdentifier(table)
+        names = keys(rows[0])
+        get name in names { checkIdentifier(name) }
+        columnList = []
+        get name in names { push(columnList, quoteIdent(name)) }
+
+        params = []
+        groups = []
+        index = 1
+        get row in rows {
+            placeholders = []
+            get name in names {
+                push(placeholders, "$" + str(index))
+                push(params, row[name])
+                index = index + 1
+            }
+            push(groups, "(" + join(placeholders, ", ") + ")")
+        }
+        sql = `insert into {quoteIdent(table)} ({join(columnList, ", ")}) values {join(groups, ", ")}`
+        give self.execute(sql, params)
+    }
+
+    # ── schema ──────────────────────────────────────────────────────────────
+
+    task tableExists(name) {
+        give self.queryValue("select exists(select 1 from information_schema.tables where table_name = $1)", [name]) == true
+    }
+
+    task columnsOf(table) {
+        give self.query("select column_name, data_type, is_nullable, column_default " +
+                        "from information_schema.columns where table_name = $1 order by ordinal_position", [table])
+    }
+
+    task tables() {
+        give self.queryColumn("select table_name from information_schema.tables " +
+                              "where table_schema = 'public' order by table_name")
+    }
+}
+
+# ============================================================================
+# Pool — connections shared between workers
+# ============================================================================
+
+# Opening a connection to Postgres is expensive: a TCP handshake, TLS, then
+# authentication and a backend process fork on the server. A request that opens
+# its own is spending more time connecting than querying.
+export model Pool {
+
+    init(conninfo, size = 5) {
+        self.conninfo = conninfo
+        self.size = size
+        self.idle = []
+        self.leased = 0
+        self.opened = 0
+    }
+
+    task acquire() {
+        while len(self.idle) > 0 {
+            candidate = pop(self.idle)
+            # A pooled connection can have died while it sat idle, so it is
+            # checked before being handed out rather than failing in the
+            # caller's query.
+            when candidate.isOpen() {
+                self.leased = self.leased + 1
+                give candidate
+            }
+            candidate.close()
+        }
+        when self.opened >= self.size and self.leased >= self.size {
+            throw Exception(`postgres: the pool of {self.size} connections is exhausted -- release connections, or make the pool bigger`)
+        }
+        fresh = Postgres(self.conninfo).open()
+        self.opened = self.opened + 1
+        self.leased = self.leased + 1
+        give fresh
+    }
+
+    task release(connection) {
+        self.leased = self.leased - 1
+        when self.leased < 0 { self.leased = 0 }
+        when connection == nil { give nil }
+        # A connection returned mid-transaction would leak that transaction
+        # into whoever gets it next.
+        when connection.inTransaction {
+            try { connection.rollback() } catch (e) { }
+        }
+        when connection.isOpen() and len(self.idle) < self.size { push(self.idle, connection) }
+        other { connection.close() }
+        give nil
+    }
+
+    # Borrow, run, and always give it back -- including when `body` throws,
+    # which is the case people forget and the reason a pool leaks.
+    task use(body) {
+        connection = self.acquire()
+        try {
+            outcome = body(connection)
+            self.release(connection)
+            give outcome
+        }
+        catch (failure) {
+            self.release(connection)
+            throw failure
+        }
+    }
+
+    task query(sql, params = nil) { give self.use(|c| c.query(sql, params)) }
+    task queryOne(sql, params = nil) { give self.use(|c| c.queryOne(sql, params)) }
+    task queryValue(sql, params = nil) { give self.use(|c| c.queryValue(sql, params)) }
+    task execute(sql, params = nil) { give self.use(|c| c.execute(sql, params)) }
+    task transaction(body) { give self.use(|c| c.transaction(body)) }
+
+    task stats() {
+        give { "size": self.size, "idle": len(self.idle), "leased": self.leased, "opened": self.opened }
+    }
+
+    task closeAll() {
+        get connection in self.idle { connection.close() }
+        self.idle = []
+        give nil
+    }
+}
+
+# ============================================================================
+# Connecting
+# ============================================================================
+
+# Accepts a libpq keyword string, a postgres:// URL, or a dictionary.
+export task connect(target) { give Postgres(conninfoOf(target)).open() }
+
+export task pool(target, size = 5) { give Pool(conninfoOf(target), size) }
+
+export task conninfoOf(target) {
+    when target == nil { throw Exception("postgres: no connection details given") }
+    when type(target) == "dictionary" { give fromDict(target) }
+    body = trim(str(target))
+    when startsWith(body, "postgres://") or startsWith(body, "postgresql://") {
+        give fromUrl(body)
+    }
+    give body
+}
+
+# postgres://user:password@host:port/database?sslmode=require
+export task fromUrl(url) {
+    rest = url
+    when contains(rest, "://") { rest = split(rest, "://")[1] }
+
+    options = {}
+    when contains(rest, "?") {
+        at = indexOf(rest, "?")
+        query = substr(rest, at + 1, len(rest) - at - 1)
+        rest = substr(rest, 0, at)
+        get pair in split(query, "&") {
+            when contains(pair, "=") {
+                eq = indexOf(pair, "=")
+                options[substr(pair, 0, eq)] = url_decode(substr(pair, eq + 1, len(pair) - eq - 1))
+            }
+        }
+    }
+
+    authority = rest
+    database = nil
+    when contains(rest, "/") {
+        at = indexOf(rest, "/")
+        authority = substr(rest, 0, at)
+        database = substr(rest, at + 1, len(rest) - at - 1)
+    }
+
+    user = nil
+    secret = nil
+    when contains(authority, "@") {
+        at = lastIndexOf(authority, "@")
+        credentials = substr(authority, 0, at)
+        authority = substr(authority, at + 1, len(authority) - at - 1)
+        when contains(credentials, ":") {
+            colon = indexOf(credentials, ":")
+            user = url_decode(substr(credentials, 0, colon))
+            secret = url_decode(substr(credentials, colon + 1, len(credentials) - colon - 1))
+        }
+        other { user = url_decode(credentials) }
+    }
+
+    host = authority
+    port = DEFAULT_PORT
+    when contains(authority, ":") {
+        colon = indexOf(authority, ":")
+        host = substr(authority, 0, colon)
+        port = num(substr(authority, colon + 1, len(authority) - colon - 1))
+    }
+    when host == "" { host = "localhost" }
+
+    settings = { "host": host, "port": port }
+    when user != nil { settings["user"] = user }
+    when secret != nil { settings["password"] = secret }
+    when database != nil and database != "" { settings["dbname"] = database }
+    get name in keys(options) { settings[name] = options[name] }
+    give fromDict(settings)
+}
+
+# libpq keyword format. Values are single-quoted and escaped, because a
+# password containing a space or a quote would otherwise silently truncate the
+# connection string.
+export task fromDict(settings) {
+    parts = []
+    get name in keys(settings) {
+        value = settings[name]
+        when value != nil {
+            body = str(value)
+            escaped = replace(body, "\\", "\\\\")
+            escaped = replace(escaped, "'", "\\'")
+            push(parts, str(name) + "='" + escaped + "'")
+        }
+    }
+    give join(parts, " ")
+}
+
+# Reads the environment the way psql and every Postgres tool does.
+export task fromEnv() {
+    settings = {}
+    pairs = { "PGHOST": "host", "PGPORT": "port", "PGUSER": "user",
+              "PGPASSWORD": "password", "PGDATABASE": "dbname", "PGSSLMODE": "sslmode" }
+    get name in keys(pairs) {
+        value = readEnv(name)
+        when value != nil { settings[pairs[name]] = value }
+    }
+    databaseUrl = readEnv("DATABASE_URL")
+    when databaseUrl != nil { give fromUrl(databaseUrl) }
+    when len(keys(settings)) == 0 {
+        throw Exception("postgres: no connection details in the environment -- set DATABASE_URL, or PGHOST/PGUSER/PGDATABASE")
+    }
+    give fromDict(settings)
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+IDENTIFIER_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$"
+
+# Table and column names cannot be parameterised, so the only safe thing is to
+# refuse anything that is not a plain identifier. Escaping instead would be a
+# judgement call, and this is not a place for judgement calls.
+export task checkIdentifier(name) {
+    body = str(name)
+    when body == "" { throw Exception("postgres: an empty identifier") }
+    get ch in split(body, "") {
+        when indexOf(IDENTIFIER_CHARS, ch) < 0 and ch != "." {
+            throw Exception(`postgres: '{name}' is not a plain identifier -- table and column names cannot be parameterised, so only letters, digits and underscores are accepted here`)
+        }
+    }
+    give true
+}
+
+task quoteIdent(name) {
+    when contains(str(name), ".") { give str(name) }
+    give "\"" + str(name) + "\""
+}
+
+# Renumber $1, $2 … in a caller's WHERE clause so they follow the ones we
+# generated for the SET list.
+task shiftPlaceholders(clause, by) {
+    body = str(clause)
+    result = ""
+    index = 0
+    while index < len(body) {
+        ch = substr(body, index, 1)
+        when ch == "$" {
+            digits = ""
+            scan = index + 1
+            while scan < len(body) and indexOf("0123456789", substr(body, scan, 1)) >= 0 {
+                digits = digits + substr(body, scan, 1)
+                scan = scan + 1
+            }
+            when digits == "" {
+                result = result + ch
+                index = index + 1
+            }
+            other {
+                result = result + "$" + str(num(digits) + by)
+                index = scan
+            }
+        }
+        other {
+            result = result + ch
+            index = index + 1
+        }
+    }
+    give result
+}
+
+task lastIndexOf(text, needle) {
+    found = -1
+    repeat i = 0 to len(text) - 1 {
+        when substr(text, i, len(needle)) == needle { found = i }
+    }
+    give found
+}
+
+task sleepMs(milliseconds) {
+    when milliseconds <= 0 { give nil }
+    until = clock() + milliseconds
+    while clock() < until { }
+    give nil
+}
+
+task readEnv(name) {
+    try {
+        lib = os_load_lib("kernel32.dll")
+        when lib == nil or lib == 0 { give nil }
+        fn = os_get_func(lib, "GetEnvironmentVariableA")
+        when fn == nil or fn == 0 { give nil }
+        nameBuf = os_alloc(len(name) + 1)
+        os_write_string(nameBuf, 0, name)
+        size = 4096
+        buf = os_alloc(size)
+        written = os_call(fn, "u32", nameBuf, buf, size)
+        value = nil
+        when written > 0 and written < size { value = buf_to_str(os_buffer_from_ptr(buf, written)) }
+        os_free(nameBuf)
+        os_free(buf)
+        when value == "" { give nil }
+        give value
+    }
+    catch (e) { give nil }
+}

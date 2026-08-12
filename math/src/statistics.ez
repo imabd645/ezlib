@@ -1,0 +1,94 @@
+use "core.ez"
+
+export model Statistics {
+    init(data) {
+        when typeOf(data) != "array" { throw "Statistics(): data must be an array" }
+        self.data = []
+        get value in data { push(self.data, value) }
+    }
+
+    task count() { give len(self.data) }
+    task sum() { give sum(self.data) }
+    task mean() { give average(self.data) }
+    task min() { give min(self.data) }
+    task max() { give max(self.data) }
+    task range() { give range(self.data) }
+
+    task _sorted() {
+        result = []
+        get value in self.data { push(result, value) }
+        repeat i = 1 to len(result) - 1 {
+            j = i
+            while j > 0 and result[j - 1] > result[j] {
+                value = result[j - 1]
+                result[j - 1] = result[j]
+                result[j] = value
+                j = j - 1
+            }
+        }
+        give result
+    }
+
+    task median() {
+        when self.count() == 0 { throw "Statistics.median(): data must not be empty" }
+        values = self._sorted()
+        middle = floor(self.count() / 2)
+        when self.count() % 2 == 1 { give values[middle] }
+        give (values[middle - 1] + values[middle]) / 2.0
+    }
+
+    task mode() {
+        when self.count() == 0 { give nil }
+        counts = {}
+        best = self.data[0]
+        bestCount = 0
+        get value in self.data {
+            key = str(value)
+            when not has_key(counts, key) { counts[key] = 0 }
+            counts[key] = counts[key] + 1
+            when counts[key] > bestCount { best = value  bestCount = counts[key] }
+        }
+        give best
+    }
+
+    task variance() {
+        when self.count() == 0 { throw "Statistics.variance(): data must not be empty" }
+        center = self.mean()
+        total = 0.0
+        get value in self.data { delta = value - center  total = total + delta * delta }
+        give total / self.count()
+    }
+    task stddev() { give sqrt(self.variance()) }
+    task sem() { give self.stddev() / sqrt(self.count()) }
+
+    task covariance(peer) {
+        when typeOf(peer) != "instance" or self.count() != peer.count() { throw "Statistics.covariance(): datasets must have equal length" }
+        when self.count() == 0 { throw "Statistics.covariance(): data must not be empty" }
+        left = self.mean()
+        right = peer.mean()
+        total = 0.0
+        repeat i = 0 to self.count() - 1 { total = total + (self.data[i] - left) * (peer.data[i] - right) }
+        give total / self.count()
+    }
+    task correlation(peer) {
+        divisor = self.stddev() * peer.stddev()
+        when divisor == 0 { give 0 }
+        give self.covariance(peer) / divisor
+    }
+
+    task percentile(percent) {
+        when percent < 0 or percent > 100 { throw "Statistics.percentile(): percent must be in [0, 100]" }
+        when self.count() == 0 { throw "Statistics.percentile(): data must not be empty" }
+        values = self._sorted()
+        position = percent * (self.count() - 1) / 100.0
+        lower = floor(position)
+        upper = ceil(position)
+        when lower == upper { give values[lower] }
+        fraction = position - lower
+        give values[lower] + (values[upper] - values[lower]) * fraction
+    }
+    task quartiles() { give { "q1": self.percentile(25), "q2": self.percentile(50), "q3": self.percentile(75), "iqr": self.percentile(75) - self.percentile(25) } }
+    task summary() { give { "count": self.count(), "sum": self.sum(), "mean": self.mean(), "median": self.median(), "mode": self.mode(), "min": self.min(), "max": self.max(), "range": self.range(), "variance": self.variance(), "stddev": self.stddev() } }
+}
+
+export task stats(data) { give Statistics(data) }

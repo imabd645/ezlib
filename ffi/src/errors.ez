@@ -1,0 +1,9 @@
+// ============================================================================
+// src/errors.ez — Exception types for the ezffi library.
+//
+//   FFIError   – general FFI failures (symbol not found, bad arg count, etc.)
+//   MemoryError – memory-safety violations (double-free, use-after-free, etc.)
+// ============================================================================
+
+export model FFIError extends Exception {}
+export model MemoryError extends Exception {}

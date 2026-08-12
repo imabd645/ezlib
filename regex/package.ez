@@ -1,0 +1,12 @@
+{
+  "name": "regex",
+  "version": "1.0.0",
+  "description": "Regular expressions for EZ: compiled patterns, match positions, capture groups, flags, split/replace, validators and extractors.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "entry": "main.ez",
+  "repository": "https://github.com/imabd645/EZ",
+  "keywords": ["regex", "pattern", "match", "validation", "search"],
+  "license": "MIT",
+  "dependencies": {}
+}

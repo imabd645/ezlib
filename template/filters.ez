@@ -1,0 +1,116 @@
+# ============================================================================
+# template/filters.ez — value transforms available inside {{ }}
+#
+# Filters are the only computation a template can perform, so the set is kept
+# small and predictable. Unknown filter names are an error rather than a
+# silent pass-through: a typo like `| uppercase` should be reported, not
+# quietly render the raw value.
+# ============================================================================
+
+# HTML escaping. Ampersand must be replaced first or it would double-escape
+# the entities introduced by the later replacements.
+export task tplEscapeHtml(s) {
+    body = replace(str(s), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    body = replace(body, `"`, "&quot;")
+    body = replace(body, "'", "&#39;")
+    give body
+}
+
+task tplText(value) {
+    when value == nil { give "" }
+    t = typeOf(value)
+    when t == "bool" { when value { give "true" }  give "false" }
+    give str(value)
+}
+
+task tplArg(args, idx, fallback) {
+    when len(args) > idx { give args[idx] }
+    give fallback
+}
+
+export task tplApplyFilter(name, value, args) {
+    when name == "upper" { give upper(tplText(value)) }
+    when name == "lower" { give lower(tplText(value)) }
+    when name == "trim" { give trim(tplText(value)) }
+    when name == "length" {
+        when value == nil { give 0 }
+        t = typeOf(value)
+        when t == "dictionary" { give len(keys(value)) }
+        when t == "string" or t == "array" or t == "list" { give len(value) }
+        give 0
+    }
+    when name == "default" {
+        # Falsy, not just nil: an empty string should fall back too, which is
+        # the case this filter almost always exists for.
+        when value == nil or value == "" { give tplArg(args, 0, "") }
+        give value
+    }
+    when name == "escape" { give tplEscapeHtml(tplText(value)) }
+    when name == "join" {
+        sep = tplArg(args, 0, ", ")
+        when value == nil { give "" }
+        pieces = []
+        get item in value { push(pieces, tplText(item)) }
+        give join(pieces, str(sep))
+    }
+    when name == "first" {
+        when value == nil { give nil }
+        when len(value) == 0 { give nil }
+        give value[0]
+    }
+    when name == "last" {
+        when value == nil { give nil }
+        when len(value) == 0 { give nil }
+        give value[len(value) - 1]
+    }
+    when name == "reverse" {
+        when value == nil { give nil }
+        when typeOf(value) == "string" {
+            body = ""
+            limit = len(value)
+            repeat i = limit - 1 to 0 step -1 { body = body + substr(value, i, 1) }
+            give body
+        }
+        copy = []
+        get item in value { push(copy, item) }
+        give reverse(copy)
+    }
+    when name == "capitalize" {
+        body = tplText(value)
+        when len(body) == 0 { give body }
+        give upper(substr(body, 0, 1)) + lower(substr(body, 1, len(body) - 1))
+    }
+    when name == "title" {
+        words = split(tplText(value), " ")
+        outWords = []
+        get w in words {
+            when len(w) == 0 { push(outWords, w) }
+            other { push(outWords, upper(substr(w, 0, 1)) + lower(substr(w, 1, len(w) - 1))) }
+        }
+        give join(outWords, " ")
+    }
+    when name == "replace" {
+        give replace(tplText(value), str(tplArg(args, 0, "")), str(tplArg(args, 1, "")))
+    }
+    when name == "truncate" {
+        body = tplText(value)
+        limit = tplArg(args, 0, 50)
+        suffix = str(tplArg(args, 1, "..."))
+        when len(body) <= limit { give body }
+        give substr(body, 0, limit) + suffix
+    }
+    when name == "round" {
+        when value == nil { give 0 }
+        give round(value)
+    }
+    when name == "abs" {
+        when value == nil { give 0 }
+        give abs(value)
+    }
+    when name == "urlencode" { give urlEncode(tplText(value)) }
+    when name == "json" { give to_json(value) }
+
+    throw Exception(`Template error: unknown filter '{name}'`)
+}

@@ -1,0 +1,165 @@
+# ============================================================================
+# validate — test suite
+#   ez test.ez
+# ============================================================================
+
+use "validate"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task ok(label, schema, value) { check(label, schema.check(value)["ok"], true) }
+task bad(label, schema, value) { check(label, schema.check(value)["ok"], false) }
+task valueOf(schema, value) { give schema.check(value)["value"] }
+task firstError(schema, value) {
+    errors = schema.check(value)["errors"]
+    when len(errors) == 0 { give "" }
+    give errors[0]["path"] + " " + errors[0]["message"]
+}
+
+out "validate tests"
+
+# ── strings ─────────────────────────────────────────────────────────────────
+ok("string accepts text", Validate.string(), "hi")
+bad("string rejects list", Validate.string(), [1])
+check("number becomes text", typeOf(valueOf(Validate.string(), 42)), "string")
+ok("min length met", Validate.string().min(2), "ab")
+bad("min length unmet", Validate.string().min(3), "ab")
+ok("max length met", Validate.string().max(3), "ab")
+bad("max length exceeded", Validate.string().max(1), "ab")
+ok("exact length", Validate.string().length(2), "ab")
+bad("wrong length", Validate.string().length(3), "ab")
+bad("notEmpty rejects blank", Validate.string().notEmpty(), "")
+check("trimmed cleans", valueOf(Validate.string().trimmed(), "  x  "), "x")
+ok("startsWith", Validate.string().startsWith("ab"), "abc")
+bad("startsWith fails", Validate.string().startsWith("z"), "abc")
+ok("contains", Validate.string().contains("b"), "abc")
+ok("oneOf allows", Validate.string().oneOf(["a", "b"]), "a")
+bad("oneOf rejects", Validate.string().oneOf(["a", "b"]), "c")
+ok("pattern matches", Validate.string().pattern("^[0-9]+$", nil), "123")
+bad("pattern fails", Validate.string().pattern("^[0-9]+$", nil), "12a")
+
+# ── formats ─────────────────────────────────────────────────────────────────
+ok("email valid", Validate.string().email(), "a.b+c@ex.co.uk")
+bad("email no at", Validate.string().email(), "ab.co")
+bad("email no domain", Validate.string().email(), "a@b")
+bad("email spaces", Validate.string().email(), "a b@c.co")
+ok("url https", Validate.string().url(), "https://a.co/x?y=1")
+bad("url bare host", Validate.string().url(), "example.com")
+ok("slug valid", Validate.string().slug(), "my-post-1")
+bad("slug uppercase", Validate.string().slug(), "My-Post")
+bad("slug double hyphen", Validate.string().slug(), "a--b")
+ok("uuid valid", Validate.string().uuid(), "123e4567-e89b-12d3-a456-426614174000")
+bad("uuid short", Validate.string().uuid(), "123e4567")
+
+# ── numbers ─────────────────────────────────────────────────────────────────
+ok("number accepts int", Validate.number(), 5)
+ok("number accepts float", Validate.number(), 5.5)
+bad("number rejects text", Validate.number(), "abc")
+check("numeric string coerced", typeOf(valueOf(Validate.number(), "12")), "integer")
+check("float string coerced", typeOf(valueOf(Validate.number(), "1.5")), "float")
+bad("partial numeric rejected", Validate.number(), "12abc")
+ok("min value", Validate.number().min(5), 5)
+bad("below min", Validate.number().min(5), 4)
+ok("max value", Validate.number().max(5), 5)
+bad("above max", Validate.number().max(5), 6)
+ok("integer whole", Validate.number().integer(), 5)
+ok("integer whole float", Validate.number().integer(), 5.0)
+bad("integer fractional", Validate.number().integer(), 5.5)
+ok("positive", Validate.number().positive(), 1)
+bad("positive rejects zero", Validate.number().positive(), 0)
+bad("negative rejects positive", Validate.number().negative(), 1)
+
+# ── booleans ────────────────────────────────────────────────────────────────
+ok("bool true", Validate.bool(), true)
+check("string true coerced", valueOf(Validate.bool(), "true"), true)
+check("string yes coerced", valueOf(Validate.bool(), "yes"), true)
+check("string 0 coerced", valueOf(Validate.bool(), "0"), false)
+bad("bool rejects other text", Validate.bool(), "maybe")
+
+# ── presence ────────────────────────────────────────────────────────────────
+bad("required missing", Validate.string(), nil)
+ok("optional missing", Validate.string().optional(), nil)
+ok("nullable nil", Validate.string().nullable(), nil)
+check("default applied", valueOf(Validate.number().withDefault(7), nil), 7)
+check("default not applied", valueOf(Validate.number().withDefault(7), 3), 3)
+check("required message", firstError(Validate.string(), nil), "value is required")
+
+# ── objects ─────────────────────────────────────────────────────────────────
+person = Validate.object({
+    "name": Validate.string().min(2),
+    "age": Validate.number().integer().min(0).optional()
+})
+ok("object valid", person, { "name": "Ali", "age": 30 })
+ok("object optional omitted", person, { "name": "Ali" })
+bad("object field invalid", person, { "name": "A" })
+bad("object missing required", person, { "age": 1 })
+bad("object rejects non-object", person, "text")
+check("nested error path", firstError(person, { "name": "A" }), "name must be at least 2 characters")
+
+nested = Validate.object({
+    "user": Validate.object({ "email": Validate.string().email() })
+})
+ok("nested valid", nested, { "user": { "email": "a@b.co" } })
+check("nested path", firstError(nested, { "user": { "email": "x" } }),
+      "user.email must be a valid email address")
+
+# Unknown fields pass unless strict.
+loose = Validate.object({ "a": Validate.string() })
+ok("extra field allowed", loose, { "a": "x", "extra": 1 })
+bad("extra field strict", Validate.object({ "a": Validate.string() }).strict(), { "a": "x", "b": 2 })
+
+# ── arrays ──────────────────────────────────────────────────────────────────
+tags = Validate.array(Validate.string().min(2))
+ok("array valid", tags, ["ab", "cd"])
+bad("array item invalid", tags, ["ab", "c"])
+bad("array rejects non-list", tags, "ab")
+check("array item path", firstError(tags, ["ab", "c"]), "[1] must be at least 2 characters")
+ok("array min", Validate.array(Validate.any()).min(1), [1])
+bad("array min unmet", Validate.array(Validate.any()).min(2), [1])
+ok("array of objects", Validate.array(Validate.object({ "n": Validate.string() })),
+   [{ "n": "a" }, { "n": "b" }])
+
+# ── custom ──────────────────────────────────────────────────────────────────
+even = Validate.number().custom(|v| v % 2 == 0, "must be even")
+ok("custom passes", even, 4)
+bad("custom fails", even, 3)
+check("custom message", firstError(even, 3), "value must be even")
+
+# ── reporting ───────────────────────────────────────────────────────────────
+multi = Validate.object({
+    "a": Validate.string().min(5),
+    "b": Validate.number().min(10)
+})
+result = multi.check({ "a": "x", "b": 1 })
+check("all errors collected", len(result["errors"]), 2)
+check("describe joins", contains(Validate.describe(result["errors"]), ";"), true)
+grouped = Validate.byField(result["errors"])
+check("byField keys", len(keys(grouped)), 2)
+check("byField messages", len(grouped["a"]), 1)
+check("isValid helper", Validate.isValid(Validate.string(), "x"), true)
+
+# checkOrThrow returns the value, or throws listing every problem.
+check("checkOrThrow value", Validate.checkOrThrow(Validate.string(), "x"), "x")
+threw = false
+try { Validate.checkOrThrow(Validate.string().min(5), "x") }
+catch (e) { threw = true }
+check("checkOrThrow throws", threw, true)
+
+# A named schema reports the label instead of a bare path.
+check("named label", firstError(Validate.string().min(5).named("Password"), "x"),
+      "Password must be at least 5 characters")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

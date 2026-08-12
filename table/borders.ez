@@ -1,0 +1,64 @@
+# ============================================================================
+# table/borders.ez — border character sets
+#
+# Box-drawing characters look best but are not safe everywhere: a terminal in
+# a non-UTF-8 code page renders them as mojibake, and piping into a file that
+# something else parses is easier with ASCII. Both are offered, and `markdown`
+# exists because a table pasted into a README is a common destination.
+# ============================================================================
+
+# Keys: topLeft topMid topRight, midLeft midMid midRight,
+#       botLeft botMid botRight, horizontal vertical
+export task borderStyle(name) {
+    when name == "ascii" {
+        give {
+            "topLeft": "+", "topMid": "+", "topRight": "+",
+            "midLeft": "+", "midMid": "+", "midRight": "+",
+            "botLeft": "+", "botMid": "+", "botRight": "+",
+            "horizontal": "-", "vertical": "|"
+        }
+    }
+    when name == "rounded" {
+        give {
+            "topLeft": "╭", "topMid": "┬", "topRight": "╮",
+            "midLeft": "├", "midMid": "┼", "midRight": "┤",
+            "botLeft": "╰", "botMid": "┴", "botRight": "╯",
+            "horizontal": "─", "vertical": "│"
+        }
+    }
+    when name == "double" {
+        give {
+            "topLeft": "╔", "topMid": "╦", "topRight": "╗",
+            "midLeft": "╠", "midMid": "╬", "midRight": "╣",
+            "botLeft": "╚", "botMid": "╩", "botRight": "╝",
+            "horizontal": "═", "vertical": "║"
+        }
+    }
+    when name == "markdown" {
+        # No top or bottom rule; the separator under the header is what
+        # markdown uses to mark it as a table.
+        give {
+            "topLeft": "", "topMid": "", "topRight": "",
+            "midLeft": "|", "midMid": "|", "midRight": "|",
+            "botLeft": "", "botMid": "", "botRight": "",
+            "horizontal": "-", "vertical": "|"
+        }
+    }
+    when name == "none" {
+        give {
+            "topLeft": "", "topMid": "", "topRight": "",
+            "midLeft": "", "midMid": "", "midRight": "",
+            "botLeft": "", "botMid": "", "botRight": "",
+            "horizontal": "", "vertical": " "
+        }
+    }
+    # Default: single-line box drawing.
+    give {
+        "topLeft": "┌", "topMid": "┬", "topRight": "┐",
+        "midLeft": "├", "midMid": "┼", "midRight": "┤",
+        "botLeft": "└", "botMid": "┴", "botRight": "┘",
+        "horizontal": "─", "vertical": "│"
+    }
+}
+
+export task isBorderless(style) { give style["horizontal"] == "" }

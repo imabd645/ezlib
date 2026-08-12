@@ -1,0 +1,457 @@
+# ============================================================================
+# args — command-line argument parsing for EZ
+#
+#   use "args"
+#
+#   cli = Args("greet", "Greets someone")
+#   cli.positional("name", "Who to greet")
+#   cli.flag("loud", "l", "Shout it")
+#   cli.option("times", "t", "How many times").number().withDefault(1)
+#
+#   opts = cli.parse(argv)
+#   repeat i = 1 to opts["times"] {
+#       message = "Hello, " + opts["name"]
+#       when opts["loud"] { message = upper(message) }
+#       out message
+#   }
+#
+# The declaration drives parsing, validation and --help together, so the help
+# text cannot drift out of step with what the program actually accepts.
+# ============================================================================
+
+use "args/spec.ez"
+
+export model Args {
+
+    init(name, description) {
+        self.name = str(name)
+        self.description = str(description)
+        self.options = []
+        self.positionals = []
+        self.last = nil
+        self.autoHelp = true
+        self.version = ""
+    }
+
+    # ── declaring ───────────────────────────────────────────────────────────
+
+    # A boolean switch: present means true.
+    task flag(name, short, help) {
+        option = makeOption(KIND_FLAG, name, short, help)
+        option["default"] = false
+        push(self.options, option)
+        self.last = option
+        give self
+    }
+
+    # An option that takes a value: --output file
+    task option(name, short, help) {
+        option = makeOption(KIND_OPTION, name, short, help)
+        push(self.options, option)
+        self.last = option
+        give self
+    }
+
+    # An argument identified by position rather than name.
+    task positional(name, help) {
+        option = makeOption(KIND_POSITIONAL, name, "", help)
+        push(self.positionals, option)
+        self.last = option
+        give self
+    }
+
+    # ── modifiers, applied to the most recent declaration ───────────────────
+
+    task required() {
+        when self.last != nil { self.last["required"] = true }
+        give self
+    }
+
+    task withDefault(value) {
+        when self.last != nil {
+            self.last["default"] = value
+            self.last["required"] = false
+        }
+        give self
+    }
+
+    task number() {
+        when self.last != nil { self.last["valueType"] = "number" }
+        give self
+    }
+
+    task boolean() {
+        when self.last != nil { self.last["valueType"] = "bool" }
+        give self
+    }
+
+    task oneOf(choices) {
+        when self.last != nil { self.last["choices"] = choices }
+        give self
+    }
+
+    # Collect every occurrence into a list, rather than the last one winning.
+    task many() {
+        when self.last != nil {
+            self.last["many"] = true
+            self.last["default"] = []
+        }
+        give self
+    }
+
+    task placeholder(text) {
+        when self.last != nil { self.last["placeholder"] = str(text) }
+        give self
+    }
+
+    task versioned(text) {
+        self.version = str(text)
+        give self
+    }
+
+    # Turn off the built-in --help / --version handling, for a program that
+    # wants to render its own.
+    task withoutAutoHelp() {
+        self.autoHelp = false
+        give self
+    }
+
+    # ── lookup ──────────────────────────────────────────────────────────────
+
+    task findLong(name) {
+        get option in self.options {
+            when option["name"] == name { give option }
+        }
+        give nil
+    }
+
+    task findShort(letter) {
+        get option in self.options {
+            when option["short"] == letter and letter != "" { give option }
+        }
+        give nil
+    }
+
+    # ── parsing ─────────────────────────────────────────────────────────────
+
+    # Returns { ok, values, errors, helpRequested, versionRequested }.
+    #
+    # Never throws and never exits: a library that calls exit() cannot be
+    # tested, and a caller may want to render errors its own way. `parse`
+    # wraps this with the usual behaviour.
+    task tryParse(arguments) {
+        parsed = {}
+        errors = []
+        rest = []
+        helpRequested = false
+        versionRequested = false
+
+        # Defaults first, so anything not supplied still has a value.
+        #
+        # A list default is COPIED. Assigning it directly would share the one
+        # array held on the option spec, so pushing a value would mutate the
+        # default itself and every later parse would start with the previous
+        # run's values still in it.
+        get option in self.options {
+            when option["default"] != nil { parsed[option["name"]] = self.copyDefault(option["default"]) }
+            other when option["kind"] == KIND_FLAG { parsed[option["name"]] = false }
+        }
+        get option in self.positionals {
+            when option["default"] != nil { parsed[option["name"]] = self.copyDefault(option["default"]) }
+        }
+
+        items = arguments
+        when items == nil { items = [] }
+        total = len(items)
+        index = 0
+        passThrough = false
+
+        while index < total {
+            arg = str(items[index])
+
+            when passThrough {
+                push(rest, arg)
+                index = index + 1
+                skip
+            }
+            when arg == "--" {
+                passThrough = true
+                index = index + 1
+                skip
+            }
+
+            when self.autoHelp and (arg == "--help" or arg == "-h") {
+                helpRequested = true
+                index = index + 1
+                skip
+            }
+            when self.autoHelp and self.version != "" and (arg == "--version" or arg == "-V") {
+                versionRequested = true
+                index = index + 1
+                skip
+            }
+
+            # --name or --name=value
+            when startsWith(arg, "--") {
+                body = substr(arg, 2, len(arg) - 2)
+                inline = nil
+                eq = indexOf(body, "=")
+                when eq >= 0 {
+                    inline = substr(body, eq + 1, len(body) - eq - 1)
+                    body = substr(body, 0, eq)
+                }
+                option = self.findLong(body)
+                when option == nil {
+                    push(errors, `unknown option '--{body}'`)
+                    index = index + 1
+                    skip
+                }
+                when option["kind"] == KIND_FLAG {
+                    when inline != nil {
+                        push(errors, `'--{body}' is a flag and takes no value`)
+                    }
+                    other { parsed[body] = true }
+                    index = index + 1
+                    skip
+                }
+                raw = inline
+                when raw == nil {
+                    when index + 1 >= total {
+                        push(errors, `'--{body}' needs a value`)
+                        index = index + 1
+                        skip
+                    }
+                    raw = str(items[index + 1])
+                    index = index + 1
+                }
+                self.store(parsed, errors, option, raw)
+                index = index + 1
+                skip
+            }
+
+            # -abc is three short flags; -o value takes the next argument.
+            when startsWith(arg, "-") and len(arg) > 1 {
+                letters = substr(arg, 1, len(arg) - 1)
+                consumed = false
+                position = 0
+                while position < len(letters) {
+                    letter = substr(letters, position, 1)
+                    option = self.findShort(letter)
+                    when option == nil {
+                        push(errors, `unknown option '-{letter}'`)
+                        position = position + 1
+                        skip
+                    }
+                    when option["kind"] == KIND_FLAG {
+                        parsed[option["name"]] = true
+                        position = position + 1
+                        skip
+                    }
+                    # An option letter takes the rest of the cluster as its
+                    # value, or the next argument: -ofile and -o file both work.
+                    raw = ""
+                    when position + 1 < len(letters) {
+                        raw = substr(letters, position + 1, len(letters) - position - 1)
+                    }
+                    other {
+                        when index + 1 >= total {
+                            push(errors, `'-{letter}' needs a value`)
+                            position = len(letters)
+                            skip
+                        }
+                        raw = str(items[index + 1])
+                        consumed = true
+                    }
+                    self.store(parsed, errors, option, raw)
+                    position = len(letters)
+                }
+                when consumed { index = index + 1 }
+                index = index + 1
+                skip
+            }
+
+            push(rest, arg)
+            index = index + 1
+        }
+
+        # Positionals take the leftovers in declared order. A trailing .many()
+        # positional soaks up everything that remains.
+        position = 0
+        get option in self.positionals {
+            when option["many"] {
+                collected = []
+                while position < len(rest) {
+                    checked = self.convert(errors, option, rest[position])
+                    when checked != nil { push(collected, checked) }
+                    position = position + 1
+                }
+                parsed[option["name"]] = collected
+                skip
+            }
+            when position < len(rest) {
+                self.store(parsed, errors, option, rest[position])
+                position = position + 1
+            }
+        }
+        extra = []
+        while position < len(rest) {
+            push(extra, rest[position])
+            position = position + 1
+        }
+
+        # Required checks come last, so a value supplied anywhere counts.
+        get option in self.options {
+            when option["required"] and has_key(parsed, option["name"]) == false {
+                push(errors, `'--{option["name"]}' is required`)
+            }
+        }
+        get option in self.positionals {
+            when option["required"] and has_key(parsed, option["name"]) == false {
+                push(errors, `'{option["name"]}' is required`)
+            }
+        }
+
+        give {
+            "ok": len(errors) == 0,
+            "values": parsed,
+            "errors": errors,
+            "extra": extra,
+            "helpRequested": helpRequested,
+            "versionRequested": versionRequested
+        }
+    }
+
+    task copyDefault(value) {
+        t = typeOf(value)
+        when t == "array" or t == "list" {
+            copy = []
+            get item in value { push(copy, item) }
+            give copy
+        }
+        give value
+    }
+
+    task convert(errors, option, raw) {
+        converted = coerceValue(option, raw)
+        when converted["ok"] == false {
+            push(errors, optionLabel(option) + " " + converted["error"])
+            give nil
+        }
+        problem = checkChoices(option, converted["value"])
+        when problem != nil {
+            push(errors, optionLabel(option) + " " + problem)
+            give nil
+        }
+        give converted["value"]
+    }
+
+    task store(parsed, errors, option, raw) {
+        value = self.convert(errors, option, raw)
+        when value == nil { give nil }
+        when option["many"] {
+            when has_key(parsed, option["name"]) == false { parsed[option["name"]] = [] }
+            other when typeOf(parsed[option["name"]]) != "array" { parsed[option["name"]] = [] }
+            push(parsed[option["name"]], value)
+            give nil
+        }
+        parsed[option["name"]] = value
+        give nil
+    }
+
+    # The usual behaviour: print help or errors and exit, otherwise return the
+    # parsed. This is what a program wants; tryParse is there for tests and
+    # for callers that want to decide themselves.
+    task parse(arguments) {
+        result = self.tryParse(arguments)
+        when result["versionRequested"] {
+            out self.name + " " + self.version
+            exit(0)
+        }
+        when result["helpRequested"] {
+            out self.help()
+            exit(0)
+        }
+        when result["ok"] == false {
+            get message in result["errors"] { out self.name + ": " + message }
+            out ""
+            out "Try '" + self.name + " --help' for more information."
+            exit(2)
+        }
+        give result["values"]
+    }
+
+    # ── help ────────────────────────────────────────────────────────────────
+
+    task usage() {
+        body = "Usage: " + self.name
+        when len(self.options) > 0 { body = body + " [options]" }
+        get option in self.positionals {
+            label = "<" + option["name"] + ">"
+            when option["many"] { label = label + "..." }
+            when option["required"] == false { label = "[" + label + "]" }
+            body = body + " " + label
+        }
+        give body
+    }
+
+    task help() {
+        lines = [self.usage()]
+        when self.description != "" {
+            push(lines, "")
+            push(lines, self.description)
+        }
+
+        when len(self.positionals) > 0 {
+            push(lines, "")
+            push(lines, "Arguments:")
+            get option in self.positionals {
+                push(lines, self.helpRow("  " + option["name"], option))
+            }
+        }
+
+        push(lines, "")
+        push(lines, "Options:")
+        get option in self.options {
+            push(lines, self.helpRow("  " + optionLabel(option), option))
+        }
+        when self.autoHelp {
+            push(lines, self.pad("  -h, --help", 26) + "Show this message")
+            when self.version != "" {
+                push(lines, self.pad("  -V, --version", 26) + "Show the version")
+            }
+        }
+        give join(lines, chr(10))
+    }
+
+    task helpRow(label, option) {
+        body = self.pad(label, 26) + option["help"]
+        when option["choices"] != nil {
+            body = body + " (" + join(option["choices"], ", ") + ")"
+        }
+        when option["default"] != nil and option["kind"] != KIND_FLAG {
+            body = body + " [default: " + str(option["default"]) + "]"
+        }
+        when option["required"] { body = body + " (required)" }
+        give body
+    }
+
+    task pad(text, width) {
+        body = text
+        while len(body) < width { body = body + " " }
+        give body + " "
+    }
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task cli(name, description) { give Args(name, description) }
+
+# The arguments this program was given. Wraps the `argv` global so a program
+# never has to reference it directly, and so a test can pass its own list.
+export task programArgs() {
+    try {
+        when argv != nil { give argv }
+    }
+    catch (e) { }
+    give []
+}

@@ -1,0 +1,11 @@
+{
+  "name": "validate",
+  "version": "1.0.0",
+  "description": "Schema validation for EZ. Chainable rules for strings, numbers, lists and objects, with coercion and every error reported at once.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["validate", "validation", "schema", "input", "form", "sanitize"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

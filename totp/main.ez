@@ -1,0 +1,208 @@
+# ============================================================================
+# totp — time-based one-time passwords for EZ (RFC 6238 / RFC 4226)
+#
+#   use "totp"
+#
+#   secret = TOTP.generateSecret()          # show once, store hashed alongside the user
+#   uri    = TOTP.uri(secret, "ali@ex.co", "My App")   # put this in a QR code
+#
+#   when TOTP.verify(secret, submittedCode) { signIn() }
+#
+# A TOTP code is HMAC over a counter that advances every 30 seconds, truncated
+# to six digits. Both sides derive it from the same shared secret, so no
+# network round trip is needed to check one.
+# ============================================================================
+
+use "crypto"
+use "totp/base32.ez"
+
+DEFAULT_PERIOD = 30
+DEFAULT_DIGITS = 6
+
+# Bytes to a byte-exact string. EZ strings are UTF-8, so building one with
+# chr() would turn any byte above 127 into two -- and the HMAC would be over
+# the wrong input. Writing through a buffer is exact.
+task octetsToStr(octets) {
+    total = len(octets)
+    when total == 0 { give "" }
+    buf = os_alloc(total)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b % 256)
+        index = index + 1
+    }
+    result = buf_to_str(os_buffer_from_ptr(buf, total))
+    os_free(buf)
+    give result
+}
+
+# The counter as 8 bytes, big-endian, per RFC 4226.
+task counterOctets(counter) {
+    octets = []
+    repeat i = 1 to 8 { push(octets, 0) }
+    remaining = counter
+    index = 7
+    while index >= 0 {
+        octets[index] = remaining % 256
+        remaining = (remaining - (remaining % 256)) / 256
+        index = index - 1
+    }
+    give octets
+}
+
+task powerOfTen(n) {
+    value = 1
+    repeat i = 1 to n { value = value * 10 }
+    give value
+}
+
+export model TOTP {
+
+    # ── codes ───────────────────────────────────────────────────────────────
+
+    # HOTP: the counter-based code the whole scheme is built on (RFC 4226).
+    static task hotp(secret, counter, digits, algorithm) {
+        key = octetsToStr(base32Decode(secret))
+        message = octetsToStr(counterOctets(counter))
+
+        digestHex = HMAC.sha1(key, message)
+        when algorithm == "SHA256" { digestHex = HMAC.sha256(key, message) }
+        when algorithm == "SHA512" { digestHex = HMAC.sha512(key, message) }
+        digest = hex_to_bytes(digestHex)
+
+        # Dynamic truncation: the low nibble of the last byte picks where to
+        # read four bytes from, so the code depends on the whole digest.
+        offset = digest[len(digest) - 1] % 16
+        # Built up in steps: EZ does not accept a leading operator on a
+        # continuation line. The top bit is masked off so the result is a
+        # positive 31-bit number regardless of the digest.
+        binary = (digest[offset] % 128) * 16777216
+        binary = binary + digest[offset + 1] * 65536
+        binary = binary + digest[offset + 2] * 256
+        binary = binary + digest[offset + 3]
+
+        code = binary % powerOfTen(digits)
+        body = str(code)
+        while len(body) < digits { body = "0" + body }
+        give body
+    }
+
+    # The code for a given moment. `atSeconds` of nil means now.
+    static task at(secret, atSeconds) {
+        give TOTP.atWith(secret, atSeconds, DEFAULT_PERIOD, DEFAULT_DIGITS, "SHA1")
+    }
+
+    static task atWith(secret, atSeconds, period, digits, algorithm) {
+        seconds = atSeconds
+        when seconds == nil { seconds = TOTP.now() }
+        counter = (seconds - (seconds % period)) / period
+        give TOTP.hotp(secret, counter, digits, algorithm)
+    }
+
+    # The code for right now.
+    static task generate(secret) { give TOTP.at(secret, nil) }
+
+    # Epoch seconds. clock() reports milliseconds.
+    static task now() {
+        ms = floor(clock())
+        give (ms - (ms % 1000)) / 1000
+    }
+
+    # ── verifying ───────────────────────────────────────────────────────────
+
+    # Check a submitted code, allowing one period either side.
+    #
+    # The window exists because clocks drift and because a user may type a
+    # code as it rolls over. One step each way is the usual compromise:
+    # wider makes a stolen code useful for longer.
+    static task verify(secret, code) {
+        give TOTP.verifyWith(secret, code, 1, DEFAULT_PERIOD, DEFAULT_DIGITS, "SHA1")
+    }
+
+    static task verifyWith(secret, code, window, period, digits, algorithm) {
+        submitted = trim(replace(str(code), " ", ""))
+        when len(submitted) != digits { give false }
+
+        seconds = TOTP.now()
+        counter = (seconds - (seconds % period)) / period
+        offset = -window
+        while offset <= window {
+            expected = TOTP.hotp(secret, counter + offset, digits, algorithm)
+            when TOTP.constantTimeEquals(expected, submitted) { give true }
+            offset = offset + 1
+        }
+        give false
+    }
+
+    # Compares without returning early on the first difference. A comparison
+    # that short-circuits leaks, through timing, how much of a guess was
+    # right -- which is enough to find a code digit by digit.
+    static task constantTimeEquals(a, b) {
+        when len(a) != len(b) { give false }
+        difference = 0
+        total = len(a)
+        repeat i = 0 to total - 1 {
+            when substr(a, i, 1) != substr(b, i, 1) { difference = difference + 1 }
+        }
+        give difference == 0
+    }
+
+    # Seconds until the current code expires, for showing a countdown.
+    static task secondsRemaining() {
+        give DEFAULT_PERIOD - (TOTP.now() % DEFAULT_PERIOD)
+    }
+
+    # ── secrets ─────────────────────────────────────────────────────────────
+
+    # A new random secret, base32 encoded. 20 bytes is the RFC 4226
+    # recommendation for SHA-1 and what authenticator apps expect.
+    static task generateSecret() { give TOTP.generateSecretOf(20) }
+
+    static task generateSecretOf(byteCount) {
+        octets = []
+        repeat i = 1 to byteCount { push(octets, randint(0, 255)) }
+        give base32Encode(octets)
+    }
+
+    static task isValidSecret(secret) {
+        try {
+            octets = base32Decode(secret)
+            give len(octets) > 0
+        }
+        catch (e) { give false }
+    }
+
+    # Groups of four, which is how apps display a secret for manual entry.
+    static task formatSecret(secret) {
+        body = upper(replace(str(secret), " ", ""))
+        parts = []
+        index = 0
+        while index < len(body) {
+            width = 4
+            when index + width > len(body) { width = len(body) - index }
+            push(parts, substr(body, index, width))
+            index = index + width
+        }
+        give join(parts, " ")
+    }
+
+    # ── enrolment ───────────────────────────────────────────────────────────
+
+    # otpauth:// URI for a QR code. Pair with the `qr` package:
+    #
+    #   use "qr"
+    #   code = QRCode(TOTP.uri(secret, account, issuer), 0)
+    static task uri(secret, account, issuer) {
+        give TOTP.uriWith(secret, account, issuer, DEFAULT_PERIOD, DEFAULT_DIGITS, "SHA1")
+    }
+
+    static task uriWith(secret, account, issuer, period, digits, algorithm) {
+        label = urlEncode(str(issuer)) + ":" + urlEncode(str(account))
+        query = "secret=" + upper(replace(str(secret), " ", ""))
+        query = query + "&issuer=" + urlEncode(str(issuer))
+        query = query + "&algorithm=" + algorithm
+        query = query + "&digits=" + str(digits)
+        query = query + "&period=" + str(period)
+        give "otpauth://totp/" + label + "?" + query
+    }
+}

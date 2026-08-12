@@ -1,0 +1,77 @@
+# ============================================================================
+# validate — schema validation for EZ
+#
+#   use "validate"
+#
+#   schema = Validate.object({
+#       "email": Validate.string().email(),
+#       "age":   Validate.number().integer().min(0).optional()
+#   })
+#
+#   result = schema.check(request.body)
+#   when result["ok"] { save(result["value"]) }
+#   other { give respondErrors(result["errors"]) }
+#
+# Built for validating input at a boundary -- request bodies, config files,
+# CSV rows -- where the data is untrusted and every problem should be
+# reported at once rather than one per attempt.
+# ============================================================================
+
+use "validate/rules.ez"
+use "validate/schema.ez"
+
+export model Validate {
+
+    static task string() { give Schema("string") }
+    static task number() { give Schema("number") }
+    static task bool() { give Schema("bool") }
+    static task any() { give Schema("any") }
+
+    # A list, optionally with a schema every item must satisfy.
+    static task array(itemSchema) {
+        s = Schema("array")
+        s.itemSchema = itemSchema
+        give s
+    }
+
+    # An object with a schema per field. Unknown fields are ignored unless
+    # .strict() is set, which reports them instead.
+    static task object(fields) {
+        s = Schema("object")
+        s.fields = fields
+        give s
+    }
+
+    # ── convenience ─────────────────────────────────────────────────────────
+
+    # Check and return only whether it passed.
+    static task isValid(schema, value) {
+        give schema.check(value)["ok"]
+    }
+
+    # Check, returning the cleaned value, or throw with every problem listed.
+    # For code paths where invalid input is genuinely exceptional.
+    static task checkOrThrow(schema, value) {
+        result = schema.check(value)
+        when result["ok"] { give result["value"] }
+        throw Exception("Validation failed: " + Validate.describe(result["errors"]))
+    }
+
+    # One line per problem, ready to show a user or write to a log.
+    static task describe(errors) {
+        parts = []
+        get e in errors { push(parts, e["path"] + " " + e["message"]) }
+        give join(parts, "; ")
+    }
+
+    # Errors keyed by field, which is the shape most form UIs want.
+    static task byField(errors) {
+        grouped = {}
+        get e in errors {
+            key = e["path"]
+            when has_key(grouped, key) == false { grouped[key] = [] }
+            push(grouped[key], e["message"])
+        }
+        give grouped
+    }
+}

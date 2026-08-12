@@ -1,0 +1,161 @@
+# ============================================================================
+# ulid — sortable unique identifiers for EZ
+#
+#   use "ulid"
+#   id = ulid()          # 01ARZ3NDEKTSV4RRFFQ69G5FAV
+#
+# 26 characters: a 48-bit millisecond timestamp followed by 80 bits of
+# randomness, both in Crockford base32.
+#
+# The point is that IDs generated later sort after IDs generated earlier, as
+# plain text. A random UUID has no such order, so using one as a primary key
+# scatters inserts across a B-tree index and fragments it; a ULID appends.
+# ============================================================================
+
+use "ulid/crockford.ez"
+
+TIME_CHARS = 10
+RANDOM_CHARS = 16
+export ULID_LENGTH = 26
+
+# 80 bits of randomness is more than one integer holds, so it is carried as
+# two 40-bit halves -- each exactly 8 base32 characters.
+HALF_BITS = 40
+HALF_MAX = 1099511627776          # 2^40
+
+# Monotonic state: the last millisecond seen, and the randomness issued for
+# it. Within one millisecond the random part is incremented rather than
+# redrawn, so two IDs made in the same tick still sort in creation order.
+lastTime = -1
+lastHigh = 0
+lastLow = 0
+
+task randomHalf() {
+    # randint covers a smaller range than 2^40, so the half is assembled from
+    # several draws rather than trusting one call to fill it.
+    value = 0
+    repeat i = 1 to 5 { value = value * 256 + randint(0, 255) }
+    give value
+}
+
+# Current time in milliseconds. clock() already reports epoch milliseconds.
+export task ulidTime() {
+    give floor(clock())
+}
+
+# ── generating ──────────────────────────────────────────────────────────────
+
+# A new ULID for the current time.
+export task ulid() {
+    give ulidAt(ulidTime())
+}
+
+# A ULID for a specific millisecond. Useful for seeding fixtures with a known
+# order, or for backfilling rows that already have a timestamp.
+export task ulidAt(timeMs) {
+    when timeMs < 0 { throw Exception("ulid: time cannot be negative") }
+
+    high = 0
+    low = 0
+    when timeMs == lastTime {
+        # Same millisecond: step the randomness so order is preserved.
+        low = lastLow + 1
+        high = lastHigh
+        when low >= HALF_MAX {
+            low = 0
+            high = high + 1
+            when high >= HALF_MAX {
+                throw Exception("ulid: randomness exhausted within one millisecond")
+            }
+        }
+    }
+    other {
+        high = randomHalf()
+        low = randomHalf()
+    }
+    lastTime = timeMs
+    lastHigh = high
+    lastLow = low
+
+    give encodeBase32(timeMs, TIME_CHARS) + encodeBase32(high, 8) + encodeBase32(low, 8)
+}
+
+# ── reading ─────────────────────────────────────────────────────────────────
+
+export task isUlid(text) {
+    when text == nil { give false }
+    body = str(text)
+    when len(body) != ULID_LENGTH { give false }
+    repeat i = 0 to ULID_LENGTH - 1 {
+        when decodeChar(substr(body, i, 1)) < 0 { give false }
+    }
+    # The first character encodes the top bits of the timestamp; above 7 the
+    # value would exceed 48 bits and is not a valid ULID.
+    give decodeChar(substr(body, 0, 1)) <= 7
+}
+
+# Milliseconds encoded in the ID.
+export task ulidTimeOf(text) {
+    when isUlid(text) == false { throw Exception(`ulid: '{text}' is not a ULID`) }
+    give decodeBase32(substr(str(text), 0, TIME_CHARS))
+}
+
+# The 16-character random part, for comparing IDs made in the same tick.
+export task ulidRandomOf(text) {
+    when isUlid(text) == false { throw Exception(`ulid: '{text}' is not a ULID`) }
+    give substr(str(text), TIME_CHARS, RANDOM_CHARS)
+}
+
+# -1 / 0 / 1 by creation order. Plain string comparison gives the same answer,
+# which is the whole point; this exists to say so explicitly.
+export task ulidCompare(a, b) {
+    left = upper(str(a))
+    right = upper(str(b))
+    when left < right { give -1 }
+    when left > right { give 1 }
+    give 0
+}
+
+# Ascending, i.e. oldest first.
+export task ulidSort(ids) {
+    ordered = []
+    get id in ids {
+        placed = false
+        index = 0
+        get existing in ordered {
+            when ulidCompare(id, existing) < 0 {
+                insert(ordered, index, id)
+                placed = true
+                escape
+            }
+            index = index + 1
+        }
+        when placed == false { push(ordered, id) }
+    }
+    give ordered
+}
+
+# Normalises a hand-typed ID: uppercases, and maps I/L to 1 and O to 0.
+export task ulidCanonical(text) {
+    body = upper(str(text))
+    result = ""
+    total = len(body)
+    repeat i = 0 to total - 1 {
+        value = decodeChar(substr(body, i, 1))
+        when value < 0 { throw Exception(`ulid: '{text}' is not a ULID`) }
+        result = result + substr(ALPHABET, value, 1)
+    }
+    give result
+}
+
+# The smallest ULID for a millisecond -- useful as a range bound:
+#   WHERE id >= ulidFloor(dayStart) AND id < ulidFloor(dayEnd)
+export task ulidFloor(timeMs) {
+    give encodeBase32(timeMs, TIME_CHARS) + encodeBase32(0, 8) + encodeBase32(0, 8)
+}
+
+# The largest ULID for a millisecond.
+export task ulidCeiling(timeMs) {
+    top = HALF_MAX - 1
+    give encodeBase32(timeMs, TIME_CHARS) + encodeBase32(top, 8) + encodeBase32(top, 8)
+}

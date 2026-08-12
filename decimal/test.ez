@@ -1,0 +1,155 @@
+# ============================================================================
+# decimal — test suite
+#   ez test.ez
+# ============================================================================
+
+use "decimal"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task s(d) { give d.toString() }
+
+out "decimal tests"
+
+# ── the reason this library exists ──────────────────────────────────────────
+check("0.1 + 0.2 is exactly 0.3", s(Decimal("0.1").plus("0.2")), "0.3")
+check("and compares equal", Decimal("0.1").plus("0.2").equals("0.3"), true)
+running = Decimal(0)
+repeat i = 1 to 10 { running = running.plus("0.1") }
+check("ten tenths is exactly one", running.equals("1.0"), true)
+check("19.99 x 3", s(Decimal("19.99").times(3)), "59.97")
+big = Decimal("0")
+repeat i = 1 to 100 { big = big.plus("0.01") }
+check("hundred cents is one", big.equals("1.00"), true)
+
+# ── parsing ─────────────────────────────────────────────────────────────────
+check("integer string", s(Decimal("42")), "42")
+check("integer value", s(Decimal(42)), "42")
+check("negative", s(Decimal("-1.5")), "-1.5")
+check("explicit plus", s(Decimal("+1.5")), "1.5")
+check("leading dot", s(Decimal(".5")), "0.5")
+check("trailing zeros kept", s(Decimal("1.50")), "1.50")
+check("nil is zero", s(Decimal(nil)), "0")
+check("underscore grouping", s(Decimal("1_000.25")), "1000.25")
+check("comma grouping", s(Decimal("1,000.25")), "1000.25")
+check("copy of decimal", s(Decimal(Decimal("2.5"))), "2.5")
+check("scale recorded", Decimal("1.500").scale, 3)
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("letters rejected", || Decimal("abc"))
+throws("version rejected", || Decimal("1.2.3"))
+throws("empty rejected", || Decimal(""))
+throws("bare minus rejected", || Decimal("-"))
+
+# ── arithmetic ──────────────────────────────────────────────────────────────
+check("plus aligns scales", s(Decimal("1.5").plus("0.25")), "1.75")
+check("minus", s(Decimal("1.00").minus("0.35")), "0.65")
+check("minus into negative", s(Decimal("1").minus("3")), "-2")
+check("times scales add", s(Decimal("1.5").times("1.5")), "2.25")
+check("times by integer", s(Decimal("2.50").times(4)), "10.00")
+check("negated", s(Decimal("1.5").negated()), "-1.5")
+check("absolute", s(Decimal("-1.5").absolute()), "1.5")
+check("modulo", s(Decimal("7").modulo("3")), "1")
+check("sum helper", s(decSum([Decimal("1.10"), Decimal("2.20"), Decimal("3.30")])), "6.60")
+check("max helper", s(decMax(["1.5", "10.25", "2"])), "10.25")
+check("min helper", s(decMin(["1.5", "10.25", "2"])), "1.5")
+
+# Division needs a target scale; 1/3 cannot be exact.
+check("exact division", s(Decimal("10").dividedByAt("4", 2)), "2.50")
+check("repeating division", s(Decimal("10").dividedByAt("3", 4)), "3.3333")
+check("division rounds", s(Decimal("2").dividedByAt("3", 2)), "0.67")
+throws("divide by zero", || Decimal("1").dividedBy("0"))
+throws("modulo by zero", || Decimal("1").modulo("0"))
+
+# ── comparison ──────────────────────────────────────────────────────────────
+check("equal across scales", Decimal("1.5").equals("1.50"), true)
+check("compare less", Decimal("1").compare("2"), -1)
+check("compare greater", Decimal("2").compare("1"), 1)
+check("compare equal", Decimal("1.0").compare("1"), 0)
+check("isLess", Decimal("1").isLess("1.01"), true)
+check("atLeast", Decimal("1").atLeast("1"), true)
+check("isZero", Decimal("0.00").isZero(), true)
+check("isNegative", Decimal("-0.01").isNegative(), true)
+check("sign negative", Decimal("-5").sign(), -1)
+check("sign zero", Decimal("0").sign(), 0)
+
+# ── rounding ────────────────────────────────────────────────────────────────
+check("half-up rounds away", s(Decimal("2.345").roundTo(2)), "2.35")
+check("half-up at .5", s(Decimal("0.5").roundTo(0)), "1")
+check("half-up negative", s(Decimal("-0.5").roundTo(0)), "-1")
+check("half-even to even", s(Decimal("0.5").roundWith(0, "half-even")), "0")
+check("half-even up to even", s(Decimal("1.5").roundWith(0, "half-even")), "2")
+check("half-even keeps even", s(Decimal("2.5").roundWith(0, "half-even")), "2")
+check("floor negative", s(Decimal("-1.1").floorTo(0)), "-2")
+check("ceil positive", s(Decimal("1.1").ceilTo(0)), "2")
+check("ceil negative", s(Decimal("-1.9").ceilTo(0)), "-1")
+check("truncate positive", s(Decimal("1.9").truncateTo(0)), "1")
+check("truncate negative", s(Decimal("-1.9").truncateTo(0)), "-1")
+check("widen keeps value", s(Decimal("1.5").roundTo(4)), "1.5000")
+check("rounding mode sticks", s(Decimal("2.5").rounding("half-even").roundTo(0)), "2")
+
+# ── formatting ──────────────────────────────────────────────────────────────
+check("toString pads scale", s(Decimal("1.5").roundTo(2)), "1.50")
+check("format groups", Decimal("1234567.5").format(2), "1,234,567.50")
+check("format small", Decimal("1.5").format(2), "1.50")
+check("format negative", Decimal("-1234.5").format(2), "-1,234.50")
+check("format custom", Decimal("1234.5").formatWith(2, ".", ","), "1.234,50")
+check("currency", Decimal("1234.5").currency("$", 2), "$1,234.50")
+check("currency negative", Decimal("-5").currency("$", 2), "-$5.00")
+check("toInteger exact", Decimal("42.00").toInteger(), 42)
+throws("toInteger refuses cents", || Decimal("1.50").toInteger())
+
+# ── money helpers ───────────────────────────────────────────────────────────
+check("money rounds to 2", s(money("1.005")), "1.01")
+check("money from integer", s(money(5)), "5.00")
+check("percent", s(Decimal("200.00").percent(15)), "30.00")
+
+# split must reconcile: the shares always sum back to the original.
+parts = Decimal("0.10").split(3)
+check("split count", len(parts), 3)
+check("split first gets remainder", s(parts[0]), "0.04")
+check("split rest", s(parts[2]), "0.03")
+check("split reconciles", s(decSum(parts)), "0.10")
+
+even = Decimal("9.00").split(3)
+check("even split", s(even[0]), "3.00")
+check("even split reconciles", s(decSum(even)), "9.00")
+
+negParts = Decimal("-0.10").split(3)
+check("negative split reconciles", s(decSum(negParts)), "-0.10")
+
+throws("split needs a part", || Decimal("1").split(0))
+
+# allocate distributes by weight and still reconciles.
+alloc = Decimal("100.00").allocate([1, 1, 1])
+check("allocate reconciles", s(decSum(alloc)), "100.00")
+alloc2 = Decimal("0.05").allocate([3, 7])
+check("weighted allocate reconciles", s(decSum(alloc2)), "0.05")
+check("weighted larger share", alloc2[1].atLeast(alloc2[0]), true)
+throws("zero weights rejected", || Decimal("1").allocate([0, 0]))
+
+# ── large values stay exact ─────────────────────────────────────────────────
+huge = Decimal("99999999999.99")
+check("large addition", s(huge.plus("0.01")), "100000000000.00")
+check("large stays exact", s(Decimal("12345678901.23").times(2)), "24691357802.46")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

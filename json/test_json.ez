@@ -1,0 +1,172 @@
+# ============================================================================
+# JSON package test suite
+# ============================================================================
+use "json"
+
+_pass = 0
+_fail = 0
+
+task check(name, cond) {
+    when cond { _pass = _pass + 1  out "  [PASS] " + name }
+    other     { _fail = _fail + 1  out "  [FAIL] " + name }
+}
+
+task checkEq(name, got, want) {
+    when str(got) == str(want) { _pass = _pass + 1  out "  [PASS] " + name }
+    other {
+        _fail = _fail + 1
+        out "  [FAIL] " + name + "  got=" + str(got) + " want=" + str(want)
+    }
+}
+
+task checkThrows(name, prefix, fn) {
+    threw = false
+    matched = false
+    try { fn() } catch (e) {
+        threw = true
+        matched = indexOf(str(e), prefix) == 0
+    }
+    check(name, threw and matched)
+}
+
+DOC = "{\"user\": {\"name\": \"Abdullah\", \"tags\": [\"a\", \"b\"]}, \"n\": 42, \"ok\": true}"
+
+out "== parse / stringify =="
+d = parse(DOC)
+checkEq("nested string", d["user"]["name"], "Abdullah")
+checkEq("number", d["n"], 42)
+checkEq("bool", d["ok"], true)
+checkEq("array element", d["user"]["tags"][1], "b")
+check("round trip", equals(parse(stringify(d)), d))
+checkThrows("bad JSON throws", JSON_PARSE_ERROR, || { parse("{oops") })
+checkThrows("non-string throws", JSON_PARSE_ERROR, || { parse(42) })
+
+out ""
+out "== safeParse / isValid =="
+checkEq("safeParse fallback", safeParse("{oops", "fb"), "fb")
+checkEq("safeParse nil default", typeOf(safeParse("{oops")), "nil")
+checkEq("safeParse good input", safeParse(DOC)["n"], 42)
+check("isValid true", isValid(DOC))
+check("isValid false", isValid("{oops") == false)
+check("isValid on empty", isValid("") == false)
+
+out ""
+out "== minify / compact =="
+pretty = stringify({"a": 1, "b": "x"})
+check("stringify is indented", indexOf(pretty, "\n") != -1)
+small = minify(pretty)
+check("minify removes newlines", indexOf(small, "\n") == -1)
+check("minify removes padding", indexOf(small, ": ") == -1)
+check("minified still parses", equals(parse(small), parse(pretty)))
+check("compact matches minify", compact({"a": 1, "b": "x"}) == small)
+# whitespace inside a string is content, not padding
+spaced = compact({"s": "keep  me\tplease"})
+check("spaces inside strings survive", indexOf(spaced, "keep  me") != -1)
+check("tab inside string survives", indexOf(parse(spaced)["s"], "\t") != -1)
+# an escaped quote must not look like the end of the string
+esc = compact({"s": "a \" b   c"})
+checkEq("escaped quote handled", parse(esc)["s"], "a \" b   c")
+
+out ""
+out "== getPath =="
+checkEq("simple key", getPath(d, "n"), 42)
+checkEq("nested", getPath(d, "user.name"), "Abdullah")
+checkEq("array index", getPath(d, "user.tags.0"), "a")
+checkEq("missing -> fallback", getPath(d, "user.nope", "dflt"), "dflt")
+checkEq("missing deep -> fallback", getPath(d, "a.b.c.d", "dflt"), "dflt")
+checkEq("index out of range", getPath(d, "user.tags.9", "dflt"), "dflt")
+checkEq("index into a non-array", getPath(d, "n.0", "dflt"), "dflt")
+checkEq("nil default", typeOf(getPath(d, "nope")), "nil")
+
+out ""
+out "== hasPath =="
+check("has simple", hasPath(d, "n"))
+check("has nested", hasPath(d, "user.name"))
+check("has array index", hasPath(d, "user.tags.1"))
+check("missing", hasPath(d, "user.nope") == false)
+check("out of range", hasPath(d, "user.tags.5") == false)
+
+out ""
+out "== setPath =="
+s1 = {}
+setPath(s1, "a.b.c", 7)
+checkEq("creates intermediates", getPath(s1, "a.b.c"), 7)
+s2 = parse(DOC)
+setPath(s2, "user.name", "Sam")
+checkEq("overwrites nested", getPath(s2, "user.name"), "Sam")
+setPath(s2, "user.tags.0", "z")
+checkEq("writes into an array", getPath(s2, "user.tags.0"), "z")
+check("original untouched", getPath(d, "user.name") == "Abdullah")
+checkThrows("empty path throws", JSON_PATH_ERROR, || { setPath({}, "", 1) })
+checkThrows("array index out of range throws", JSON_PATH_ERROR, || {
+    setPath(parse(DOC), "user.tags.9", 1)
+})
+
+out ""
+out "== clone =="
+orig = parse(DOC)
+cp = clone(orig)
+setPath(cp, "user.name", "Changed")
+checkEq("clone is independent", getPath(orig, "user.name"), "Abdullah")
+checkEq("clone carries values", getPath(cp, "user.name"), "Changed")
+check("clone equals original structurally", equals(clone(orig), orig))
+checkEq("clone of a scalar", clone(5), 5)
+
+out ""
+out "== merge / deepMerge =="
+a = {"x": 1, "nested": {"p": 1, "q": 2}}
+b = {"y": 2, "nested": {"q": 99, "r": 3}}
+m = merge(a, b)
+checkEq("shallow keeps a", m["x"], 1)
+checkEq("shallow adds b", m["y"], 2)
+checkEq("shallow REPLACES nested", getPath(m, "nested.q"), 99)
+check("shallow drops the untouched branch", hasPath(m, "nested.p") == false)
+dm = deepMerge(a, b)
+checkEq("deep keeps untouched branch", getPath(dm, "nested.p"), 1)
+checkEq("deep overrides", getPath(dm, "nested.q"), 99)
+checkEq("deep adds", getPath(dm, "nested.r"), 3)
+check("inputs not mutated", getPath(a, "nested.q") == 2)
+
+out ""
+out "== equals =="
+check("same content", equals(parse(DOC), parse(DOC)))
+check("different value", equals({"a": 1}, {"a": 2}) == false)
+check("different key count", equals({"a": 1}, {"a": 1, "b": 2}) == false)
+check("arrays equal", equals([1, [2, 3]], [1, [2, 3]]))
+check("array order matters", equals([1, 2], [2, 1]) == false)
+check("scalars", equals(5, 5))
+check("type mismatch", equals(5, "5") == false)
+
+out ""
+out "== pick / omit =="
+src = {"id": 1, "name": "n", "password": "secret"}
+p = pick(src, ["id", "name", "absent"])
+check("pick keeps wanted", has_key(p, "id") and has_key(p, "name"))
+check("pick skips absent", has_key(p, "absent") == false)
+check("pick excludes the rest", has_key(p, "password") == false)
+o = omit(src, ["password"])
+check("omit drops the secret", has_key(o, "password") == false)
+check("omit keeps the rest", has_key(o, "id") and has_key(o, "name"))
+check("omit does not mutate", has_key(src, "password"))
+
+out ""
+out "== files =="
+TMP = "_json_test.json"
+write(TMP, {"a": [1, 2], "b": "x"})
+check("write then read", equals(read(TMP), {"a": [1, 2], "b": "x"}))
+write(TMP, {"a": 1}, false)
+raw = File(TMP, "r")
+body = raw.readAll()
+raw.close()
+check("pretty=false writes compact", indexOf(body, "\n") == -1)
+checkThrows("read of a missing file throws", JSON_IO_ERROR, || { read("_definitely_absent.json") })
+checkEq("safeRead fallback", safeRead("_definitely_absent.json", "fb"), "fb")
+f = File(TMP, "w") f.write("{not json") f.close()
+checkThrows("read of malformed file throws", JSON_PARSE_ERROR, || { read(TMP) })
+checkEq("safeRead swallows malformed", safeRead(TMP, "fb"), "fb")
+File.remove(TMP)
+
+out ""
+out "========================================"
+out " passed: " + str(_pass) + "   failed: " + str(_fail)
+out "========================================"

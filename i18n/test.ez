@@ -1,0 +1,176 @@
+# ============================================================================
+# i18n — test suite
+#   ez test.ez
+# ============================================================================
+
+use "i18n"
+use "i18n/plural.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+out "i18n tests"
+
+I18n.clear()
+I18n.load("en", {
+    "greeting": "Hello, {name}!",
+    "bare": "plain text",
+    "nav": { "home": "Home", "deep": { "here": "Deep" } },
+    "files": { "one": "{count} file", "other": "{count} files" }
+})
+I18n.load("fr", { "greeting": "Bonjour, {name} !", "nav": { "home": "Accueil" } })
+I18n.locale("en")
+I18n.fallback("en")
+
+# ── lookup ──────────────────────────────────────────────────────────────────
+check("plain string", I18n.t("bare", nil), "plain text")
+check("interpolation", I18n.t("greeting", { "name": "Ali" }), "Hello, Ali!")
+check("nested key", I18n.t("nav.home", nil), "Home")
+check("deeply nested", I18n.t("nav.deep.here", nil), "Deep")
+check("has known key", I18n.has("bare"), true)
+check("has unknown key", I18n.has("nope"), false)
+check("locales listed", to_json(I18n.locales()), to_json(["en", "fr"]))
+
+# A missing key returns the key. A blank would vanish into the layout and
+# ship unnoticed.
+check("missing key returns the key", I18n.t("no.such.key", nil), "no.such.key")
+check("missing nested key", I18n.t("nav.missing", nil), "nav.missing")
+# An unknown placeholder stays visible rather than becoming empty.
+check("unknown placeholder kept", I18n.t("greeting", {}), "Hello, {name}!")
+check("nil values", I18n.t("greeting", nil), "Hello, {name}!")
+check("numeric value", I18n.t("greeting", { "name": 42 }), "Hello, 42!")
+
+# ── locales and fallback ────────────────────────────────────────────────────
+I18n.locale("fr")
+check("locale switches", I18n.locale(nil), "fr")
+check("french translation", I18n.t("greeting", { "name": "Ali" }), "Bonjour, Ali !")
+check("french nested", I18n.t("nav.home", nil), "Accueil")
+# Not translated into French, so English is used rather than the raw key.
+check("falls back to english", I18n.t("bare", nil), "plain text")
+check("falls back for nested", I18n.t("nav.deep.here", nil), "Deep")
+
+I18n.locale("de")
+check("unknown locale falls back", I18n.t("bare", nil), "plain text")
+I18n.locale("en")
+
+# Loading twice merges rather than replacing.
+I18n.load("en", { "extra": "added" })
+check("merge keeps existing", I18n.t("bare", nil), "plain text")
+check("merge adds new", I18n.t("extra", nil), "added")
+I18n.load("en", { "nav": { "away": "Away" } })
+check("merge is deep", I18n.t("nav.home", nil), "Home")
+check("merge adds nested", I18n.t("nav.away", nil), "Away")
+
+# ── missing handler ─────────────────────────────────────────────────────────
+MISSED = ""
+I18n.onMissing(|key| { MISSED = key  give nil })
+I18n.t("absent.key", nil)
+check("missing handler fires", MISSED, "absent.key")
+MISSED = ""
+I18n.t("bare", nil)
+check("handler quiet on success", MISSED, "")
+I18n.onMissing(nil)
+
+# ── plurals ─────────────────────────────────────────────────────────────────
+check("singular", tn("files", 1, nil), "1 file")
+check("plural", tn("files", 5, nil), "5 files")
+check("zero is plural in english", tn("files", 0, nil), "0 files")
+check("count is available", I18n.plural("files", 3, nil), "3 files")
+check("plural with extra values", I18n.plural("files", 2, { "who": "x" }), "2 files")
+check("plural on a missing key", I18n.plural("nope", 1, nil), "nope")
+# Asking for a plural table without a count picks "other".
+check("plural table without count", I18n.t("files", nil), "{count} files")
+
+# ── CLDR categories ─────────────────────────────────────────────────────────
+check("en 1", pluralCategory("en", 1), "one")
+check("en 0", pluralCategory("en", 0), "other")
+check("en 2", pluralCategory("en", 2), "other")
+check("en fractional", pluralCategory("en", 1.5), "other")
+
+# French counts 0 as singular, unlike English.
+check("fr 0", pluralCategory("fr", 0), "one")
+check("fr 1", pluralCategory("fr", 1), "one")
+check("fr 2", pluralCategory("fr", 2), "other")
+
+# Japanese has a single form.
+check("ja 1", pluralCategory("ja", 1), "other")
+check("ja 5", pluralCategory("ja", 5), "other")
+
+# Russian: 1 is one, 2-4 few, 5-20 many, then it repeats by last digit.
+check("ru 1", pluralCategory("ru", 1), "one")
+check("ru 2", pluralCategory("ru", 2), "few")
+check("ru 5", pluralCategory("ru", 5), "many")
+check("ru 11", pluralCategory("ru", 11), "many")
+check("ru 21", pluralCategory("ru", 21), "one")
+check("ru 22", pluralCategory("ru", 22), "few")
+check("ru 25", pluralCategory("ru", 25), "many")
+
+check("pl 1", pluralCategory("pl", 1), "one")
+check("pl 2", pluralCategory("pl", 2), "few")
+check("pl 5", pluralCategory("pl", 5), "many")
+check("pl 22", pluralCategory("pl", 22), "few")
+
+check("ar 0", pluralCategory("ar", 0), "zero")
+check("ar 1", pluralCategory("ar", 1), "one")
+check("ar 2", pluralCategory("ar", 2), "two")
+check("ar 3", pluralCategory("ar", 3), "few")
+check("ar 11", pluralCategory("ar", 11), "many")
+check("ar 100", pluralCategory("ar", 100), "other")
+
+check("cs 1", pluralCategory("cs", 1), "one")
+check("cs 3", pluralCategory("cs", 3), "few")
+check("cs 5", pluralCategory("cs", 5), "other")
+
+# Region subtags are stripped, so en-GB behaves like en.
+check("region subtag ignored", pluralCategory("en-GB", 1), "one")
+check("unknown language is english-like", pluralCategory("xx", 1), "one")
+
+# A partial table still resolves rather than showing the key.
+check("falls back to other", selectPlural({ "other": "X" }, "few"), "X")
+check("falls back to any form", selectPlural({ "one": "Y" }, "few"), "Y")
+check("empty table gives nil", selectPlural({}, "one"), nil)
+
+# ── number formatting ───────────────────────────────────────────────────────
+I18n.locale("en")
+check("en grouping", I18n.number(1234567.891, 2), "1,234,567.89")
+check("en no decimals", I18n.number(1234, 0), "1,234")
+check("en small", I18n.number(5, 2), "5.00")
+check("en negative", I18n.number(-1234.5, 2), "-1,234.50")
+check("rounds up", I18n.number(1.006, 2), "1.01")
+check("rounds down", I18n.number(1.004, 2), "1.00")
+# 1.005 is 1.00499999... as a float, so it rounds DOWN. This is float
+# behaviour, not a formatting bug -- and it is why money should be formatted
+# through `decimal` rather than here.
+check("float ties are not exact", I18n.number(1.005, 2), "1.00")
+
+# German swaps both separators -- writing 1,50 for one and a half.
+I18n.locale("de")
+check("de grouping", I18n.number(1234567.891, 2), "1.234.567,89")
+check("de decimal comma", I18n.number(1.5, 2), "1,50")
+
+I18n.locale("fr")
+check("fr space grouping", I18n.number(1234567, 0), "1 234 567")
+
+# ── currency placement ──────────────────────────────────────────────────────
+I18n.locale("en")
+check("en symbol in front", I18n.currency(1234.5, "$"), "$1,234.50")
+check("en negative", I18n.currency(-5, "$"), "-$5.00")
+I18n.locale("de")
+check("de symbol after", I18n.currency(1234.5, "EUR"), "1.234,50 EUR")
+
+I18n.locale("en")
+check("clear empties", (I18n.clear() == nil) and len(I18n.locales()) == 0, true)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

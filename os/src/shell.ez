@@ -1,0 +1,24 @@
+// ============================================================================
+// ezos / shell.ez -- open files, folders, and URLs with default handlers.
+// ============================================================================
+
+use "ffi.ez"
+
+export model OSShell {
+    task open(target) {
+        rc = os_call(OSFFI.shellExec, "int", 0, "open", str(target), 0, 0, SW_SHOWNORMAL)
+        give rc > 32
+    }
+
+    task explore(path) {
+        rc = os_call(OSFFI.shellExec, "int", 0, "explore", str(path), 0, 0, SW_SHOWNORMAL)
+        give rc > 32
+    }
+
+    // Reveal/select a file in Explorer.
+    task reveal(filePath) {
+        p = str(filePath)
+        cmd = "explorer /select,\"" + p + "\""
+        give os_call(OSFFI.shellExec, "int", 0, "open", cmd, 0, 0, SW_SHOWNORMAL) > 32
+    }
+}

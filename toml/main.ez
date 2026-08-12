@@ -1,0 +1,153 @@
+# ============================================================================
+# toml — TOML configuration for EZ
+#
+#   use "toml"
+#   config = TOML.load("config.toml")
+#   out config["server"]["port"]
+#
+# TOML sits between INI and YAML: nested tables and real types like INI cannot
+# express, without YAML's indentation sensitivity. Values are explicitly
+# typed, so a bare unquoted word is an error rather than a guess.
+# ============================================================================
+
+use "toml/value.ez"
+use "toml/parse.ez"
+
+export model TOML {
+
+    static task parse(source) {
+        when source == nil { give {} }
+        give tomlParse(str(source))
+    }
+
+    static task parseOr(source, fallback) {
+        try { give TOML.parse(source) }
+        catch (e) { give fallback }
+    }
+
+    static task load(path) { give TOML.parse(readFile(path)) }
+
+    static task isValid(source) {
+        try {
+            TOML.parse(source)
+            give true
+        }
+        catch (e) { give false }
+    }
+
+    # Read "a.b.c" with a fallback, so a missing table cannot throw.
+    static task get(data, path, fallback) {
+        node = data
+        get part in split(str(path), ".") {
+            when typeOf(node) != "dictionary" { give fallback }
+            when has_key(node, part) == false { give fallback }
+            node = node[part]
+        }
+        give node
+    }
+
+    static task has(data, path) {
+        marker = "__toml_missing__"
+        give TOML.get(data, path, marker) != marker
+    }
+
+    # ── writing ─────────────────────────────────────────────────────────────
+
+    static task stringify(data) { give TOML.emit(data, []) }
+
+    static task save(path, data) {
+        writeFile(path, TOML.emit(data, []))
+        give true
+    }
+
+    # Scalars first, then nested tables -- anything after a [header] belongs
+    # to that table, so a top-level key written afterwards would be captured
+    # by it.
+    static task emit(data, prefix) {
+        lines = []
+        tables = []
+        arrays = []
+
+        get key in keys(data) {
+            value = data[key]
+            t = typeOf(value)
+            when t == "dictionary" { push(tables, key) }
+            other when (t == "array" or t == "list") and TOML.isTableArray(value) {
+                push(arrays, key)
+            }
+            other { push(lines, TOML.emitKey(key) + " = " + TOML.emitValue(value)) }
+        }
+
+        get key in tables {
+            path = TOML.extend(prefix, key)
+            push(lines, "")
+            push(lines, "[" + join(path, ".") + "]")
+            body = TOML.emit(data[key], path)
+            when body != "" { push(lines, body) }
+        }
+        get key in arrays {
+            path = TOML.extend(prefix, key)
+            get entry in data[key] {
+                push(lines, "")
+                push(lines, "[[" + join(path, ".") + "]]")
+                body = TOML.emit(entry, path)
+                when body != "" { push(lines, body) }
+            }
+        }
+        give trim(join(lines, chr(10)))
+    }
+
+    static task extend(prefix, key) {
+        path = []
+        get part in prefix { push(path, part) }
+        push(path, key)
+        give path
+    }
+
+    static task isTableArray(list) {
+        when len(list) == 0 { give false }
+        get item in list {
+            when typeOf(item) != "dictionary" { give false }
+        }
+        give true
+    }
+
+    # A bare key is allowed only for letters, digits, underscore and hyphen.
+    static task emitKey(key) {
+        body = str(key)
+        when body == "" { give `""` }
+        when re_test(body, "^[A-Za-z0-9_-]+$") { give body }
+        give `"` + replace(body, `"`, "\\" + `"`) + `"`
+    }
+
+    static task emitValue(value) {
+        when value == nil { give `""` }
+        t = typeOf(value)
+        when t == "bool" {
+            when value { give "true" }
+            give "false"
+        }
+        when t == "integer" { give str(value) }
+        when t == "float" { give str(value) }
+        when t == "array" or t == "list" {
+            parts = []
+            get item in value { push(parts, TOML.emitValue(item)) }
+            give "[" + join(parts, ", ") + "]"
+        }
+        when t == "dictionary" {
+            parts = []
+            get k in keys(value) {
+                push(parts, TOML.emitKey(k) + " = " + TOML.emitValue(value[k]))
+            }
+            give "{ " + join(parts, ", ") + " }"
+        }
+        body = str(value)
+        # Dates are written bare, as TOML expects; everything else is quoted.
+        when tomlIsDateLike(body) { give body }
+        escaped = replace(body, "\\", "\\\\")
+        escaped = replace(escaped, `"`, "\\" + `"`)
+        escaped = replace(escaped, chr(10), "\\n")
+        escaped = replace(escaped, chr(9), "\\t")
+        give `"` + escaped + `"`
+    }
+}

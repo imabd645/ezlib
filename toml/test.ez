@@ -1,0 +1,153 @@
+# ============================================================================
+# toml — test suite
+#   ez test.ez
+# ============================================================================
+
+use "toml"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+Q = chr(34)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+task p(src) { give TOML.parse(src) }
+
+out "toml tests"
+
+# ── typed values ────────────────────────────────────────────────────────────
+check("integer", p("n = 42")["n"], 42)
+check("integer type", typeOf(p("n = 42")["n"]), "integer")
+check("negative", p("n = -7")["n"], -7)
+check("explicit plus", p("n = +7")["n"], 7)
+check("underscore separator", p("n = 1_000_000")["n"], 1000000)
+check("float", p("n = 1.5")["n"], 1.5)
+check("float type", typeOf(p("n = 1.5")["n"]), "float")
+check("bool true", p("b = true")["b"], true)
+check("bool false", p("b = false")["b"], false)
+check("basic string", p("s = " + Q + "hi" + Q)["s"], "hi")
+check("empty string", p("s = " + Q + Q)["s"], "")
+check("literal string", p("s = 'raw'")["s"], "raw")
+# A literal string keeps backslashes, which is why it exists.
+check("literal keeps backslash", p("s = 'C:\\path'")["s"], "C:\\path")
+check("escape newline", p("s = " + Q + "a\\nb" + Q)["s"], "a" + NL + "b")
+check("escape quote", p("s = " + Q + "a\\" + Q + "b" + Q)["s"], "a" + Q + "b")
+check("date kept as text", p("d = 1979-05-27")["d"], "1979-05-27")
+check("time kept as text", p("t = 07:32:00")["t"], "07:32:00")
+
+# TOML has no bare strings -- an unquoted word is an error, not a guess.
+# This is the main thing separating it from INI.
+task throws(label, src) {
+    try {
+        TOML.parse(src)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("bare word rejected", "s = hello")
+throws("unquoted path rejected", "s = /usr/bin")
+throws("missing value", "s =")
+throws("no equals", "just text")
+throws("unterminated string", "s = " + Q + "abc")
+throws("unterminated table header", "[server")
+throws("unterminated array", "a = [1, 2")
+throws("unknown escape", "s = " + Q + "a\\qb" + Q)
+
+# ── comments ────────────────────────────────────────────────────────────────
+check("trailing comment", p("n = 1 # note")["n"], 1)
+check("full-line comment", p("# c" + NL + "n = 1")["n"], 1)
+check("hash inside string", p("s = " + Q + "a # b" + Q)["s"], "a # b")
+check("blank lines ignored", p("a = 1" + NL + NL + "b = 2")["b"], 2)
+
+# ── tables ──────────────────────────────────────────────────────────────────
+cfg = p("top = 1" + NL + "[a]" + NL + "x = 1" + NL + "[b]" + NL + "y = 2")
+check("top level key", cfg["top"], 1)
+check("table value", cfg["a"]["x"], 1)
+check("second table", cfg["b"]["y"], 2)
+
+# Dotted headers nest, which INI cannot express at all.
+deep = p("[a.b.c]" + NL + "x = 1")
+check("dotted header nests", deep["a"]["b"]["c"]["x"], 1)
+check("intermediate tables created", typeOf(deep["a"]["b"]), "dictionary")
+
+# Dotted keys nest too.
+dotted = p("a.b.c = 1")
+check("dotted key nests", dotted["a"]["b"]["c"], 1)
+check("quoted key segment", p(Q + "a b" + Q + " = 1")["a b"], 1)
+check("dotted with quoted segment", p("a." + Q + "b c" + Q + " = 1")["a"]["b c"], 1)
+
+# ── arrays ──────────────────────────────────────────────────────────────────
+checkVal("integer array", p("xs = [1, 2, 3]")["xs"], [1, 2, 3])
+checkVal("string array", p("xs = [" + Q + "a" + Q + ", " + Q + "b" + Q + "]")["xs"], ["a", "b"])
+checkVal("empty array", p("xs = []")["xs"], [])
+checkVal("nested array", p("xs = [[1, 2], [3]]")["xs"], [[1, 2], [3]])
+checkVal("mixed array", p("xs = [1, " + Q + "a" + Q + ", true]")["xs"], [1, "a", true])
+# A comma inside a string must not split the array.
+checkVal("comma inside string", p("xs = [" + Q + "a,b" + Q + "]")["xs"], ["a,b"])
+
+# ── inline tables ───────────────────────────────────────────────────────────
+inline = p("pt = { x = 1, y = 2 }")
+check("inline table x", inline["pt"]["x"], 1)
+check("inline table y", inline["pt"]["y"], 2)
+check("nested inline", p("a = { b = { c = 1 } }")["a"]["b"]["c"], 1)
+check("inline with string", p("a = { s = " + Q + "x,y" + Q + " }")["a"]["s"], "x,y")
+
+# ── arrays of tables ────────────────────────────────────────────────────────
+items = p("[[items]]" + NL + "n = " + Q + "a" + Q + NL + "[[items]]" + NL + "n = " + Q + "b" + Q)
+check("array of tables count", len(items["items"]), 2)
+check("first entry", items["items"][0]["n"], "a")
+check("second entry", items["items"][1]["n"], "b")
+
+# A [x.y] after [[x]] applies to the last appended entry.
+nestedArr = p("[[items]]" + NL + "n = 1" + NL + "[items.meta]" + NL + "k = 2")
+check("sub-table of last entry", nestedArr["items"][0]["meta"]["k"], 2)
+
+# ── access helpers ──────────────────────────────────────────────────────────
+check("get nested", TOML.get(cfg, "a.x", 0), 1)
+check("get top level", TOML.get(cfg, "top", 0), 1)
+check("get missing table", TOML.get(cfg, "zz.x", "fb"), "fb")
+check("get missing key", TOML.get(cfg, "a.zz", "fb"), "fb")
+check("has true", TOML.has(cfg, "a.x"), true)
+check("has false", TOML.has(cfg, "a.zz"), false)
+
+# ── round trip ──────────────────────────────────────────────────────────────
+task roundTrips(label, src) {
+    once = TOML.parse(src)
+    twice = TOML.parse(TOML.stringify(once))
+    check(label, to_json(twice), to_json(once))
+}
+roundTrips("rt scalars", "a = 1" + NL + "b = " + Q + "x" + Q + NL + "c = true")
+roundTrips("rt tables", "[x]" + NL + "a = 1" + NL + "[y]" + NL + "b = 2")
+roundTrips("rt nested tables", "[a.b]" + NL + "c = 1")
+roundTrips("rt arrays", "xs = [1, 2, 3]")
+roundTrips("rt array of tables", "[[i]]" + NL + "n = 1" + NL + "[[i]]" + NL + "n = 2")
+roundTrips("rt mixed", "top = 1" + NL + "[s]" + NL + "k = " + Q + "v" + Q)
+roundTrips("rt float", "f = 1.5")
+roundTrips("rt strings with quotes", "s = " + Q + "say \\" + Q + "hi\\" + Q + Q)
+
+# Top-level keys must be emitted before any table header, or reading back
+# would capture them into that table.
+emitted = TOML.stringify({ "top": 1, "table": { "k": 2 } })
+topAt = indexOf(emitted, "top")
+headerAt = indexOf(emitted, "[table]")
+check("top-level keys come first", topAt < headerAt, true)
+
+check("isValid true", TOML.isValid("a = 1"), true)
+check("isValid false", TOML.isValid("a = bare"), false)
+check("parseOr fallback", TOML.parseOr("nope", "fb"), "fb")
+checkVal("empty source", TOML.parse(""), {})
+checkVal("nil source", TOML.parse(nil), {})
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

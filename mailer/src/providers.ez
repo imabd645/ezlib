@@ -1,0 +1,81 @@
+// ============================================================================
+// mailer / providers.ez -- SMTP Provider Presets
+//
+// One-liner setup for the most common SMTP relay services. Each function
+// returns a configured SmtpClient (via email.connect) so you can call
+// .send() on it immediately.
+//
+// Usage:
+//   client = Providers.gmail("me@gmail.com", "app-password")
+//   client = Providers.sendgrid("SG.xxx")
+//   client = Providers.mailgun("domain.mailgun.org", "key-xxx")
+//   client = Providers.ses("AKIAIOSFODNN7EXAMPLE", "secret", "us-east-1")
+//   client = Providers.outlook("me@outlook.com", "password")
+//   client = Providers.yahoo("me@yahoo.com", "app-password")
+//   client = Providers.custom("mail.myserver.com", 587, "user", "pass")
+//
+// All providers default to port 587 with STARTTLS. Gmail also supports
+// port 465 (SMTPS) via Providers.gmailSSL().
+// ============================================================================
+use "email"
+
+export model Providers {
+    // ── Gmail ─────────────────────────────────────────────────────────────────
+    // Requires a Google App Password (not your regular password).
+    // Setup: Google Account → Security → 2-Step Verification → App Passwords
+    static task gmail(username, appPassword) {
+        give connect("smtp.gmail.com", 587, username, appPassword)
+    }
+
+    // Gmail using implicit SSL (port 465 / SMTPS)
+    static task gmailSSL(username, appPassword) {
+        give connect("smtp.gmail.com", 465, username, appPassword)
+    }
+
+    // ── Outlook / Hotmail ────────────────────────────────────────────────────
+    static task outlook(username, password) {
+        give connect("smtp-mail.outlook.com", 587, username, password)
+    }
+
+    // ── Yahoo Mail ────────────────────────────────────────────────────────────
+    // Requires a Yahoo App Password.
+    static task yahoo(username, appPassword) {
+        give connect("smtp.mail.yahoo.com", 587, username, appPassword)
+    }
+
+    // ── SendGrid ─────────────────────────────────────────────────────────────
+    // username is always the literal string "apikey".
+    // apiKey is your SendGrid API key starting with "SG."
+    //
+    //   client = Providers.sendgrid("SG.xxxxxxxxxx")
+    //   client.send(Message().from("noreply@myapp.com").to(...) ...)
+    //
+    static task sendgrid(apiKey) {
+        give connect("smtp.sendgrid.net", 587, "apikey", apiKey)
+    }
+
+    // ── Mailgun ───────────────────────────────────────────────────────────────
+    // domain: your Mailgun sending domain, e.g. "mg.myapp.com"
+    // apiKey: your Mailgun SMTP password (not the API key, the SMTP password)
+    static task mailgun(domain, smtpPassword) {
+        // Mailgun SMTP login is "postmaster@yourdomain"
+        give connect("smtp.mailgun.org", 587, "postmaster@" + domain, smtpPassword)
+    }
+
+    // ── Amazon SES (Simple Email Service) ────────────────────────────────────
+    // Uses the SES SMTP endpoint for a given region.
+    // smtpUser and smtpPassword are the SES SMTP credentials (NOT your AWS
+    // access key — generate these from the SES console under SMTP Settings).
+    //
+    //   client = Providers.ses("AKID...", "smtp-secret...", "us-east-1")
+    //
+    static task ses(smtpUser, smtpPassword, region) {
+        server = "email-smtp." + region + ".amazonaws.com"
+        give connect(server, 587, smtpUser, smtpPassword)
+    }
+
+    // ── Custom SMTP ───────────────────────────────────────────────────────────
+    static task custom(server, port, username, password) {
+        give connect(server, port, username, password)
+    }
+}

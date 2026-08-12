@@ -1,0 +1,87 @@
+# ============================================================================
+# ini — INI configuration files for EZ
+#
+#   use "ini"
+#   config = INI.parse(readFile("app.ini"))
+#   out config["database"]["port"]
+#
+# INI has no standard, so this implements the dialect people actually write:
+# [sections], key=value, ; and # comments, quoted values, and both = and :
+# as separators. Values are typed the way they are spelled, so a port is a
+# number and a flag is a boolean without the caller converting.
+# ============================================================================
+
+use "ini/parse.ez"
+
+export model INI {
+
+    # Parse into { section: { key: value } }. Keys written before any
+    # [section] land in the top level directly, which is how single-section
+    # config files are usually written.
+    static task parse(source) {
+        when source == nil { give {} }
+        give iniParse(str(source))
+    }
+
+    static task parseOr(source, fallback) {
+        try { give INI.parse(source) }
+        catch (e) { give fallback }
+    }
+
+    static task load(path) { give INI.parse(readFile(path)) }
+
+    static task isValid(source) {
+        try {
+            INI.parse(source)
+            give true
+        }
+        catch (e) { give false }
+    }
+
+    # Serialise back to INI text. Round-trips: values that would be re-read
+    # as another type are quoted.
+    static task stringify(data) { give iniEmit(data) }
+
+    static task save(path, data) {
+        writeFile(path, iniEmit(data))
+        give true
+    }
+
+    # ── access ──────────────────────────────────────────────────────────────
+
+    # Read "section.key" (or just "key" for the top level) with a fallback.
+    # Reaching into a missing section is the most common way INI code breaks;
+    # this makes it a one-liner that cannot throw.
+    static task get(data, path, fallback) {
+        parts = split(str(path), ".")
+        when len(parts) == 1 {
+            when has_key(data, parts[0]) { give data[parts[0]] }
+            give fallback
+        }
+        section = parts[0]
+        key = join(slice(parts, 1, len(parts)), ".")
+        when has_key(data, section) == false { give fallback }
+        holder = data[section]
+        when typeOf(holder) != "dictionary" { give fallback }
+        when has_key(holder, key) { give holder[key] }
+        give fallback
+    }
+
+    static task has(data, path) {
+        marker = "__ini_missing__"
+        give INI.get(data, path, marker) != marker
+    }
+
+    # Section names, excluding top-level keys.
+    #
+    # Sorted, because dictionary key order is unspecified in EZ -- returning
+    # it raw would make the result vary between runs. Document order is not
+    # preserved by the parser, so alphabetical is the only stable choice.
+    static task sections(data) {
+        found = []
+        get k in keys(data) {
+            when typeOf(data[k]) == "dictionary" { push(found, k) }
+        }
+        give sort(found)
+    }
+}

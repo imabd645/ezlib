@@ -1,324 +1,226 @@
-# ezlib — The EZ Standard Library Registry
+# ezlib — the EZ standard library
 
-> The official central package registry for the [EZ Programming Language](https://github.com/imabd645/EZ-language).  
-> Every package installed via `ez install` is sourced from this repository.
+Every package published to [packages.ez-lang.site](https://packages.ez-lang.site),
+at the version currently released. **69 packages.**
 
----
+This repository is a snapshot of the registry, not the source of truth for it.
+The registry is what `ez install` talks to; this is here to be read, diffed and
+browsed.
 
-## What is this?
-
-`ezlib` is the monorepo that hosts all official standard libraries for EZ. When you run `ez install <package>`, the EZ package manager downloads the corresponding folder from this repository, reads its `package.ez` manifest, and installs it to `C:/ezlib` on your machine — making it immediately available to any EZ script via `use`.
-
-No separate registry server. No account required. GitHub is the registry.
-
----
-
-## Installing a Package
+## Installing
 
 ```
-ez install <package>
+ez install postgres
+ez install httpx text cron
 ```
 
-That's it. The EZ interpreter handles downloading, extracting, and resolving dependencies automatically.
-
-**Examples:**
-
-```
-ez install math
-ez install gui
-ez install collections
-ez install datetime
-ez install database
-ez install http
-ez install orm
-ez install ai
-ez install fs
-ez install os
-ez install pdf
-```
-
-After installation, use any package in your script:
+Packages install into the shared library root — `C:\ezlib` by default, or
+wherever `EZLIB_PATH` points — so the compiler resolves `use "postgres"` from
+there without any per-project setup. Dependencies come down with the package,
+and `ez.lock` records the exact versions.
 
 ```ez
-use "math"
-use "gui"
-use "collections"
+use "postgres"
+use "httpx"
 ```
 
----
-
-## Available Packages
-
-| Package | Install Command | Description |
-|---------|----------------|-------------|
-| **ezmath** | `ez install math` | Vector math (`Vector2`, `Vector3`), statistics, trigonometry, lerp, clamp |
-| **ezgui** | `ez install gui` | Native Win32 GUI — windows, buttons, inputs, dropdowns, panels, tabs, dark mode |
-| **ezcollections** | `ez install collections` | `Set`, `Map`, `Queue`, `Stack`, `List`, `Counter` data structures |
-| **ezdatetime** | `ez install datetime` | Timestamps, date formatting, arithmetic, leap year, timezone offset |
-| **ezdb** | `ez install database` | SQLite wrapper — parameterized queries, CRUD, transactions |
-| **ezhttp** | `ez install http` | HTTP client — GET, POST, custom headers, response handling |
-| **ezorm** | `ez install orm` | Object-relational mapper built on top of ezdb |
-| **ezai** | `ez install ai` | AI integration utilities for building intelligent EZ applications |
-| **ezfs** | `ez install fs` | File system — read, write, copy, move, list directories |
-| **ezos** | `ez install os` | OS interaction — environment variables, processes, system info |
-| **ezpdf** | `ez install pdf` | PDF generation and manipulation |
-
----
-
-## Quick Start Examples
-
-### Math & Statistics
-
-```ez
-use "math"
-
-// Vector operations
-pos = Vector3(10, 5, 0)
-dir = Vector3(1, 1, 0).normalize()
-out str(pos.dot(dir))
-
-// Statistics
-scores = [85, 92, 78, 95, 88]
-stats = Statistics(scores)
-out "Average: " + str(stats.mean())
-out "Std Dev: " + str(stats.stddev())
-
-// Trigonometry (degrees)
-out "sin(45°) = " + str(sind(45))
-```
-
-### GUI Application
-
-```ez
-use "gui"
-
-gui.setTheme("dark")
-win = gui.window("My App", 800, 600)
-
-// Screen switching pattern
-mainView = win.panel(0, 0, 800, 600)
-settingsView = win.panel(0, 0, 800, 600).hide()
-
-mainView.label("Welcome to EZ!", 20, 20, 300, 40)
-mainView.button("Go to Settings", 20, 80, 160, 36, || {
-    mainView.hide()
-    settingsView.show()
-})
-
-settingsView.label("Settings", 20, 20, 200, 40)
-settingsView.button("Back", 20, 80, 100, 36, || {
-    settingsView.hide()
-    mainView.show()
-})
-
-win.run()
-```
-
-### Collections
-
-```ez
-use "collections"
-
-// Set — unique elements
-s = Set().add(1).add(2).add(1)
-out str(s.has(2))   // true
-out str(s.size())   // 2
-
-// Map — key-value pairs
-m = Map().set("name", "EZ").set("version", "1.0")
-out m.get("name")   // EZ
-
-// Queue — FIFO
-q = Queue().enqueue("first").enqueue("second")
-out q.dequeue()     // first
-
-// Stack — LIFO
-st = Stack().push(10).push(20)
-out str(st.pop())   // 20
-```
-
-### DateTime
-
-```ez
-use "datetime"
-
-// Current date and time
-out "Today: " + dateNow()
-out "Now:   " + format(now())
-
-// Create a specific timestamp
-birthday = makeTimestamp(1995, 6, 15, 0, 0, 0)
-out "Birthday: " + dateStr(birthday)
-
-// Date arithmetic
-nextWeek = addTime(now(), 7, 0, 0, 0)
-out "Next week: " + format(nextWeek)
-
-// Difference
-out str(diffDays(nextWeek, now())) + " days away"
-```
-
-### Database
-
-```ez
-use "database"
-
-db = openDatabase("app.db")
-db.createTable("users", ["id INTEGER PRIMARY KEY", "name TEXT", "age INTEGER"])
-
-// Insert with dictionary
-id = db.insert("users", {name: "Alice", age: 30})
-out "Inserted ID: " + str(id)
-
-// Parameterized query
-results = db.query("SELECT * FROM users WHERE age > ?", [25])
-get user in results {
-    out user.name + " — " + str(user.age)
-}
-
-db.disconnect()
-```
-
-### HTTP
-
-```ez
-use "http"
-
-// Simple GET
-response = http.get("https://api.example.com/data")
-out response.body
-
-// POST with JSON
-response = http.post("https://api.example.com/users", {
-    name: "Alice",
-    email: "alice@example.com"
-})
-out str(response.status)
-```
-
----
-
-## How the Package Manager Works
-
-When you run `ez install <name>`, the EZ interpreter:
-
-1. Constructs the download URL from this repository
-2. Downloads the package folder as a `.zip` archive via `curl`
-3. Extracts it to `C:/ezlib/<name>/`
-4. Reads `package.ez` to find the entry point and any dependencies
-5. Recursively installs dependencies
-6. Saves metadata to `C:/ezlib/packages.json`
-
-At runtime, `use "name"` resolves through this chain:
+To reproduce this whole tree:
 
 ```
-local file → C:/ezlib/name → package.ez main field
-           → C:/ezlib/name.ez → C:/ezlib/name/main.ez
+ez install <every name below>
 ```
 
-### Package Manifest Format
+## What's here
 
-Every package in this registry includes a `package.ez` manifest:
+### Web and HTTP
 
-```json
-{
-  "name": "math",
-  "version": "2.0.0",
-  "description": "Math utilities for EZ",
-  "author": "imabd645",
-  "main": "math.ez",
-  "dependencies": {}
-}
+| package | ver | |
+|---|---|---|
+| **web** | 1.0.0 | Flask/Express style web framework |
+| **serve** | 1.0.0 | Flask/Express style web framework |
+| **httpx** | 1.0.0 | HTTP client over WinHTTP — real status codes and response headers, any verb, byte-exact bodies, JSON and form helpers, retries, downloads |
+| **http** | 1.0.0 | HTTP client with Request/Response models, retries, timeouts, interceptors |
+| **websocket** | 1.0.0 | RFC 6455 client over pure TCP — handshake, masking, fragmentation, ping/pong, close |
+| **socket** | 1.0.0 | TCP and UDP over pure FFI — hostname resolution, timeouts, binary-safe transfers |
+| **auth** | 1.0.0 | Session authentication, password hashing and CSRF for the web framework |
+| **oauth** | 1.0.0 | OAuth 2.0 client — authorization code flow with PKCE, refresh, client credentials, and presets for Google, GitHub, Microsoft, Discord, Slack, GitLab, Spotify, LinkedIn, Facebook, Twitch |
+| **jwt** | 1.0.0 | JSON Web Tokens, HS256 |
+| **ratelimit** | 1.0.0 | Request throttling — sliding window and token bucket, in-memory or Redis-backed, with the conventional headers |
+| **template** | 1.0.0 | Templating with variables, filters, conditionals and loops, HTML autoescaping by default |
+
+### Databases and storage
+
+| package | ver | |
+|---|---|---|
+| **postgres** | 1.0.0 | PostgreSQL over libpq — parameterised queries, pooling, transactions with savepoints and retry, full type mapping, SQLSTATE-aware errors |
+| **sqlite** | 1.0.0 | SQLite over pure FFI — prepared statements, transactions, migrations |
+| **db** | 1.0.0 | SQLite framework with CRUD helpers, query builders and transactions |
+| **orm** | 1.1.0 | SQLAlchemy-style ORM — models, relationships, identity map, sessions |
+| **migrate** | 1.0.0 | Schema migrations — ordered up/down steps, a ledger, transactional application, drift detection |
+| **redis** | 1.0.0 | Redis over pure TCP — RESP, strings, hashes, lists, sets, expiry, URL connection strings |
+| **s3** | 1.0.0 | S3-compatible object storage — Signature V4, presigned URLs, presets for R2, Spaces and MinIO |
+| **cache** | 1.0.0 | In-memory caching — TTL expiry, LRU eviction, compute-on-miss, memoisation, hit-rate stats |
+| **queue** | 1.0.0 | Background job queues — in-memory and Redis drivers, delayed jobs, retries with backoff, stalled-job recovery |
+
+### Data formats
+
+| package | ver | |
+|---|---|---|
+| **json** | 1.0.0 | JSON parser and stringifier |
+| **yaml** | 1.0.0 | YAML — mappings, sequences, flow collections, block scalars, round-trip stringify |
+| **toml** | 1.0.0 | TOML — nested tables, arrays of tables, inline tables, round-trip serialisation |
+| **ini** | 1.0.0 | INI — sections, typed values, comments, quoting, round-trip serialisation |
+| **xml** | 1.0.0 | XML parser and builder — attributes, CDATA, comments, entities, find/findAll |
+| **csv** | 1.0.0 | CSV parser and stringifier, RFC 4180 |
+| **markdown** | 1.0.0 | Markdown to HTML with escape-first rendering that cannot emit raw HTML |
+| **diff** | 1.0.0 | Text and sequence diffing — LCS line/word/character diffs, unified patches, reversible edit scripts |
+
+### Security
+
+| package | ver | |
+|---|---|---|
+| **crypto** | 1.0.1 | AES-256, SHA hashing, HMAC, PBKDF2, Base64 |
+| **password** | 1.0.0 | PBKDF2-HMAC-SHA256 with per-hash salts and parameters, timing-safe verification, rehash detection |
+| **totp** | 1.0.0 | Time-based one-time passwords (RFC 6238/4226) — 2FA codes, base32, otpauth URIs |
+
+### Text, numbers and validation
+
+| package | ver | |
+|---|---|---|
+| **text** | 1.0.0 | String utilities that count characters, not bytes — slugs, case conversion, wrapping, truncation, pluralisation, masking, fuzzy comparison |
+| **regex** | 1.0.0 | Compiled patterns, match positions, capture groups, flags, split/replace, validators |
+| **decimal** | 1.0.0 | Exact decimal and money arithmetic — fixed-point, no float drift, rounding modes, remainder-safe splitting |
+| **math** | 1.0.0 | Numeric helpers, trigonometry, statistics, number theory, random sampling, geometry, vectors |
+| **validate** | 1.0.0 | Schema validation — chainable rules, coercion, every error reported at once |
+| **semver** | 1.0.0 | Semantic versions — parsing, comparison, caret/tilde/wildcard/interval ranges |
+| **ulid** | 1.0.0 | Sortable identifiers — 48-bit timestamp plus 80 bits of randomness, monotonic within a millisecond |
+| **i18n** | 1.0.0 | Translation and localisation — nested catalogues, interpolation, CLDR plural rules, locale-aware number and currency formatting |
+| **collections** | 1.0.0 | Set, Map, Queue, Stack, LinkedList, Deque, Counter |
+
+### Time and scheduling
+
+| package | ver | |
+|---|---|---|
+| **datetime** | 1.1.0 | Timestamps, components, formatting and arithmetic, plus real time zones with DST, ISO 8601 parsing, calendar maths and relative time |
+| **cron** | 1.0.0 | Cron expressions, next-occurrence calculation, and an in-process scheduler with failure handling |
+| **calendar** | 1.0.0 | Full month and year calendars |
+| **retry** | 1.0.0 | Retries, exponential backoff with jitter, and circuit breaking |
+| **taskschd** | 1.0.0 | Windows Task Scheduler |
+| **thread** | 1.0.0 | Multithreading and task management |
+
+### Command line
+
+| package | ver | |
+|---|---|---|
+| **args** | 1.0.0 | Argument parsing — flags, options, positionals, type coercion, choices, generated help |
+| **color** | 1.0.0 | ANSI colour and styling — 256-colour and truecolor, chainable styles, hex conversion, ANSI-aware width |
+| **table** | 1.0.0 | Terminal tables — auto-sized columns, alignment, truncation, several border styles including markdown |
+| **progress** | 1.0.0 | Progress bars and spinners — in-place animation, percentages, ETA, rates, byte formatting |
+| **testing** | 1.0.0 | Unit testing — assertions, suites, hooks, mocks, coloured reporting |
+| **log** | 1.0.0 | Logging with terminal colours and file sinks |
+
+### System
+
+| package | ver | |
+|---|---|---|
+| **os** | 1.0.0 | Env, paths, processes, shell, clipboard, system info, known directories |
+| **fs** | 1.0.0 | File handling |
+| **env** | 1.0.0 | `.env` files — parsing, validation, required-key checks, type coercion |
+| **ffi** | 1.0.0 | Native FFI, ctypes-style — type annotations, named structs, callbacks, unlimited arity |
+| **clipboard** | 1.0.0 | System clipboard |
+| **notify** | 1.0.0 | Desktop notifications and dialog prompts |
+| **auto** | 1.0.0 | Desktop automation — keyboard and mouse control |
+
+### Media and devices
+
+| package | ver | |
+|---|---|---|
+| **gui** | 1.0.0 | Native Win32 GUI |
+| **game** | 1.0.0 | GUI game engine |
+| **audio** | 1.0.0 | mp3 and wav playback |
+| **webcam** | 1.0.0 | Live webcam stream and photo capture |
+| **qr** | 1.0.0 | QR code generation via libqrencode |
+| **pdf** | 1.0.0 | PDF generation |
+
+### Messaging and services
+
+| package | ver | |
+|---|---|---|
+| **email** | 1.0.0 | SMTP — plain, HTML, attachments, CC/BCC, multiple recipients |
+| **mailer** | 1.0.0 | High-level mailer — HTML templates, connection pooling, presets for Gmail, SendGrid, Mailgun, AWS SES, Outlook |
+| **whatsapp** | 1.0.0 | WhatsApp Web client — Noise Protocol over WebSocket |
+| **ai** | 1.0.0 | OpenAI, Anthropic and Gemini in one call |
+
+## Dependencies
+
+Most packages stand alone. Those that don't:
+
+```
+auth      → web            oauth      → crypto        s3         → httpx, crypto
+jwt       → crypto         os         → fs            serve      → fs
+log       → fs             password   → crypto        table      → color
+mailer    → email          progress   → color         taskschd   → os, csv
+migrate   → orm            queue      → redis         totp       → crypto
+                           redis      → socket        websocket  → socket, crypto
 ```
 
----
+`ez install` resolves these for you.
 
-## Creating Your Own Package
+## Platform
 
-You can scaffold a new package with:
+EZ runs on Windows, and a good number of these packages bind directly to
+Windows APIs through the FFI rather than shipping a native module:
 
-```
-ez init mypackage
-```
+- `crypto` and `password` — CryptoAPI and BCrypt
+- `httpx` — WinHTTP
+- `datetime` — the Windows time-zone database, for DST
+- `gui`, `game`, `audio`, `webcam`, `clipboard`, `notify`, `auto`, `os`,
+  `taskschd` — Win32
+- `socket`, `sqlite`, `ffi` — FFI with no C++ in the interpreter
 
-This creates:
+Three need a library that does not ship with Windows:
 
-```
-mypackage/
-  package.ez    ← manifest
-  main.ez       ← entry point
-```
+- `postgres` — `libpq.dll`, from a PostgreSQL install (the client alone is
+  enough). It searches `PATH`, the usual install directories, and a local
+  `dlls/` folder.
+- `qr` — `libqrencode`
+- `email` — `libcurl`
 
-A minimal `package.ez`:
+## Tests
 
-```json
-{
-  "name": "mypackage",
-  "version": "1.0.0",
-  "description": "My EZ package",
-  "main": "main.ez"
-}
-```
-
-To make it installable, push it to GitHub as `imabd645/EZ<name>` and anyone can install it with `ez install <name>`.
-
----
-
-## Listing Installed Packages
+34 of the 69 packages ship a `test.ez` you can run directly:
 
 ```
-ez list
+cd postgres
+ez test.ez
 ```
 
-Output:
+Those suites run against real dependencies rather than mocks where it matters —
+`postgres` against a live server, `httpx` and `s3` against real HTTPS
+endpoints, `redis` against a real Redis. They skip with a reported count when
+the dependency is not there rather than passing quietly.
+
+## Contributing
+
+Packages are published to the registry, not merged here:
 
 ```
-Installed packages:
- - math (2.0.0)
- - gui (6.0.0)
- - collections (1.0.0)
- - datetime (2.0.0)
+cd mypackage
+ez publish
 ```
 
----
+A package needs a `package.ez` manifest with `name`, `version`, `main` and
+`description`. Published versions are immutable — to change something, publish
+a new version.
 
-## Repository Structure
+Two things worth knowing before writing EZ library code, both of which cause
+silent breakage rather than an error:
 
-```
-ezlib/
-├── ezai/           ← AI integration utilities
-├── ezcollections/  ← Data structures (Set, Map, Queue, Stack, List)
-├── ezdatetime/     ← Date and time manipulation
-├── ezdb/           ← SQLite database wrapper
-├── ezfs/           ← File system utilities
-├── ezgui/          ← Native Win32 GUI framework
-├── ezhttp/         ← HTTP client
-├── ezmath/         ← Math, vectors, statistics, trigonometry
-├── ezorm/          ← Object-relational mapper
-├── ezos/           ← OS and system utilities
-└── ezpdf/          ← PDF generation
-├── ezserve/        ← A Web server in EZ
-├── eztest/         ← A testing Framework for EZ
-└── ezregex/        ← Regex libarary for EZ
-```
-
----
-
-## Requirements
-
-- [EZ Language Interpreter](https://github.com/imabd645/EZ-language) — Windows (x64)
-- `curl` available in PATH (used by the package manager for downloads)
-- `tar` available in PATH (used for extraction — included in Windows 10+)
-
----
+- Assigning to a **builtin** name (`num = 0`) replaces it for the whole
+  process, so every later `num(...)` fails.
+- Assigning to a name that matches a **task declared earlier in the same file**
+  does the same to that task. A task declared *below* the assignment is safe.
 
 ## License
 
-All packages in this registry are licensed under the MIT License.
-
----
-
-## Links
-
-- [EZ Language Interpreter](https://github.com/imabd645/EZ-language) — The core interpreter
-
+Each package carries its own licence; all are MIT.

@@ -1,0 +1,24 @@
+{
+    "name": "os",
+    "version": "1.0.0",
+    "description": "Production-grade OS utilities for EZ \u2014 env, paths, processes, shell, clipboard, system info, and known directories (Windows FFI)",
+    "author": "EZ Development Team",
+    "main": "main.ez",
+    "dependencies": {
+        "fs": "*"
+    },
+    "exports": [
+        "os",
+        "OS",
+        "OSEnv",
+        "OSPath",
+        "OSProcess",
+        "OSClipboard",
+        "OSShell",
+        "OSDirs",
+        "OSSystem",
+        "OSError",
+        "EnvError",
+        "ProcessError"
+    ]
+}

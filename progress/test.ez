@@ -1,0 +1,183 @@
+# ============================================================================
+# progress — test suite
+#   ez test.ez
+#
+# Rendering is tested directly. The in-place drawing path needs the `write`
+# builtin and a real terminal, so it is exercised only for not throwing.
+# ============================================================================
+
+use "progress"
+use "color"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+out "progress tests"
+Color.enable()
+
+# ── state ───────────────────────────────────────────────────────────────────
+b = ProgressBar(10)
+check("starts at zero", b.current, 0)
+check("zero percent", b.percent(), 0)
+check("not complete", b.isComplete(), false)
+
+b.update(5)
+check("update sets value", b.current, 5)
+check("half is fifty percent", b.percent(), 50)
+check("ratio", b.ratio(), 0.5)
+
+b.increment()
+check("increment", b.current, 6)
+b.advance(2)
+check("advance", b.current, 8)
+
+# Values outside the range are clamped, so a miscounted loop cannot produce
+# a bar longer than its box or a negative one.
+b.update(999)
+check("clamped at total", b.current, 10)
+check("complete", b.isComplete(), true)
+check("hundred percent", b.percent(), 100)
+b.update(-5)
+check("clamped at zero", b.current, 0)
+
+# A total of zero is legal and must not divide by zero.
+z = ProgressBar(0)
+check("zero total ratio", z.ratio(), 0)
+check("zero total percent", z.percent(), 0)
+check("zero total never complete", z.isComplete(), false)
+check("nil total treated as zero", ProgressBar(nil).total, 0)
+
+# ── rendering ───────────────────────────────────────────────────────────────
+r = ProgressBar(10).sized(10)
+r.update(0)
+empty = r.render()
+check("empty bar has no fill", contains(empty, "="), false)
+check("shows zero percent", contains(empty, "0%"), true)
+check("shows count", contains(empty, "(0/10)"), true)
+
+r.update(10)
+full = r.render()
+check("full bar is filled", contains(full, "=========="), true)
+check("shows hundred", contains(full, "100%"), true)
+
+r.update(5)
+half = r.render()
+check("half has fill", contains(half, "====="), true)
+check("half has head", contains(half, ">"), true)
+
+# The bar keeps a constant width whatever the progress, or the line jitters.
+widths = []
+repeat i = 0 to 10 {
+    r.update(i)
+    body = r.render()
+    open1 = indexOf(body, "[")
+    close1 = indexOf(body, "]")
+    push(widths, close1 - open1)
+}
+constant = true
+get w in widths { when w != widths[0] { constant = false } }
+check("bar width is constant", constant, true)
+
+# ── configuration ───────────────────────────────────────────────────────────
+check("label appears", contains(ProgressBar(2).titled("Loading").render(), "Loading"), true)
+check("custom size", contains(ProgressBar(1).sized(4).update(1).render(), "===="), true)
+check("solid style", contains(ProgressBar(4).sized(4).solid().update(4).render(), "█"), true)
+check("solid empty char", contains(ProgressBar(4).sized(4).solid().update(0).render(), "░"), true)
+check("without count", contains(ProgressBar(10).withoutCount().render(), "(0/10)"), false)
+check("without percent", contains(ProgressBar(10).withoutPercent().render(), "0%"), false)
+check("chainable", ProgressBar(5).titled("x").sized(8).withEta().width, 8)
+
+# Colour must not change the visible width.
+plainBar = ProgressBar(10).sized(10).update(5)
+colourBar = ProgressBar(10).sized(10).colored().update(5)
+check("colour adds escapes", contains(colourBar.render(), chr(27)), true)
+check("colour keeps visible width",
+      visibleLength(colourBar.render()), visibleLength(plainBar.render()))
+
+# ── timing ──────────────────────────────────────────────────────────────────
+e = ProgressBar(10)
+check("elapsed is non-negative", e.elapsed() >= 0, true)
+# ETA is unknown until there is something to extrapolate from; guessing off a
+# single sample is worse than admitting it.
+check("eta unknown at zero", e.eta(), -1)
+check("eta unknown with no total", ProgressBar(0).eta(), -1)
+# Let real time pass: with zero elapsed there is nothing to extrapolate from,
+# and eta() correctly refuses rather than dividing by zero.
+until = clock() + 15
+while clock() < until { }
+e.update(5)
+check("eta known after progress", e.eta() >= 0, true)
+check("rate is non-negative", e.rate() >= 0, true)
+check("summary includes elapsed", contains(e.summary(), "in "), true)
+
+# ── output paths ────────────────────────────────────────────────────────────
+# draw() falls back to whole lines when `write` is unavailable, so it must not
+# throw either way.
+d = ProgressBar(3)
+threw = false
+try {
+    d.draw()
+    d.step()
+    d.finish()
+}
+catch (ex) { threw = true }
+check("draw path does not throw", threw, false)
+check("finish fills the bar", d.current, 3)
+check("finish marks finished", d.finished, true)
+
+s2 = ProgressBar(3)
+s2.update(1)
+s2.stopHere()
+check("stopHere does not fill", s2.current, 1)
+check("stopHere marks finished", s2.finished, true)
+
+# ── spinner ─────────────────────────────────────────────────────────────────
+sp = Spinner("working")
+check("spinner shows label", contains(sp.render(), "working"), true)
+first = sp.frame()
+sp.index = 1
+check("frame advances", sp.frame() != first, true)
+# Frames cycle rather than running off the end.
+sp.index = len(sp.frames)
+check("frames wrap around", sp.frame(), first)
+check("custom frames", Spinner("x").withFrames(["a", "b"]).frame(), "a")
+check("dots preset", len(Spinner("x").dots().frames), 10)
+check("spinner elapsed", Spinner("x").elapsed() >= 0, true)
+
+spThrew = false
+try {
+    t2 = Spinner("x")
+    t2.tick()
+    t2.done("finished")
+    Spinner("y").failed("broke")
+}
+catch (ex) { spThrew = true }
+check("spinner output does not throw", spThrew, false)
+
+# ── formatting ──────────────────────────────────────────────────────────────
+check("bytes below a kilobyte", humanBytes(500), "500 B")
+check("kilobytes", humanBytes(1536), "1.5 KB")
+check("exact kilobyte", humanBytes(1024), "1 KB")
+check("megabytes", humanBytes(1048576), "1 MB")
+check("gigabytes", humanBytes(1073741824), "1 GB")
+check("zero bytes", humanBytes(0), "0 B")
+
+check("seconds", formatSeconds(45), "45s")
+check("minutes", formatSeconds(90), "1m30s")
+check("hours", formatSeconds(3700), "1h1m")
+check("zero", formatSeconds(0), "0s")
+check("negative clamps", formatSeconds(-5), "0s")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

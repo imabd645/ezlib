@@ -1,0 +1,8 @@
+{
+  "name": "ai",
+  "version": "1.0.0",
+  "description": "AI standard library for EZ — call OpenAI, Anthropic, and Gemini with one line",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "dependencies": {}
+}

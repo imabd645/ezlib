@@ -1,0 +1,181 @@
+# ============================================================================
+# color — terminal colour and styling for EZ
+#
+#   use "color"
+#
+#   out red("error: ") + "something went wrong"
+#   out Color.green().bold().text("done")
+#
+# Colour is applied by wrapping text in escape codes and always closing them,
+# so nothing bleeds into later output. Turning colour off is global and makes
+# every helper a no-op, which is what redirecting to a file wants.
+# ============================================================================
+
+use "color/codes.ez"
+
+enabled = true
+
+export model Color {
+
+    init() {
+        self.codes = []
+    }
+
+    # ── enabling ────────────────────────────────────────────────────────────
+
+    # Turn colour off process-wide. Every helper then returns plain text, so
+    # calling code needs no conditionals.
+    static task disable() { enabled = false  give nil }
+    static task enable() { enabled = true  give nil }
+    static task isEnabled() { give enabled }
+
+    # ── building ────────────────────────────────────────────────────────────
+
+    static task of() { give Color() }
+
+    task add(code) {
+        push(self.codes, code)
+        give self
+    }
+
+    task foreground(name) {
+        when has_key(FG, name) == false { throw Exception(`color: no such colour '{name}'`) }
+        give self.add(FG[name])
+    }
+
+    task background(name) {
+        when has_key(BG, name) == false { throw Exception(`color: no such colour '{name}'`) }
+        give self.add(BG[name])
+    }
+
+    task style(name) {
+        when has_key(STYLE, name) == false { throw Exception(`color: no such style '{name}'`) }
+        give self.add(STYLE[name])
+    }
+
+    # 256-colour palette, for terminals that support it.
+    task fg256(index) { give self.add("38;5;" + str(index % 256)) }
+    task bg256(index) { give self.add("48;5;" + str(index % 256)) }
+
+    # 24-bit colour. Not every terminal renders it; the 256 palette is safer.
+    task rgb(r, g, b) { give self.add("38;2;" + str(r) + ";" + str(g) + ";" + str(b)) }
+    task bgRgb(r, g, b) { give self.add("48;2;" + str(r) + ";" + str(g) + ";" + str(b)) }
+
+    # "#ff8800" or "ff8800"
+    task hex(code) {
+        parts = hexToRgb(code)
+        give self.rgb(parts[0], parts[1], parts[2])
+    }
+
+    task bgHex(code) {
+        parts = hexToRgb(code)
+        give self.bgRgb(parts[0], parts[1], parts[2])
+    }
+
+    # Named shorthands, so a chain reads as a sentence.
+    task black() { give self.foreground("black") }
+    task red() { give self.foreground("red") }
+    task green() { give self.foreground("green") }
+    task yellow() { give self.foreground("yellow") }
+    task blue() { give self.foreground("blue") }
+    task magenta() { give self.foreground("magenta") }
+    task cyan() { give self.foreground("cyan") }
+    task white() { give self.foreground("white") }
+    task gray() { give self.foreground("gray") }
+
+    task onBlack() { give self.background("black") }
+    task onRed() { give self.background("red") }
+    task onGreen() { give self.background("green") }
+    task onYellow() { give self.background("yellow") }
+    task onBlue() { give self.background("blue") }
+    task onWhite() { give self.background("white") }
+
+    task bold() { give self.style("bold") }
+    task dim() { give self.style("dim") }
+    task italic() { give self.style("italic") }
+    task underline() { give self.style("underline") }
+    task inverse() { give self.style("inverse") }
+    task strike() { give self.style("strike") }
+
+    # Wrap the text. Always closes with a reset, even when several codes are
+    # applied -- an unclosed sequence colours the shell prompt after exit.
+    task text(value) {
+        body = str(value)
+        when enabled == false { give body }
+        when len(self.codes) == 0 { give body }
+        prefix = ""
+        get code in self.codes { prefix = prefix + sgr(code) }
+        give prefix + body + RESET
+    }
+}
+
+# ── hex conversion ──────────────────────────────────────────────────────────
+
+task hexDigit(c) {
+    code = ord(upper(c))
+    when code >= 48 and code <= 57 { give code - 48 }
+    when code >= 65 and code <= 70 { give code - 55 }
+    give -1
+}
+
+# "#ff8800" / "ff8800" / "#f80" -> [r, g, b]
+export task hexToRgb(code) {
+    body = upper(trim(str(code)))
+    when startsWith(body, "#") { body = substr(body, 1, len(body) - 1) }
+
+    # Short form: each digit is doubled, so #f80 is #ff8800.
+    when len(body) == 3 {
+        expanded = ""
+        repeat i = 0 to 2 {
+            c = substr(body, i, 1)
+            expanded = expanded + c + c
+        }
+        body = expanded
+    }
+    when len(body) != 6 { throw Exception(`color: '{code}' is not a hex colour`) }
+
+    parts = []
+    repeat i = 0 to 2 {
+        high = hexDigit(substr(body, i * 2, 1))
+        low = hexDigit(substr(body, i * 2 + 1, 1))
+        when high < 0 or low < 0 { throw Exception(`color: '{code}' is not a hex colour`) }
+        push(parts, high * 16 + low)
+    }
+    give parts
+}
+
+export task rgbToHex(r, g, b) {
+    digits = "0123456789abcdef"
+    body = "#"
+    get part in [r, g, b] {
+        value = part % 256
+        when value < 0 { value = 0 }
+        high = (value - (value % 16)) / 16
+        body = body + substr(digits, high, 1) + substr(digits, value % 16, 1)
+    }
+    give body
+}
+
+# ── one-call helpers ────────────────────────────────────────────────────────
+# The common case is one colour on one string, so it should not need a chain.
+
+export task red(text) { give Color().red().text(text) }
+export task green(text) { give Color().green().text(text) }
+export task yellow(text) { give Color().yellow().text(text) }
+export task blue(text) { give Color().blue().text(text) }
+export task magenta(text) { give Color().magenta().text(text) }
+export task cyan(text) { give Color().cyan().text(text) }
+export task white(text) { give Color().white().text(text) }
+export task gray(text) { give Color().gray().text(text) }
+export task bold(text) { give Color().bold().text(text) }
+export task dim(text) { give Color().dim().text(text) }
+export task italic(text) { give Color().italic().text(text) }
+export task underline(text) { give Color().underline().text(text) }
+
+# Semantic helpers, so a program's output is consistent without every call
+# site choosing a colour.
+export task success(text) { give Color().green().bold().text(text) }
+export task failure(text) { give Color().red().bold().text(text) }
+export task warning(text) { give Color().yellow().text(text) }
+export task info(text) { give Color().cyan().text(text) }
+export task muted(text) { give Color().gray().text(text) }

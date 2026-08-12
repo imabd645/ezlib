@@ -1,0 +1,252 @@
+// ============================================================================
+// thread — test suite
+//
+//   ez thread/test_thread.ez        (run from C:/ezlib)
+// ============================================================================
+use "thread"
+
+passed = 0
+failed = 0
+
+task check(label, cond) {
+    when cond {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label
+    }
+}
+
+task checkEq(label, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label + " -- got " + str(actual) + ", expected " + str(expected)
+    }
+}
+
+task checkThrows(label, fn) {
+    threw = false
+    try { fn() } catch (e) { threw = true }
+    check(label, threw)
+}
+
+task double(n) { give n * 2 }
+task boom(n) { throw "boom " + str(n) }
+task slow(n) { wait(60) give n }
+
+out "== The interpreter's own primitives are used directly =="
+f = spawn(double, 21)
+checkEq("spawn + await", await(f), 42)
+checkEq("awaitAll keeps order", str(awaitAll([spawn(double, 1), spawn(double, 2), spawn(double, 3)])), str([2, 4, 6]))
+checkEq("isDone is false while running", isDone(spawn(slow, 1)), false)
+d = spawn(double, 5)
+await(d)
+checkEq("isDone is true once finished", isDone(d), true)
+
+out ""
+out "== Removed wrappers are gone, not shadowing builtins =="
+// `all`, `race`, `sleep`, `delay`, `Mutex` and a package `Channel` used to be
+// defined here. They duplicated builtins -- and the sync ones were unsafe.
+//
+// There is deliberately no `typeOf(all) == "nil"` check for them: naming an
+// identifier that was never declared is a compile-time Type Error in EZ, not a
+// nil value, so the assertion could not even run -- it took this whole file down
+// before a single test executed. Their absence is instead proven by the awaitAll
+// / awaitAny / wait checks above, which exercise the builtins those wrappers used
+// to shadow.
+checkEq("Channel is the native class", typeOf(Channel), "model")
+check("native Channel has tryReceive", typeOf(Channel().tryReceive) != "nil")
+
+out ""
+out "== allSettled =="
+rs = allSettled([spawn(double, 4), spawn(boom, 1), spawn(double, 5)])
+checkEq("one entry per future", len(rs), 3)
+checkEq("first succeeded", rs[0]["ok"], true)
+checkEq("first value", rs[0]["value"], 8)
+checkEq("second failed", rs[1]["ok"], false)
+check("second carries the error", contains(str(rs[1]["error"]), "boom"))
+checkEq("third still ran", rs[2]["value"], 10)
+
+out ""
+out "== any() returns the first SUCCESS =="
+// Distinct from native awaitAny, which returns the first future to settle even
+// if that one failed.
+checkEq("failures are skipped", any([spawn(boom, 1), spawn(double, 3)]), 6)
+checkThrows("all failing throws", | | { any([spawn(boom, 1), spawn(boom, 2)]) })
+checkThrows("an empty list throws", | | { any([]) })
+
+out ""
+out "== Parallel iteration =="
+checkEq("parallelMap", str(parallelMap([1, 2, 3], double)), str([2, 4, 6]))
+checkEq("parallelMap over nothing", len(parallelMap([], double)), 0)
+checkEq("parallelFilter keeps order", str(parallelFilter([1, 2, 3, 4], | n | { give n % 2 == 0 })), str([2, 4]))
+checkEq("parallelMapBatched matches parallelMap",
+        str(parallelMapBatched([1, 2, 3, 4, 5], double, 2)), str([2, 4, 6, 8, 10]))
+checkEq("times", str(times(4, | i | { give i * i })), str([0, 1, 4, 9]))
+checkEq("sequential", str(sequential([| | { give 1 }, | | { give 2 }])), str([1, 2]))
+
+counter = Atomic(0)
+parallelForEach([1, 2, 3, 4, 5], | n | { counter.add(1) })
+checkEq("parallelForEach visits every item", counter.get(), 5)
+
+out ""
+out "== TaskGroup =="
+g = createGroup()
+g.add(double, 3)
+g.add(double, 4)
+checkEq("group size", g.size(), 2)
+checkEq("waitAll gives results in order", str(g.waitAll()), str([6, 8]))
+
+g2 = createGroup()
+g2.add(double, 1)
+g2.add(boom, 1)
+st = g2.waitSettled()
+checkEq("waitSettled never throws", len(st), 2)
+checkEq("waitSettled records the failure", st[1]["ok"], false)
+
+out ""
+out "== Semaphore actually bounds concurrency =="
+// The old semaphore checked `count <= 0` and decremented as two separate
+// steps, so threads raced past the limit. This asserts the bound holds.
+sem = Semaphore(2)
+checkEq("starts with all permits free", sem.available(), 2)
+checkEq("max is reported", sem.max(), 2)
+sem.acquire()
+checkEq("acquire takes one", sem.available(), 1)
+sem.release()
+checkEq("release returns it", sem.available(), 2)
+checkEq("tryAcquire succeeds when free", sem.tryAcquire(), true)
+sem.tryAcquire()
+checkEq("tryAcquire fails when exhausted", sem.tryAcquire(), false)
+sem.release()
+sem.release()
+checkThrows("acquireTimeout throws when none free", | | {
+    s = Semaphore(1)
+    s.acquire()
+    s.acquireTimeout(20)
+})
+checkThrows("a semaphore needs at least one permit", | | { Semaphore(0) })
+
+live = Atomic(0)
+peak = Atomic(0)
+limiter = Semaphore(2)
+task bounded(n) {
+    limiter.acquire()
+    cur = live.add(1)
+    when cur > peak.get() { peak.set(cur) }
+    wait(20)
+    live.sub(1)
+    limiter.release()
+    give n
+}
+awaitAll([spawn(bounded, 1), spawn(bounded, 2), spawn(bounded, 3),
+          spawn(bounded, 4), spawn(bounded, 5), spawn(bounded, 6)])
+check("never more than 2 ran at once (peak was " + str(peak.get()) + ")", peak.get() <= 2)
+
+out ""
+out "== WorkerPool =="
+pool = WorkerPool(2)
+checkEq("mapAll keeps input order", str(pool.mapAll([1, 2, 3, 4], double)), str([2, 4, 6, 8]))
+
+plive = Atomic(0)
+ppeak = Atomic(0)
+pool2 = WorkerPool(3)
+pool2.mapAll([1, 2, 3, 4, 5, 6, 7, 8], | n | {
+    cur = plive.add(1)
+    when cur > ppeak.get() { ppeak.set(cur) }
+    wait(15)
+    plive.sub(1)
+    give n
+})
+check("pool of 3 never exceeded 3 (peak was " + str(ppeak.get()) + ")", ppeak.get() <= 3)
+
+out ""
+out "== withTimeout =="
+checkEq("fast work returns its value", withTimeout(spawn(double, 8), 2000), 16)
+checkThrows("slow work times out", | | { withTimeout(spawn(slow, 1), 5) })
+checkThrows("a thrown error propagates", | | { withTimeout(spawn(boom, 1), 2000) })
+checkEq("timeoutFn runs the function", timeoutFn(| | { give 7 }, 2000), 7)
+
+out ""
+out "== Deferred =="
+df = deferred()
+spawn(| | { wait(20) df.resolve(99) })
+checkEq("resolve delivers the value", await(df.future), 99)
+
+dr = deferred()
+spawn(| | { wait(20) dr.reject("nope") })
+checkThrows("reject surfaces as an error", | | { await(dr.future) })
+
+out ""
+out "== retry =="
+attempts = Atomic(0)
+r = retry(| | {
+    n = attempts.add(1)
+    when n < 3 { throw "not yet" }
+    give "ok"
+}, 5, 1)
+checkEq("retry eventually succeeds", r, "ok")
+checkEq("retry stopped as soon as it worked", attempts.get(), 3)
+
+failing = Atomic(0)
+checkThrows("retry gives up and rethrows", | | {
+    retry(| | { failing.add(1) throw "always" }, 3, 1)
+})
+checkEq("retry made exactly maxAttempts tries", failing.get(), 3)
+checkEq("retryBackoff also succeeds", retryBackoff(| | { give 5 }, 3, 1, 10), 5)
+
+out ""
+out "== Progress reporting =="
+futs = [spawn(slow, 1), spawn(slow, 2)]
+check("pending counts unfinished work", pending(futs) >= 0)
+awaitAll(futs)
+checkEq("nothing pending once awaited", pending(futs), 0)
+checkEq("settledSoFar sees them all", len(settledSoFar(futs)), 2)
+
+out ""
+out "== Rate limiting =="
+hits = Atomic(0)
+th = throttle(| | { give hits.add(1) }, 1000)
+th()
+th()
+th()
+checkEq("throttle allows one call per window", hits.get(), 1)
+
+memoHits = Atomic(0)
+m = memoize(| n | { memoHits.add(1) give n * 3 })
+checkEq("memoize returns the value", m(4), 12)
+m(4)
+m(4)
+checkEq("memoize only computed once", memoHits.get(), 1)
+
+rlHits = Atomic(0)
+rl = RateLimiter(2, 40)
+rl.run(| | { rlHits.add(1) })
+rl.run(| | { rlHits.add(1) })
+rl.run(| | { rlHits.add(1) })
+checkEq("RateLimiter ran everything (blocking, not dropping)", rlHits.get(), 3)
+checkThrows("RateLimiter needs a positive limit", | | { RateLimiter(0, 100) })
+
+out ""
+out "== Latch =="
+latch = Latch()
+checkEq("starts closed", latch.isOpen(), false)
+opened = Atomic(0)
+w = spawn(| | { latch.await() opened.add(1) give 1 })
+wait(20)
+latch.open()
+await(w)
+checkEq("waiters proceed once opened", opened.get(), 1)
+checkEq("reports open", latch.isOpen(), true)
+latch.open()
+checkEq("opening twice is harmless", latch.isOpen(), true)
+
+out ""
+out "========================================"
+out " passed: " + str(passed) + "   failed: " + str(failed)
+out "========================================"
+when failed > 0 { exit(1) }

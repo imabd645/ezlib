@@ -1,0 +1,46 @@
+// ============================================================================
+// ezos / dirs.ez -- well-known directories and path helpers.
+// ============================================================================
+
+use "ffi.ez"
+use "env.ez"
+use "path.ez"
+use "util.ez"
+
+export model OSDirs {
+    init() {
+        self._env = OSEnv()
+        self._path = OSPath()
+    }
+
+    task fromEnv(keys, fallback = nil) {
+        get k in keys {
+            val = self._env.get(k)
+            when typeOf(val) != "nil" and val != nil and val != "" { give val }
+        }
+        give fallback
+    }
+
+    task home() { give self.fromEnv(["USERPROFILE", "HOME"], "C:\\Users\\Default") }
+    task temp() {
+        buf = os_alloc(260)
+        n = os_call(OSFFI.getTempPath, "int", 260, buf)
+        when n == 0 or n > 260 {
+            os_free(buf)
+            give self.fromEnv(["TEMP", "TMP"], "C:\\Windows\\Temp")
+        }
+        output = os_read_string_ptr(buf)
+        os_free(buf)
+        give output
+    }
+
+    task userProfile() { give self.home() }
+    task appData() { give self.fromEnv(["APPDATA"], self._path.join(self.home(), "AppData\\Roaming")) }
+    task localAppData() { give self.fromEnv(["LOCALAPPDATA"], self._path.join(self.home(), "AppData\\Local")) }
+    task programFiles() { give self.fromEnv(["ProgramFiles"], "C:\\Program Files") }
+    task programFilesX86() { give self.fromEnv(["ProgramFiles(x86)"], "C:\\Program Files (x86)") }
+    task systemRoot() { give self.fromEnv(["SystemRoot", "WINDIR"], "C:\\Windows") }
+    task desktop() { give self._path.join(self.home(), "Desktop") }
+    task documents() { give self._path.join(self.home(), "Documents") }
+    task downloads() { give self._path.join(self.home(), "Downloads") }
+}

@@ -1,0 +1,205 @@
+// ============================================================================
+// ezenv / store.ez -- the Env model.
+//
+// Wraps the flat { key: value } dictionary returned by the parser and adds the
+// API you actually use at runtime: get, set, has, require, typed accessors.
+//
+// An Env never mutates the process environment or the .env file on disk.
+// It is a read-write in-memory store seeded from one or more files.
+// ============================================================================
+
+use "errors.ez"
+use "parser.ez"
+
+export model Env {
+    // Construct an Env from a pre-parsed dictionary.
+    // Use load() or load_file() from main.ez instead of calling this directly.
+    init(data = nil) {
+        when typeOf(data) == "nil" { data = {} }
+        self._data = data
+        self._required = []
+    }
+
+    // ── Core accessors ──────────────────────────────────────────────────
+
+    // Get a value by key. Returns `fallback` if the key is not set.
+    task get(key, fallback = nil) {
+        when has_key(self._data, key) { give self._data[key] }
+        give fallback
+    }
+
+    // Set a value. Overwrites any existing value for this key.
+    task set(key, value) {
+        self._data[key] = str(value)
+        give self
+    }
+
+    // Check if a key exists.
+    task has(key) {
+        give has_key(self._data, key)
+    }
+
+    // Delete a key. No-op if it doesn't exist.
+    task remove(key) {
+        when has_key(self._data, key) {
+            newData = {}
+            get k in keys(self._data) {
+                when k != key {
+                    newData[k] = self._data[k]
+                }
+            }
+            self._data = newData
+        }
+        give self
+    }
+
+    // Return all key-value pairs as a dictionary (shallow copy).
+    task all() {
+        result = {}
+        get k in keys(self._data) {
+            result[k] = self._data[k]
+        }
+        give result
+    }
+
+    // Return all keys as an array.
+    task keys() {
+        give keys(self._data)
+    }
+
+    // Return the number of variables loaded.
+    task size() {
+        give len(keys(self._data))
+    }
+
+    // ── Required keys ───────────────────────────────────────────────────
+
+    // Mark one or more keys as required. `validate()` will throw if any are
+    // missing. Accepts a single string or an array of strings.
+    task require(keysOrKey) {
+        when typeOf(keysOrKey) == "string" {
+            push(self._required, keysOrKey)
+        } other {
+            get k in keysOrKey {
+                push(self._required, k)
+            }
+        }
+        give self
+    }
+
+    // Throw a KeyError for the first required key that is not set.
+    task validate() {
+        get k in self._required {
+            when not has_key(self._data, k) {
+                raise_key_error(k)
+            }
+        }
+        give true
+    }
+
+    // ── Typed accessors ─────────────────────────────────────────────────
+    // Every value in a .env file is a string. These helpers coerce to the
+    // requested type and throw a TypeError on failure.
+
+    // Get a value as an integer.
+    task getInt(key, fallback = nil) {
+        when not has_key(self._data, key) { give fallback }
+        raw = self._data[key]
+        result = nil
+        try {
+            result = num(raw)
+        } catch e {
+            raise_type_error(key, "integer", raw)
+        }
+        give result
+    }
+
+    // Get a value as a float.
+    task getFloat(key, fallback = nil) {
+        when not has_key(self._data, key) { give fallback }
+        raw = self._data[key]
+        result = nil
+        try {
+            result = num(raw)
+        } catch e {
+            raise_type_error(key, "float", raw)
+        }
+        give result
+    }
+
+    // Get a value as a boolean.
+    // Truthy: "true", "1", "yes", "on"  (case-insensitive)
+    // Falsy:  "false", "0", "no", "off", ""
+    task getBool(key, fallback = nil) {
+        when not has_key(self._data, key) { give fallback }
+        raw = lower(self._data[key])
+        when raw == "true" or raw == "1" or raw == "yes" or raw == "on" { give true }
+        when raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "" { give false }
+        raise_type_error(key, "bool", self._data[key])
+    }
+
+    // Get a value as an array by splitting on a delimiter.
+    task getList(key, delimiter = ",", fallback = nil) {
+        when not has_key(self._data, key) { give fallback }
+        raw = self._data[key]
+        parts = split(raw, delimiter)
+        result = []
+        get p in parts {
+            trimmed = self._trimValue(p)
+            when len(trimmed) > 0 {
+                push(result, trimmed)
+            }
+        }
+        give result
+    }
+
+    // ── Merge ───────────────────────────────────────────────────────────
+
+    // Merge another Env or dictionary into this one. Existing keys are NOT
+    // overwritten unless `overwrite` is true. This matches the convention that
+    // the first file loaded wins, and per-environment overrides are loaded
+    // second with overwrite=true.
+    task merge(source_env, overwrite = false) {
+        source = {}
+        when typeOf(source_env) == "dictionary" {
+            source = source_env
+        } other {
+            // Assume it's an Env instance.
+            source = source_env.all()
+        }
+        get k in keys(source) {
+            when overwrite or not has_key(self._data, k) {
+                self._data[k] = source[k]
+            }
+        }
+        give self
+    }
+
+    // ── Internal ────────────────────────────────────────────────────────
+
+    task _trimValue(s) {
+        start = 0
+        l = len(s)
+        found = false
+        while start < l and not found {
+            c = substring(s, start, 1)
+            when c != " " and c != "\t" and c != "\r" and c != "\n" { 
+                found = true 
+            } other {
+                start = start + 1
+            }
+        }
+        end = l - 1
+        found = false
+        while end >= start and not found {
+            c = substring(s, end, 1)
+            when c != " " and c != "\t" and c != "\r" and c != "\n" { 
+                found = true 
+            } other {
+                end = end - 1
+            }
+        }
+        when start > end { give "" }
+        give substring(s, start, end - start + 1)
+    }
+}

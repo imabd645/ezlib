@@ -1,0 +1,155 @@
+# ============================================================================
+# template — test suite
+#   ez test.ez
+# ============================================================================
+
+use "template"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task r(source, context) { give Template.render(source, context) }
+
+out "template tests"
+
+# ── variables ───────────────────────────────────────────────────────────────
+check("plain text", r("hello", {}), "hello")
+check("variable", r("{{ n }}", { "n": "x" }), "x")
+check("no spaces", r("{{n}}", { "n": "x" }), "x")
+check("surrounded", r("a {{ n }} b", { "n": "x" }), "a x b")
+check("two vars", r("{{a}}{{b}}", { "a": 1, "b": 2 }), "12")
+check("missing is blank", r("[{{ nope }}]", {}), "[]")
+check("nil is blank", r("[{{ n }}]", { "n": nil }), "[]")
+check("number", r("{{ n }}", { "n": 42 }), "42")
+check("bool", r("{{ b }}", { "b": true }), "true")
+check("dotted path", r("{{ a.b.c }}", { "a": { "b": { "c": "deep" } } }), "deep")
+check("missing deep path", r("[{{ a.b.c }}]", { "a": {} }), "[]")
+check("array index", r("{{ xs.1 }}", { "xs": ["a", "b"] }), "b")
+check("array length", r("{{ xs.length }}", { "xs": [1, 2, 3] }), "3")
+check("literal string", r("{{ 'hi' }}", {}), "hi")
+check("literal number", r("{{ 7 }}", {}), "7")
+
+# ── escaping: the security-critical behaviour ───────────────────────────────
+check("escapes script", r("{{ x }}", { "x": "<script>" }), "&lt;script&gt;")
+check("escapes quotes", r("{{ x }}", { "x": `a"b` }), "a&quot;b")
+check("escapes apostrophe", r("{{ x }}", { "x": "it's" }), "it&#39;s")
+check("ampersand once", r("{{ x }}", { "x": "a&b" }), "a&amp;b")
+check("no double escape", r("{{ x }}", { "x": "&lt;" }), "&amp;lt;")
+check("raw opts out", r("{{ x | raw }}", { "x": "<b>" }), "<b>")
+check("safe alias", r("{{ x | safe }}", { "x": "<b>" }), "<b>")
+check("literal text not escaped", r("<b>{{ x }}</b>", { "x": "y" }), "<b>y</b>")
+check("noEscape mode", Template.renderText("{{ x }}", { "x": "<b>" }), "<b>")
+check("static escape", Template.escape("<a>"), "&lt;a&gt;")
+
+# ── filters ─────────────────────────────────────────────────────────────────
+check("upper", r("{{ s | upper }}", { "s": "ab" }), "AB")
+check("lower", r("{{ s | lower }}", { "s": "AB" }), "ab")
+check("trim", r("[{{ s | trim }}]", { "s": "  x  " }), "[x]")
+check("capitalize", r("{{ s | capitalize }}", { "s": "hELLO" }), "Hello")
+check("title", r("{{ s | title }}", { "s": "hello big world" }), "Hello Big World")
+check("length filter", r("{{ s | length }}", { "s": "abcd" }), "4")
+check("default on nil", r("{{ n | default('x') }}", {}), "x")
+check("default on empty", r("{{ n | default('x') }}", { "n": "" }), "x")
+check("default skipped", r("{{ n | default('x') }}", { "n": "y" }), "y")
+check("join", r("{{ xs | join(', ') }}", { "xs": ["a", "b"] }), "a, b")
+check("join default sep", r("{{ xs | join }}", { "xs": ["a", "b"] }), "a, b")
+check("first", r("{{ xs | first }}", { "xs": ["a", "b"] }), "a")
+check("last", r("{{ xs | last }}", { "xs": ["a", "b"] }), "b")
+check("replace", r("{{ s | replace('a', 'b') }}", { "s": "aa" }), "bb")
+check("truncate", r("{{ s | truncate(3) }}", { "s": "abcdef" }), "abc...")
+check("truncate short", r("{{ s | truncate(9) }}", { "s": "abc" }), "abc")
+check("chained", r("{{ s | trim | upper }}", { "s": " ab " }), "AB")
+check("reverse string", r("{{ s | reverse }}", { "s": "abc" }), "cba")
+check("filter then raw", r("{{ s | upper | raw }}", { "s": "<b>" }), "<B>")
+
+# ── conditionals ────────────────────────────────────────────────────────────
+check("if true", r("{% if x %}Y{% endif %}", { "x": true }), "Y")
+check("if false", r("{% if x %}Y{% endif %}", { "x": false }), "")
+check("if else", r("{% if x %}Y{% else %}N{% endif %}", { "x": false }), "N")
+check("elif", r("{% if a %}A{% elif b %}B{% else %}C{% endif %}", { "b": true }), "B")
+check("elif falls to else", r("{% if a %}A{% elif b %}B{% else %}C{% endif %}", {}), "C")
+check("empty string falsy", r("{% if s %}Y{% else %}N{% endif %}", { "s": "" }), "N")
+check("zero falsy", r("{% if n %}Y{% else %}N{% endif %}", { "n": 0 }), "N")
+check("empty list falsy", r("{% if xs %}Y{% else %}N{% endif %}", { "xs": [] }), "N")
+check("missing falsy", r("{% if nope %}Y{% else %}N{% endif %}", {}), "N")
+check("equality", r("{% if a == 1 %}Y{% endif %}", { "a": 1 }), "Y")
+check("string equality", r("{% if a == 'x' %}Y{% endif %}", { "a": "x" }), "Y")
+check("inequality", r("{% if a != 1 %}Y{% endif %}", { "a": 2 }), "Y")
+check("greater", r("{% if a > 2 %}Y{% endif %}", { "a": 3 }), "Y")
+check("less equal", r("{% if a <= 2 %}Y{% endif %}", { "a": 2 }), "Y")
+check("and", r("{% if a and b %}Y{% endif %}", { "a": true, "b": true }), "Y")
+check("and short", r("{% if a and b %}Y{% else %}N{% endif %}", { "a": true, "b": false }), "N")
+check("or", r("{% if a or b %}Y{% endif %}", { "a": false, "b": true }), "Y")
+check("not", r("{% if not a %}Y{% endif %}", { "a": false }), "Y")
+check("nested if", r("{% if a %}{% if b %}AB{% endif %}{% endif %}", { "a": true, "b": true }), "AB")
+
+# ── loops ───────────────────────────────────────────────────────────────────
+check("for", r("{% for x in xs %}{{ x }}{% endfor %}", { "xs": [1, 2, 3] }), "123")
+check("for empty", r("{% for x in xs %}{{ x }}{% endfor %}", { "xs": [] }), "")
+check("for else", r("{% for x in xs %}{{x}}{% else %}none{% endfor %}", { "xs": [] }), "none")
+check("for else skipped", r("{% for x in xs %}{{x}}{% else %}none{% endfor %}", { "xs": [1] }), "1")
+check("loop.index", r("{% for x in xs %}{{ loop.index }}{% endfor %}", { "xs": ["a", "b"] }), "12")
+check("loop.index0", r("{% for x in xs %}{{ loop.index0 }}{% endfor %}", { "xs": ["a", "b"] }), "01")
+check("loop.first", r("{% for x in xs %}{% if loop.first %}F{% endif %}{% endfor %}", { "xs": [1, 2] }), "F")
+check("loop.last", r("{% for x in xs %}{% if loop.last %}L{% endif %}{% endfor %}", { "xs": [1, 2] }), "L")
+check("loop.length", r("{% for x in xs %}{{ loop.length }}{% endfor %}", { "xs": [1, 2] }), "22")
+check("loop over objects", r("{% for u in us %}{{ u.n }};{% endfor %}",
+      { "us": [{ "n": "a" }, { "n": "b" }] }), "a;b;")
+check("nested loops", r("{% for a in xs %}{% for b in ys %}{{a}}{{b}}{% endfor %}{% endfor %}",
+      { "xs": [1, 2], "ys": ["x"] }), "1x2x")
+check("loop var scoped", r("{% for x in xs %}{% endfor %}[{{ x }}]", { "xs": [1] }), "[]")
+check("loop escapes values", r("{% for x in xs %}{{ x }}{% endfor %}", { "xs": ["<b>"] }), "&lt;b&gt;")
+
+# ── comments and whitespace control ─────────────────────────────────────────
+check("comment removed", r("a{# hidden #}b", {}), "ab")
+check("comment with tags", r("a{# {{ x }} #}b", { "x": "no" }), "ab")
+check("trim left", r("a  {%- if x %}Y{% endif %}", { "x": true }), "aY")
+check("trim right", r("{% if x -%}   Y{% endif %}", { "x": true }), "Y")
+
+# ── compiled reuse ──────────────────────────────────────────────────────────
+tpl = Template("Hi {{ n }}")
+check("compiled once", tpl.render({ "n": "a" }), "Hi a")
+check("compiled twice", tpl.render({ "n": "b" }), "Hi b")
+check("isValid true", Template.isValid("{{ a }}"), true)
+check("isValid false", Template.isValid("{% if a %}"), false)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+task throws(label, source) {
+    try {
+        Template(source)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("unclosed if", "{% if a %}x")
+throws("unclosed for", "{% for x in y %}")
+throws("stray endif", "{% endif %}")
+throws("unknown tag", "{% wat %}")
+throws("unclosed delimiter", "{{ a ")
+throws("for without in", "{% for x %}{% endfor %}")
+
+task throwsRender(label, source, context) {
+    try {
+        Template.render(source, context)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throwsRender("unknown filter", "{{ a | nope }}", { "a": 1 })
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

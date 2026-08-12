@@ -1,0 +1,52 @@
+// ============================================================================
+// ezos / clipboard.ez -- system clipboard (Win32 CF_TEXT).
+// ============================================================================
+
+use "ffi.ez"
+
+export model OSClipboard {
+    task read() {
+        opened = os_call(OSFFI.openClipboard, "int", 0)
+        when opened == 0 { give "" }
+
+        hData = os_call(OSFFI.getClipboardData, "ptr", CF_TEXT)
+        when hData == 0 {
+            os_call(OSFFI.closeClipboard, "int")
+            give ""
+        }
+
+        ptr = os_call(OSFFI.globalLock, "ptr", hData)
+        when ptr == 0 {
+            os_call(OSFFI.closeClipboard, "int")
+            give ""
+        }
+
+        text = os_read_string_ptr(ptr)
+        os_call(OSFFI.globalUnlock, "int", hData)
+        os_call(OSFFI.closeClipboard, "int")
+        give text
+    }
+
+    task write(text) {
+        textStr = str(text)
+        l = len(textStr)
+        hMem = os_call(OSFFI.globalAlloc, "ptr", GMEM_MOVEABLE, l + 1)
+        when hMem == 0 { give false }
+
+        ptr = os_call(OSFFI.globalLock, "ptr", hMem)
+        when ptr == 0 { give false }
+
+        os_write_string(ptr, 0, textStr)
+        os_call(OSFFI.globalUnlock, "int", hMem)
+
+        opened = os_call(OSFFI.openClipboard, "int", 0)
+        when opened == 0 { give false }
+
+        os_call(OSFFI.emptyClipboard, "int")
+        os_call(OSFFI.setClipboardData, "ptr", CF_TEXT, hMem)
+        os_call(OSFFI.closeClipboard, "int")
+        give true
+    }
+
+    task clear() { give self.write("") }
+}

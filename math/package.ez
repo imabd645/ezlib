@@ -1,0 +1,9 @@
+{
+  "name": "math",
+  "version": "1.0.0",
+  "description": "Production-oriented mathematical utilities for EZ: numeric helpers, trigonometry, statistics, number theory, random sampling, geometry, and vectors.",
+  "author": "EZ Development Team",
+  "main": "main.ez",
+  "repository": "https://github.com/imabd645/ezlib",
+  "dependencies": {}
+}

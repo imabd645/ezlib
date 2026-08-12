@@ -1,0 +1,11 @@
+{
+  "name": "ini",
+  "version": "1.0.0",
+  "description": "INI configuration files for EZ. Sections, typed values, comments, quoting and round-trip serialisation.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["ini", "config", "settings", "parser", "conf"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

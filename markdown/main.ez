@@ -1,0 +1,81 @@
+# ============================================================================
+# markdown — Markdown to HTML for EZ
+#
+#   use "markdown"
+#   html = Markdown.render(readFile("post.md"))
+#
+# Output is safe to embed in a page: the source is escaped before any
+# formatting is applied, so raw HTML in the markdown cannot become markup.
+# ============================================================================
+
+use "markdown/inline.ez"
+use "markdown/block.ez"
+
+export model Markdown {
+
+    # Render a document to HTML.
+    static task render(source) {
+        when source == nil { give "" }
+        text = str(source)
+        normalized = replace(replace(text, chr(13) + chr(10), chr(10)), chr(13), chr(10))
+        blocks = []
+        mdRenderBlocks(split(normalized, chr(10)), 0, 0, blocks)
+        give join(blocks, chr(10))
+    }
+
+    static task renderFile(path) {
+        give Markdown.render(readFile(path))
+    }
+
+    # Render a single line's worth of formatting with no block wrapper --
+    # useful for titles and table cells, where a <p> would be wrong.
+    static task renderInline(text) {
+        when text == nil { give "" }
+        give mdInline(str(text))
+    }
+
+    # HTML-escape without interpreting any markdown.
+    static task escape(text) {
+        give mdEscape(str(text))
+    }
+
+    # Strip formatting, leaving readable plain text. For search indexes,
+    # excerpts and email fallbacks.
+    static task toText(source) {
+        html = Markdown.render(source)
+        body = ""
+        inTag = false
+        total = len(html)
+        repeat i = 0 to total - 1 {
+            c = substr(html, i, 1)
+            when c == "<" { inTag = true  skip }
+            when c == ">" { inTag = false  body = body + " "  skip }
+            when inTag == false { body = body + c }
+        }
+        # Unescape the entities the renderer introduced.
+        body = replace(body, "&lt;", "<")
+        body = replace(body, "&gt;", ">")
+        body = replace(body, "&quot;", `"`)
+        body = replace(body, "&#39;", "'")
+        body = replace(body, "&amp;", "&")
+        # Blocks are joined with newlines; plain text wants them as spaces.
+        body = replace(body, chr(10), " ")
+        while contains(body, "  ") { body = replace(body, "  ", " ") }
+        give trim(body)
+    }
+
+    # First paragraph, trimmed to `limit` characters. For listing pages.
+    static task excerpt(source, limit) {
+        text = Markdown.toText(source)
+        when len(text) <= limit { give text }
+        cut = substr(text, 0, limit)
+        # Prefer a word boundary so the excerpt does not end mid-word.
+        lastSpace = -1
+        total = len(cut)
+        repeat i = 0 to total - 1 {
+            when substr(cut, i, 1) == " " { lastSpace = i }
+        }
+        when lastSpace > limit / 2 { cut = substr(cut, 0, lastSpace) }
+        give cut + "..."
+    }
+}

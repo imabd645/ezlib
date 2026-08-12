@@ -1,0 +1,308 @@
+# ============================================================================
+# yaml/parser.ez — logical lines to EZ values
+#
+# Recursive descent over the line records produced by the scanner. Structure
+# in YAML comes from indentation, so every block parse is bounded by the
+# column it started at: a line indented less than its parent ends the block
+# rather than being mis-attached to it.
+#
+# The cursor is a dict passed by reference ({ lines, pos }), so nested parses
+# advance a single shared position.
+# ============================================================================
+
+use "yaml/scalar.ez"
+
+task yamlFail(msg, lineNo) {
+    throw Exception(`YAML parse error (line {lineNo}): {msg}`)
+}
+
+# ── cursor helpers ──────────────────────────────────────────────────────────
+
+task yamlAt(st) {
+    when st["pos"] >= len(st["lines"]) { give nil }
+    give st["lines"][st["pos"]]
+}
+
+# Next line that carries content. Blank and comment-only lines never end a
+# block; only a genuine dedent does.
+task yamlSkipBlank(st) {
+    while st["pos"] < len(st["lines"]) {
+        rec = st["lines"][st["pos"]]
+        when rec["blank"] == false { give rec }
+        st["pos"] = st["pos"] + 1
+    }
+    give nil
+}
+
+# ── "key: value" splitting ──────────────────────────────────────────────────
+
+# Returns the index of the colon separating key from value, or -1.
+# Quotes are respected so `"a: b": 1` splits at the right colon, and a colon
+# only separates when followed by whitespace or end of line -- otherwise
+# `url: http://x` would split inside the URL.
+export task yamlFindColon(s) {
+    quote = ""
+    n = len(s)
+    i = 0
+    while i < n {
+        c = substr(s, i, 1)
+        when quote != "" {
+            when quote == `"` and c == "\\" { i = i + 2  skip }
+            when c == quote { quote = "" }
+        }
+        other {
+            when c == `"` or c == "'" { quote = c }
+            other {
+                when c == ":" {
+                    when i + 1 >= n { give i }
+                    nx = substr(s, i + 1, 1)
+                    when nx == " " or nx == chr(9) { give i }
+                }
+            }
+        }
+        i = i + 1
+    }
+    give -1
+}
+
+# ── flow collections: [a, b]  and  {a: 1, b: 2} ─────────────────────────────
+
+# Splits on commas that sit at nesting depth zero and outside quotes, so
+# [[1, 2], 3] yields two parts rather than three.
+task yamlSplitFlow(body) {
+    parts = []
+    depth = 0
+    quote = ""
+    current = ""
+    n = len(body)
+    i = 0
+    while i < n {
+        c = substr(body, i, 1)
+        when quote != "" {
+            current = current + c
+            when quote == `"` and c == "\\" and i + 1 < n {
+                current = current + substr(body, i + 1, 1)
+                i = i + 2
+                skip
+            }
+            when c == quote { quote = "" }
+        }
+        other {
+            when c == `"` or c == "'" { quote = c  current = current + c }
+            other { when c == "[" or c == "{" { depth = depth + 1  current = current + c }
+            other { when c == "]" or c == "}" { depth = depth - 1  current = current + c }
+            other { when c == "," and depth == 0 {
+                push(parts, trim(current))
+                current = ""
+            }
+            other { current = current + c }}}}
+        }
+        i = i + 1
+    }
+    when trim(current) != "" { push(parts, trim(current)) }
+    give parts
+}
+
+export task yamlParseFlow(text, lineNo) {
+    s = trim(text)
+    n = len(s)
+    when n == 0 { give nil }
+    first = substr(s, 0, 1)
+    last = substr(s, n - 1, 1)
+
+    when first == "[" {
+        when last != "]" { yamlFail("unterminated flow sequence", lineNo) }
+        result = []
+        get part in yamlSplitFlow(substr(s, 1, n - 2)) {
+            push(result, yamlParseFlow(part, lineNo))
+        }
+        give result
+    }
+    when first == "{" {
+        when last != "}" { yamlFail("unterminated flow mapping", lineNo) }
+        result = {}
+        get part in yamlSplitFlow(substr(s, 1, n - 2)) {
+            ci = yamlFindColon(part)
+            when ci < 0 { yamlFail(`flow mapping entry '{part}' has no ':'`, lineNo) }
+            k = str(yamlParseScalar(trim(substr(part, 0, ci))))
+            v = trim(substr(part, ci + 1, len(part) - ci - 1))
+            result[k] = yamlParseFlow(v, lineNo)
+        }
+        give result
+    }
+    give yamlParseScalar(s)
+}
+
+# ── block scalars:  key: |   and   key: > ───────────────────────────────────
+
+# `|` keeps newlines, `>` folds them into spaces. The trailing chomping
+# indicator controls final newlines: `-` strips them, `+` keeps them all,
+# and the default clips to exactly one.
+task yamlBlockScalar(st, header, parentIndent) {
+    style = substr(header, 0, 1)
+    chomp = ""
+    when len(header) > 1 { chomp = substr(header, 1, len(header) - 1) }
+    chomp = trim(chomp)
+
+    collected = []
+    blockIndent = -1
+
+    while st["pos"] < len(st["lines"]) {
+        rec = st["lines"][st["pos"]]
+        when rec["blank"] {
+            # A blank line belongs to the block only if more content follows
+            # at the block's indent; trailing blanks are handled by chomping.
+            push(collected, "")
+            st["pos"] = st["pos"] + 1
+            skip
+        }
+        when rec["indent"] <= parentIndent { escape }
+        when blockIndent < 0 { blockIndent = rec["indent"] }
+        raw = rec["raw"]
+        content = ""
+        when len(raw) > blockIndent { content = substr(raw, blockIndent, len(raw) - blockIndent) }
+        push(collected, content)
+        st["pos"] = st["pos"] + 1
+    }
+
+    # Drop trailing blanks now; chomping decides what to add back.
+    while len(collected) > 0 and collected[len(collected) - 1] == "" {
+        pop(collected)
+    }
+
+    body = ""
+    when style == "|" {
+        body = join(collected, chr(10))
+    }
+    other {
+        # Folded: consecutive non-empty lines join with a space, and a blank
+        # line becomes a real newline.
+        parts = []
+        buf = ""
+        get lineText in collected {
+            when lineText == "" {
+                push(parts, buf)
+                buf = ""
+            }
+            other {
+                when buf == "" { buf = lineText }
+                other { buf = buf + " " + lineText }
+            }
+        }
+        push(parts, buf)
+        body = join(parts, chr(10))
+    }
+
+    when chomp == "-" { give body }
+    when chomp == "+" { give body + chr(10) }
+    when body == "" { give "" }
+    give body + chr(10)
+}
+
+# ── block structures ────────────────────────────────────────────────────────
+
+task yamlParseSequence(st, indent) {
+    items = []
+    while true {
+        rec = yamlSkipBlank(st)
+        when rec == nil { escape }
+        when rec["indent"] < indent { escape }
+        when rec["indent"] > indent {
+            yamlFail("unexpected indentation in sequence", rec["line"])
+        }
+        text = rec["text"]
+        when startsWith(text, "- ") == false and text != "-" { escape }
+
+        rest = ""
+        when len(text) > 1 { rest = trim(substr(text, 1, len(text) - 1)) }
+        st["pos"] = st["pos"] + 1
+
+        when rest == "" {
+            # Value lives on the following, more-indented lines.
+            push(items, yamlParseBlock(st, indent + 1))
+        }
+        other {
+            # `- key: value` starts a mapping whose columns begin after the
+            # dash, so nested keys align with the key rather than the dash.
+            ci = yamlFindColon(rest)
+            when ci >= 0 {
+                st["pos"] = st["pos"] - 1
+                inner = rec["indent"] + 2
+                push(items, yamlParseInlineMapping(st, rest, rec, inner))
+            }
+            other {
+                push(items, yamlParseValue(st, rest, rec["line"], indent))
+            }
+        }
+    }
+    give items
+}
+
+# Handles `- key: value` by rewriting the current line to start at the key.
+task yamlParseInlineMapping(st, rest, rec, innerIndent) {
+    patched = {
+        "line": rec["line"],
+        "raw": rec["raw"],
+        "indent": innerIndent,
+        "text": rest,
+        "blank": false
+    }
+    st["lines"][st["pos"]] = patched
+    give yamlParseMapping(st, innerIndent)
+}
+
+task yamlParseMapping(st, indent) {
+    result = {}
+    while true {
+        rec = yamlSkipBlank(st)
+        when rec == nil { escape }
+        when rec["indent"] < indent { escape }
+        when rec["indent"] > indent {
+            yamlFail("unexpected indentation in mapping", rec["line"])
+        }
+        text = rec["text"]
+        when startsWith(text, "- ") { escape }
+
+        ci = yamlFindColon(text)
+        when ci < 0 { yamlFail(`expected 'key: value' but found '{text}'`, rec["line"]) }
+
+        key = str(yamlParseScalar(trim(substr(text, 0, ci))))
+        rest = ""
+        when len(text) > ci + 1 { rest = trim(substr(text, ci + 1, len(text) - ci - 1)) }
+        st["pos"] = st["pos"] + 1
+
+        when rest == "" {
+            result[key] = yamlParseBlock(st, indent + 1)
+        }
+        other {
+            result[key] = yamlParseValue(st, rest, rec["line"], indent)
+        }
+    }
+    give result
+}
+
+task yamlParseValue(st, text, lineNo, indent) {
+    first = ""
+    when len(text) > 0 { first = substr(text, 0, 1) }
+    when first == "|" or first == ">" {
+        give yamlBlockScalar(st, text, indent)
+    }
+    when first == "[" or first == "{" {
+        give yamlParseFlow(text, lineNo)
+    }
+    give yamlParseScalar(text)
+}
+
+# Parses whatever block begins at or beyond `minIndent`. Returns nil when the
+# block is empty, which is how `key:` with nothing under it becomes null.
+export task yamlParseBlock(st, minIndent) {
+    rec = yamlSkipBlank(st)
+    when rec == nil { give nil }
+    when rec["indent"] < minIndent { give nil }
+
+    indent = rec["indent"]
+    when startsWith(rec["text"], "- ") or rec["text"] == "-" {
+        give yamlParseSequence(st, indent)
+    }
+    give yamlParseMapping(st, indent)
+}

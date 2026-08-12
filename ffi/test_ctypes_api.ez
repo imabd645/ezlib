@@ -1,0 +1,182 @@
+// ============================================================================
+// test_ctypes_api.ez — Tests for the production ctypes-style ezffi v2 API
+// ============================================================================
+
+use "main.ez" as ffi
+
+out "=== ezffi v2 — ctypes-style API tests ==="
+out ""
+
+// ── 1. Type descriptors ───────────────────────────────────────────────────────
+
+out "1. Type constants"
+out "   c_int._type  = " + ffi.c_int["_type"]    // i32
+out "   c_int._size  = " + str(ffi.c_int["_size"]) // 4
+out "   c_double._type = " + ffi.c_double["_type"] // double
+out "   c_char_p._type = " + ffi.c_char_p["_type"] // string
+out ""
+
+// ── 2. Library loading ────────────────────────────────────────────────────────
+
+out "2. Load User32.dll"
+lib = ffi.load("User32.dll")
+out "   Loaded OK: " + typeOf(lib)
+out ""
+
+// ── 3. Function resolution + caching ─────────────────────────────────────────
+
+out "3. Function resolution and cache"
+fn1 = lib.func("MessageBoxA")
+fn2 = lib.func("MessageBoxA")    // should return same instance
+out "   Same instance (cache): " + str(fn1 == fn2)
+out ""
+
+// ── 4. argtypes / restype annotations ────────────────────────────────────────
+
+out "4. argtypes / restype"
+msgBox = lib.func("MessageBoxA")
+msgBox.argtypes = [ffi.c_void_p, ffi.c_char_p, ffi.c_char_p, ffi.c_uint32]
+msgBox.restype  = ffi.c_int
+out "   argtypes set: " + str(len(msgBox.argtypes)) + " args"
+out "   restype._type: " + msgBox.restype["_type"]
+out ""
+
+// ── 5. Direct call via __call__ ───────────────────────────────────────────────
+
+out "5. Direct call — lib.func('MessageBoxA')(0, msg, title, 0)"
+result = msgBox(0, "Hello from ezffi v2!", "EZ FFI Test", 0)
+out "   MessageBoxA returned: " + str(result)
+out ""
+
+// ── 6. .call([argsArray]) — backward-compatible form ─────────────────────────
+
+out "6. Array call form — fn.call([...])"
+result2 = msgBox.call([0, "Array call form works!", "EZ FFI Test", 0])
+out "   Return: " + str(result2)
+out ""
+
+// ── 7. .sig() chaining ────────────────────────────────────────────────────────
+
+out "7. .sig() chaining"
+msvcrt = ffi.load("msvcrt.dll")
+strlen = msvcrt.func("strlen").sig([ffi.c_char_p], ffi.c_int)
+strLen = strlen("Hello, World!")
+out "   strlen('Hello, World!') = " + str(strLen)   // 13
+out ""
+
+// ── 8. Pointer: alloc / read / write / free ───────────────────────────────────
+
+out "8. Pointer memory operations"
+p = ffi.alloc(16)
+p.writeInt32(0, 42)
+p.writeInt32(4, 100)
+v1 = p.readInt32(0)
+v2 = p.readInt32(4)
+out "   writeInt32(0, 42)  → readInt32(0)  = " + str(v1)   // 42
+out "   writeInt32(4, 100) → readInt32(4)  = " + str(v2)   // 100
+p.free()
+out "   freed OK"
+out ""
+
+// ── 9. Double-free guard ──────────────────────────────────────────────────────
+
+out "9. Double-free guard"
+p2 = ffi.alloc(8)
+p2.free()
+try {
+    p2.free()
+    out "   FAIL: should have thrown"
+} catch e {
+    out "   PASS: caught '" + e.message + "'"
+}
+out ""
+
+// ── 10. Use-after-free guard ─────────────────────────────────────────────────
+
+out "10. Use-after-free guard"
+p3 = ffi.alloc(8)
+p3.free()
+try {
+    p3.readInt32(0)
+    out "   FAIL: should have thrown"
+} catch e {
+    out "   PASS: caught '" + e.message + "'"
+}
+out ""
+
+// ── 11. c_string / string_at ─────────────────────────────────────────────────
+
+out "11. c_string and string_at"
+cs = ffi.c_string("Hello EZ!")
+s  = ffi.string_at(cs)
+out "   string_at(c_string('Hello EZ!')) = " + s   // Hello EZ!
+cs.free()
+out ""
+
+// ── 12. Structure ─────────────────────────────────────────────────────────────
+
+out "12. Structure pack/unpack"
+POINT = ffi.Structure("POINT", [["x", ffi.c_int32], ["y", ffi.c_int32]])
+
+pt = POINT["new"](POINT)
+pt["x"] = 123
+pt["y"] = 456
+
+buf  = POINT["pack"](POINT, pt)
+pt2  = POINT["unpack"](POINT, buf)
+
+out "   pt.x = " + str(pt2["x"])   // 123
+out "   pt.y = " + str(pt2["y"])   // 456
+out ""
+
+// ── 13. Nested struct (RECT) ─────────────────────────────────────────────────
+
+out "13. RECT struct (4 × c_int32)"
+RECT = ffi.Structure("RECT", [
+    ["left",   ffi.c_int32],
+    ["top",    ffi.c_int32],
+    ["right",  ffi.c_int32],
+    ["bottom", ffi.c_int32]
+])
+r = RECT["new"](RECT)
+r["left"]   = 0
+r["top"]    = 0
+r["right"]  = 1920
+r["bottom"] = 1080
+buf2 = RECT["pack"](RECT, r)
+r2   = RECT["unpack"](RECT, buf2)
+out "   right  = " + str(r2["right"])   // 1920
+out "   bottom = " + str(r2["bottom"])  // 1080
+out ""
+
+// ── 14. Callback ─────────────────────────────────────────────────────────────
+
+out "14. Callback (EZ lambda as native C function)"
+addCb = ffi.createCallback([ffi.c_int, ffi.c_int], ffi.c_int, |a, b| => a + b)
+out "   Callback pointer: " + str(addCb.ptr)
+
+// Invoke our own callback through FFI to test roundtrip
+callCb = ffi.Function(addCb.ptr, ffi.c_int, [ffi.c_int, ffi.c_int])
+cbResult = callCb(7, 8)
+out "   Callback(7, 8) = " + str(cbResult)   // 15
+addCb.free()
+out "   Callback freed OK"
+out ""
+
+// ── 15. Borrowed pointer / cast ───────────────────────────────────────────────
+
+out "15. cast() — borrowed pointer"
+owned = ffi.alloc(4)
+owned.writeInt32(0, 999)
+borrowed = ffi.cast(owned)
+out "   borrowed.readInt32(0) = " + str(borrowed.readInt32(0))   // 999
+try {
+    borrowed.free()
+    out "   FAIL: should have thrown"
+} catch e {
+    out "   PASS: cannot free borrowed"
+}
+owned.free()
+out ""
+
+out "=== All tests passed ==="

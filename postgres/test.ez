@@ -1,0 +1,433 @@
+# ============================================================================
+# postgres — test suite
+#   ez test.ez
+#
+# Runs against a real PostgreSQL server. Set DATABASE_URL, or start one with:
+#
+#   docker run -d --name ez-pg -e POSTGRES_PASSWORD=ezpass -e POSTGRES_USER=ezuser \
+#              -e POSTGRES_DB=ezdb -p 55432:5432 postgres:16-alpine
+#
+# Everything is created and dropped in a schema of its own, so it cannot touch
+# anything already in the database.
+# ============================================================================
+
+use "postgres"
+
+PASS = 0
+FAIL = 0
+SKIPPED = 0
+DEFAULT_URL = "postgres://ezuser:ezpass@localhost:55432/ezdb"
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task throwsSaying(label, fragment, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when contains(str(e.message), fragment) { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected the message to mention: {fragment}`
+            out `    actual:   {e.message}`
+        }
+    }
+}
+task throwsWithState(label, state, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when str(e.sqlstate) == state { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected sqlstate {state}, got {e.sqlstate}`
+        }
+    }
+}
+
+out "postgres tests"
+
+# ── connection strings, which need no server ────────────────────────────────
+info = fromUrl("postgres://bob:s3cr3t@db.example.com:6543/shop?sslmode=require")
+check("host", contains(info, "host='db.example.com'"), true)
+check("port", contains(info, "port='6543'"), true)
+check("user", contains(info, "user='bob'"), true)
+check("password", contains(info, "password='s3cr3t'"), true)
+check("database", contains(info, "dbname='shop'"), true)
+check("extra options survive", contains(info, "sslmode='require'"), true)
+check("a default port", contains(fromUrl("postgres://u@h/db"), "port='5432'"), true)
+check("postgresql:// works too", contains(fromUrl("postgresql://u@h/db"), "host='h'"), true)
+check("no credentials", contains(fromUrl("postgres://localhost/db"), "host='localhost'"), true)
+# A password with a space or a quote would otherwise truncate the connection
+# string silently.
+quoted = fromDict({ "password": "has space and 'quote'" })
+check("a password is quoted", startsWith(quoted, "password='"), true)
+check("and its quotes escaped", contains(quoted, "\\'quote\\'"), true)
+check("percent-encoding is decoded", contains(fromUrl("postgres://u:p%40ss@h/db"), "password='p@ss'"), true)
+check("a keyword string passes through", conninfoOf("host=x dbname=y"), "host=x dbname=y")
+check("a dictionary is formatted", contains(conninfoOf({ "host": "x" }), "host='x'"), true)
+throws("nil is refused", || conninfoOf(nil))
+
+# Identifiers cannot be parameterised, so anything that is not plain is
+# refused rather than escaped -- escaping would be a judgement call.
+check("a plain identifier", checkIdentifier("users_2"), true)
+throwsSaying("a quote in an identifier", "not a plain identifier", || checkIdentifier("users\"; drop"))
+throwsSaying("a space in an identifier", "not a plain identifier", || checkIdentifier("my table"))
+throwsSaying("a semicolon", "not a plain identifier", || checkIdentifier("t; drop table x"))
+throws("an empty identifier", || checkIdentifier(""))
+
+# ── encoding, which also needs no server ────────────────────────────────────
+check("a boolean becomes t", encode(true), "t")
+check("and f", encode(false), "f")
+# nil must stay nil all the way down: it becomes a NULL POINTER, which is how
+# libpq tells SQL NULL from an empty string.
+check("nil stays nil", encode(nil), nil)
+check("a number", encode(42), "42")
+check("a list becomes an array literal", encode(["a", "b"]), "{a,b}")
+check("an element with a comma is quoted", encode(["a,b"]), "{\"a,b\"}")
+check("an empty element is quoted", encode([""]), "{\"\"}")
+check("a null element", encode(["a", nil]), "{a,NULL}")
+check("a nested list", encode([["a"], ["b"]]), "{{a},{b}}")
+check("a dictionary becomes json", encode({ "k": 1 }), to_json({ "k": 1 }))
+check("bytea encoding", encodeBytea([0, 255, 16]), "\\x00ff10")
+check("bytea decoding", to_json(decodeBytea("\\x00ff10")), to_json([0, 255, 16]))
+check("bytea round trip", to_json(decodeBytea(encodeBytea([1, 127, 128, 255]))), to_json([1, 127, 128, 255]))
+check("array decoding", to_json(decodeArray("{a,b,c}", 25)), to_json(["a", "b", "c"]))
+check("a quoted element with a comma", to_json(decodeArray("{\"a,b\",c}", 25)), to_json(["a,b", "c"]))
+check("an empty array", to_json(decodeArray("{}", 25)), to_json([]))
+# Unquoted NULL is the SQL null; the quoted string "NULL" is not.
+check("a null element decodes to nil", to_json(decodeArray("{a,NULL}", 25)), to_json(["a", nil]))
+check("a quoted NULL is the text", to_json(decodeArray("{\"NULL\"}", 25)), to_json(["NULL"]))
+check("integers in an array", to_json(decodeArray("{1,2}", 23)), to_json([1, 2]))
+
+# ── SQLSTATE classification ─────────────────────────────────────────────────
+check("unique violation", isUniqueViolation("23505"), true)
+check("foreign key violation", isForeignKeyViolation("23503"), true)
+check("not null violation", isNotNullViolation("23502"), true)
+check("all of class 23 are constraints", isConstraintViolation("23514"), true)
+check("class 42 is not", isConstraintViolation("42P01"), false)
+# The two that mean "try again" rather than "you are wrong".
+check("serialization failure is retryable", isRetryable("40001"), true)
+check("deadlock is retryable", isRetryable("40P01"), true)
+check("a unique violation is not", isRetryable("23505"), false)
+check("a syntax error is not", isRetryable("42601"), false)
+check("class 08 is a connection error", isConnectionError("08006"), true)
+check("admin shutdown too", isConnectionError("57P01"), true)
+check("class name", describeClass("23505"), "constraint violation")
+check("another", describeClass("42601"), "syntax error or access rule violation")
+
+check("the library was found", isAvailable(), true)
+
+# ── against a real server ───────────────────────────────────────────────────
+URL = DEFAULT_URL
+db = nil
+try {
+    db = connect(URL)
+}
+catch (e) {
+    db = nil
+    out "  (no server at " + URL + " -- 90 live assertions skipped)"
+    out "  " + str(e.message)
+    SKIPPED = 90
+}
+
+when db != nil {
+    check("connected", db.isOpen(), true)
+    check("ping", db.ping(), true)
+    check("the server has a version", len(db.serverVersionText()) > 0, true)
+
+    db.execute("drop schema if exists ez_test cascade")
+    db.execute("create schema ez_test")
+    db.execute("set search_path = ez_test")
+
+    db.execute("create table people (id serial primary key, name text not null, " +
+               "email text unique, age int, score numeric(10,2), active bool default true, " +
+               "tags text[], profile jsonb, avatar bytea, joined timestamptz default now())")
+
+    # ── parameters ──────────────────────────────────────────────────────────
+    check("insert returns affected rows",
+          db.execute("insert into people (name, email, age) values ($1, $2, $3)", ["Ada", "ada@x.test", 36]), 1)
+    check("select", len(db.query("select * from people")), 1)
+    check("queryOne", db.queryOne("select * from people where name = $1", ["Ada"])["age"], 36)
+    check("queryValue", db.queryValue("select count(*) from people"), 1)
+    check("queryColumn", to_json(db.queryColumn("select name from people")), to_json(["Ada"]))
+    check("queryOne with no match", db.queryOne("select * from people where name = $1", ["nobody"]), nil)
+    check("exists", db.exists("select 1 from people where name = $1", ["Ada"]), true)
+    check("exists is false", db.exists("select 1 from people where name = $1", ["nobody"]), false)
+
+    # The whole point of parameters. If this were interpolated, the table would
+    # be gone.
+    evil = "Robert'); drop table people;--"
+    db.execute("insert into people (name, email) values ($1, $2)", [evil, "bobby@x.test"])
+    check("an injection attempt is stored verbatim",
+          db.queryValue("select name from people where email = $1", ["bobby@x.test"]), evil)
+    check("and the table still exists", db.tableExists("people"), true)
+    db.execute("delete from people where email = $1", ["bobby@x.test"])
+
+    # ── NULL is not an empty string ─────────────────────────────────────────
+    db.execute("insert into people (name, email, age) values ($1, $2, $3)", ["Empty", "", nil])
+    row = db.queryOne("select * from people where name = $1", ["Empty"])
+    check("an empty string stays an empty string", row["email"], "")
+    check("a nil parameter becomes SQL NULL", row["age"], nil)
+    check("and the server agrees it is null",
+          db.queryValue("select age is null from people where name = $1", ["Empty"]), true)
+    check("an empty string is not null",
+          db.queryValue("select email is null from people where name = $1", ["Empty"]), false)
+    db.execute("delete from people where name = $1", ["Empty"])
+
+    # ── types ───────────────────────────────────────────────────────────────
+    db.execute("insert into people (name, email, age, score, active, tags, profile, avatar) " +
+               "values ($1, $2, $3, $4, $5, $6, $7, $8)",
+               ["Grace", "grace@x.test", 45, "1234.50", false,
+                ["compiler", "navy, retired"], { "rank": "admiral", "years": [1, 2] },
+                encodeBytea([0, 127, 128, 255])])
+    grace = db.queryOne("select * from people where name = $1", ["Grace"])
+    check("integer", grace["age"], 45)
+    check("integer is a number", type(grace["age"]), "integer")
+    check("boolean false", grace["active"], false)
+    check("boolean is a bool", type(grace["active"]), "bool")
+    # numeric is exact by design -- turning it into a float here would throw
+    # away the reason people choose the type.
+    check("numeric keeps its digits", grace["score"], "1234.50")
+    check("and stays a string", type(grace["score"]), "string")
+    check("a text array", to_json(grace["tags"]), to_json(["compiler", "navy, retired"]))
+    check("an array element containing a comma survives", grace["tags"][1], "navy, retired")
+    check("jsonb is parsed", grace["profile"]["rank"], "admiral")
+    check("nested json", to_json(grace["profile"]["years"]), to_json([1, 2]))
+    # Bytes through text-format hex: no encoding in the path to corrupt them.
+    check("bytea round trip", to_json(grace["avatar"]), to_json([0, 127, 128, 255]))
+    check("a true boolean", db.queryValue("select true"), true)
+    check("a bigint", db.queryValue("select 9007199254740991::bigint"), 9007199254740991)
+    check("a float", db.queryValue("select 1.5::float8"), 1.5)
+    check("a null", db.queryValue("select null::text"), nil)
+    check("an int array", to_json(db.queryValue("select array[1,2,3]")), to_json([1, 2, 3]))
+    check("an array with a null", to_json(db.queryValue("select array[1,null,3]")), to_json([1, nil, 3]))
+    check("an empty array", to_json(db.queryValue("select array[]::int[]")), to_json([]))
+    check("json", db.queryValue("select '{\"a\":1}'::json")["a"], 1)
+    check("a uuid stays text", type(db.queryValue("select gen_random_uuid()")), "string")
+
+    # ── the Result object ───────────────────────────────────────────────────
+    result = db.queryResult("select name, age from people order by name")
+    check("row count", result.count(), 2)
+    check("not empty", result.isEmpty(), false)
+    check("first", result.first()["name"], "Ada")
+    check("last", result.last()["name"], "Grace")
+    check("a column", to_json(result.column("name")), to_json(["Ada", "Grace"]))
+    check("column names", to_json(result.columnNames()), to_json(["name", "age"]))
+    check("column types are reported", result.columns[1]["type"], "integer")
+    check("an empty result", db.queryResult("select 1 where false").isEmpty(), true)
+    check("scalar of an empty result", db.queryResult("select 1 where false").scalar(), nil)
+
+    # ── insert / update / delete helpers ────────────────────────────────────
+    made = db.insert("people", { "name": "Alan", "email": "alan@x.test", "age": 41 }, "id, name")
+    check("insert returns the row", made["name"], "Alan")
+    check("with its generated id", made["id"] > 0, true)
+    check("insert without returning gives a count",
+          db.insert("people", { "name": "Edsger", "email": "e@x.test" }), 1)
+    check("update", db.update("people", { "age": 42 }, "name = $1", ["Alan"]), 1)
+    check("the update took", db.queryValue("select age from people where name = $1", ["Alan"]), 42)
+    # The caller's $1 has to be renumbered past the SET placeholders, or the
+    # two sets collide.
+    check("update with several set columns",
+          db.update("people", { "age": 43, "active": false }, "name = $1", ["Alan"]), 1)
+    check("and both landed", db.queryValue("select age from people where name = $1", ["Alan"]), 43)
+    check("and the second", db.queryValue("select active from people where name = $1", ["Alan"]), false)
+    check("delete", db.delete("people", "name = $1", ["Edsger"]), 1)
+    throwsSaying("insert refuses a bad identifier", "not a plain identifier",
+                 || db.insert("people\"; drop table people;--", { "a": 1 }))
+    throws("insert with nothing to insert", || db.insert("people", {}))
+
+    # ── bulk insert ─────────────────────────────────────────────────────────
+    check("insertMany", db.insertMany("people", [
+        { "name": "B1", "email": "b1@x.test" },
+        { "name": "B2", "email": "b2@x.test" },
+        { "name": "B3", "email": "b3@x.test" }
+    ]), 3)
+    check("they are all there", db.queryValue("select count(*) from people where name like 'B%'"), 3)
+    check("insertMany of nothing", db.insertMany("people", []), 0)
+    db.execute("delete from people where name like 'B%'")
+
+    # ── errors ──────────────────────────────────────────────────────────────
+    throwsWithState("a unique violation", "23505",
+                    || db.execute("insert into people (name, email) values ($1, $2)", ["dup", "ada@x.test"]))
+    throwsWithState("a not-null violation", "23502",
+                    || db.execute("insert into people (name) values (null)"))
+    throwsWithState("an undefined table", "42P01", || db.query("select * from no_such_table"))
+    throwsWithState("an undefined column", "42703", || db.query("select no_such_column from people"))
+    throwsWithState("a syntax error", "42601", || db.query("select from where"))
+    throwsWithState("a bad cast", "22P02", || db.query("select $1::int", ["not a number"]))
+    # The message has to carry what to do about it, and the statement, or it is
+    # useless in a log an hour later.
+    throwsSaying("the message explains a unique violation", "already exists",
+                 || db.execute("insert into people (name, email) values ($1, $2)", ["dup", "ada@x.test"]))
+    throwsSaying("and names the constraint", "people_email_key",
+                 || db.execute("insert into people (name, email) values ($1, $2)", ["dup", "ada@x.test"]))
+    throwsSaying("and carries the sql", "insert into people",
+                 || db.execute("insert into people (name, email) values ($1, $2)", ["dup", "ada@x.test"]))
+    throwsSaying("a missing table suggests a migration", "migration",
+                 || db.query("select * from no_such_table"))
+
+    # A failed statement must leave the connection usable.
+    check("the connection survives an error", db.queryValue("select 1"), 1)
+
+    # ── transactions ────────────────────────────────────────────────────────
+    before = db.queryValue("select count(*) from people")
+    db.transaction(|tx| {
+        tx.execute("insert into people (name, email) values ($1, $2)", ["T1", "t1@x.test"])
+        tx.execute("insert into people (name, email) values ($1, $2)", ["T2", "t2@x.test"])
+    })
+    check("a committed transaction", db.queryValue("select count(*) from people"), before + 2)
+
+    # A throw inside must roll everything back, including what already
+    # succeeded -- that is the entire point.
+    try {
+        db.transaction(|tx| {
+            tx.execute("insert into people (name, email) values ($1, $2)", ["T3", "t3@x.test"])
+            throw Exception("deliberate")
+        })
+    }
+    catch (e) { }
+    check("a failed transaction rolls back", db.queryValue("select count(*) from people"), before + 2)
+    check("and the row is not there", db.queryValue("select count(*) from people where name = 'T3'"), 0)
+    check("the connection is usable afterwards", db.queryValue("select 1"), 1)
+    check("and is no longer in a transaction", db.inTransaction, false)
+
+    # A database error inside a transaction rolls back the same way.
+    try {
+        db.transaction(|tx| {
+            tx.execute("insert into people (name, email) values ($1, $2)", ["T4", "t4@x.test"])
+            tx.execute("insert into people (name, email) values ($1, $2)", ["T5", "ada@x.test"])
+        })
+    }
+    catch (e) { }
+    check("a constraint failure rolls back too", db.queryValue("select count(*) from people where name = 'T4'"), 0)
+
+    # The exception must escape, not be swallowed by the rollback.
+    throwsSaying("the original error is re-raised", "deliberate",
+                 || db.transaction(|tx| { throw Exception("deliberate") }))
+
+    # Nested transactions become savepoints; a second BEGIN would be an error.
+    db.transaction(|tx| {
+        tx.execute("insert into people (name, email) values ($1, $2)", ["N1", "n1@x.test"])
+        try {
+            tx.transaction(|inner| {
+                inner.execute("insert into people (name, email) values ($1, $2)", ["N2", "n2@x.test"])
+                throw Exception("inner fails")
+            })
+        }
+        catch (e) { }
+    })
+    check("the outer work is kept", db.queryValue("select count(*) from people where name = 'N1'"), 1)
+    check("the inner work is rolled back", db.queryValue("select count(*) from people where name = 'N2'"), 0)
+
+    # Manual control, for when the work does not fit in a callback.
+    db.begin()
+    db.execute("insert into people (name, email) values ($1, $2)", ["M1", "m1@x.test"])
+    db.rollback()
+    check("a manual rollback", db.queryValue("select count(*) from people where name = 'M1'"), 0)
+    db.begin()
+    db.execute("insert into people (name, email) values ($1, $2)", ["M2", "m2@x.test"])
+    db.commit()
+    check("a manual commit", db.queryValue("select count(*) from people where name = 'M2'"), 1)
+
+    # Retries are only for the two states that mean "you lost a race".
+    attempts = 0
+    try {
+        db.withRetry(3, |tx| {
+            attempts = attempts + 1
+            tx.execute("insert into people (name, email) values ($1, $2)", ["R", "ada@x.test"])
+        })
+    }
+    catch (e) { }
+    check("a unique violation is not retried", attempts, 1)
+    check("withRetry commits when it succeeds",
+          db.withRetry(3, |tx| tx.queryValue("select 7")), 7)
+
+    # A read-only transaction is refused a write by the server.
+    throwsWithState("a read-only transaction refuses a write", "25006",
+        || db.transactionWith("read only", |tx| tx.execute("insert into people (name) values ('x')")))
+
+    # ── schema ──────────────────────────────────────────────────────────────
+    check("tableExists", db.tableExists("people"), true)
+    check("tableExists is false for a stranger", db.tableExists("no_such_table_here"), false)
+    columnList = db.columnsOf("people")
+    check("columnsOf", len(columnList) > 5, true)
+    check("the first column is the id", columnList[0]["column_name"], "id")
+
+    # ── logging ─────────────────────────────────────────────────────────────
+    SEEN = 0
+    db.onQuery(|sql, params, ms| SEEN = SEEN + 1)
+    db.queryValue("select 1")
+    check("the query hook fires", SEEN, 1)
+    db.onQuery(nil)
+    check("queries are counted", db.queryCount > 0, true)
+
+    # ── pooling ─────────────────────────────────────────────────────────────
+    # A pool opens its OWN connections, and `set search_path` is a session
+    # setting -- so the pooled connections never saw it and the table has to be
+    # named in full. This is the same reason a pooled connection does not
+    # inherit a `set timezone` or a prepared statement.
+    p = pool(URL, 2)
+    check("a pooled query", p.queryValue("select 1"), 1)
+    check("a connection is returned to the pool", p.stats()["leased"], 0)
+    check("and kept for reuse", p.stats()["idle"] >= 1, true)
+    check("reuse does not open another", p.queryValue("select 2"), 2)
+    check("still only one opened", p.stats()["opened"], 1)
+    # The case people forget: a throw must still return the connection, or the
+    # pool leaks one per failure until it is exhausted.
+    try { p.use(|c| { throw Exception("boom") }) } catch (e) { }
+    check("a throw still returns the connection", p.stats()["leased"], 0)
+    # A connection handed back mid-transaction would leak it into whoever gets
+    # it next.
+    try {
+        p.use(|c| {
+            c.begin()
+            c.execute("insert into ez_test.people (name, email) values ($1, $2)", ["P1", "p1@x.test"])
+            throw Exception("abandoned mid-transaction")
+        })
+    }
+    catch (e) { }
+    check("an abandoned transaction is rolled back",
+          p.queryValue("select count(*) from ez_test.people where name = 'P1'"), 0)
+    check("and the connection is clean", p.queryValue("select 1"), 1)
+    p.closeAll()
+    check("closeAll empties the pool", p.stats()["idle"], 0)
+
+    # ── reconnecting ────────────────────────────────────────────────────────
+    spare = connect(URL)
+    spare.close()
+    check("a closed connection knows it", spare.isOpen(), false)
+    throwsSaying("and refuses to be used", "closed", || spare.query("select 1"))
+
+    # ── cleanup ─────────────────────────────────────────────────────────────
+    db.execute("drop schema ez_test cascade")
+    db.close()
+    check("closed", db.isOpen(), false)
+}
+
+out ""
+when SKIPPED > 0 { out `  skipped {SKIPPED}` }
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

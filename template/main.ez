@@ -1,0 +1,79 @@
+# ============================================================================
+# template — a safe templating engine for EZ
+#
+#   use "template"
+#
+#   html = Template.render("Hello {{ name }}!", { "name": "World" })
+#
+# Output is HTML-escaped by default. Use the `raw` filter to opt out for
+# values you have already sanitised.
+# ============================================================================
+
+use "template/lexer.ez"
+use "template/expr.ez"
+use "template/filters.ez"
+use "template/parser.ez"
+use "template/render.ez"
+
+# A compiled template. Parsing once and rendering many times matters when the
+# same template serves every request: parse work is proportional to template
+# size, render work only to the data.
+export model Template {
+
+    init(source) {
+        self.source = str(source)
+        self.nodes = tplParse(self.source)
+        self.autoescape = true
+    }
+
+    # Disable HTML escaping for this template -- correct for plain text output
+    # such as emails or generated config, wrong for anything rendered as HTML.
+    task noEscape() {
+        self.autoescape = false
+        give self
+    }
+
+    task render(context) {
+        give tplRenderNodes(self.nodes, context, self.autoescape)
+    }
+
+    # ── one-shot helpers ────────────────────────────────────────────────────
+
+    # Compile and render in one call. Prefer Template(source) when the same
+    # source is rendered repeatedly.
+    static task render(source, context) {
+        t = Template(source)
+        give t.render(context)
+    }
+
+    # Render without HTML escaping, for non-HTML output.
+    static task renderText(source, context) {
+        t = Template(source)
+        t.noEscape()
+        give t.render(context)
+    }
+
+    # Compile and render a template file.
+    static task renderFile(path, context) {
+        t = Template(readFile(path))
+        give t.render(context)
+    }
+
+    static task compile(source) {
+        give Template(source)
+    }
+
+    # True when the source compiles.
+    static task isValid(source) {
+        try {
+            Template(source)
+            give true
+        }
+        catch (e) { give false }
+    }
+
+    # Exposed because escaping user data is useful outside templates too.
+    static task escape(text) {
+        give tplEscapeHtml(str(text))
+    }
+}

@@ -1,0 +1,97 @@
+// ============================================================================
+// regex — Compiled patterns
+// ============================================================================
+use "errors.ez"
+use "match.ez"
+
+// A pattern plus its flags.
+//
+// Flags are a string: "i" case-insensitive, "m" multiline (^ and $ also match
+// at line breaks). The engine is ECMAScript, which has no dotall and no named
+// groups, so neither is offered rather than quietly faked.
+export model Regex {
+    init(pattern, flags="") {
+        when typeOf(pattern) != "string" {
+            throw RegexError("pattern must be a string, got " + typeOf(pattern))
+        }
+        // Fail at construction rather than on first use, so a bad pattern is
+        // reported where it was written.
+        when not re_valid(pattern) {
+            throw RegexError("invalid pattern: " + pattern)
+        }
+        get f in split(flags, "") {
+            when f != "" and f != "i" and f != "m" {
+                throw RegexError("unknown flag '" + f + "'. Supported: 'i' (ignore case), 'm' (multiline)")
+            }
+        }
+        self.pattern = pattern
+        self.flags = flags
+    }
+
+    // Does the pattern occur anywhere in `text`?
+    task test(text) { give re_test(text, self.pattern, self.flags) }
+
+    // Does the pattern match the whole of `text`?
+    task fullMatch(text) { give re_full_match(text, self.pattern, self.flags) }
+
+    // First match at or after `start`, or nil.
+    task find(text, start=0) {
+        give toMatch(re_find(text, self.pattern, self.flags, start))
+    }
+
+    // Every non-overlapping match, left to right. limit > 0 stops early.
+    // Zero-width matches advance by one character, so `a*` terminates.
+    task findAll(text, limit=0) {
+        out_ = []
+        get raw in re_find_all(text, self.pattern, self.flags, limit) {
+            push(out_, Match(raw))
+        }
+        give out_
+    }
+
+    // Just the matched strings, for when positions are not needed.
+    task findAllText(text, limit=0) {
+        out_ = []
+        get raw in re_find_all(text, self.pattern, self.flags, limit) {
+            push(out_, raw["text"])
+        }
+        give out_
+    }
+
+    // Text of the nth capture group of the first match, or nil if there is no
+    // match. Saves the find-then-check dance for the common one-group case.
+    task capture(text, n=1) {
+        m = self.find(text)
+        when m == nil { give nil }
+        give m.group(n)
+    }
+
+    // Replace matches. $1..$9 refer to capture groups and $& to the whole
+    // match. limit 0 replaces all.
+    task replace(text, replacement, limit=0) {
+        give re_replace(text, self.pattern, replacement, self.flags, limit)
+    }
+
+    task replaceFirst(text, replacement) {
+        give re_replace(text, self.pattern, replacement, self.flags, 1)
+    }
+
+    // Split on the pattern. limit > 0 caps the number of pieces, leaving the
+    // remainder in the last one.
+    task split(text, limit=0) {
+        give re_split(text, self.pattern, self.flags, limit)
+    }
+
+    task count(text) { give len(re_find_all(text, self.pattern, self.flags, 0)) }
+
+    task toString() {
+        when self.flags == "" { give "Regex(" + self.pattern + ")" }
+        give "Regex(" + self.pattern + ", \"" + self.flags + "\")"
+    }
+}
+
+// Regex(...) reads oddly when the pattern is built at runtime; compile() is the
+// same thing with a name that suits that case.
+export task compile(pattern, flags="") {
+    give Regex(pattern, flags)
+}

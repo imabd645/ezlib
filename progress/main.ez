@@ -1,0 +1,311 @@
+# ============================================================================
+# progress — progress bars and spinners for EZ
+#
+#   use "progress"
+#
+#   bar = ProgressBar(files.length)
+#   get file in files {
+#       process(file)
+#       bar.increment()
+#   }
+#   bar.finish()
+#
+# Two separate concerns: building the line (render), and putting it on screen
+# in place (draw). Keeping them apart means the same bar can be written to a
+# log, returned from a status endpoint, or animated in a terminal.
+# ============================================================================
+
+use "color"
+
+# In-place drawing needs output with no trailing newline, which is the `write`
+# builtin. Interpreters older than it resolve the name to nil rather than
+# failing to compile, so this detects it at runtime and falls back to printing
+# whole lines -- noisy in a terminal, but perfectly readable in a log.
+task canWrite() {
+    try {
+        probe = write
+        give probe != nil
+    }
+    catch (e) { give false }
+}
+
+CR = chr(13)
+
+task repeatChar(c, count) {
+    body = ""
+    repeat i = 1 to count { body = body + c }
+    give body
+}
+
+task formatDuration(seconds) {
+    total = floor(seconds)
+    when total < 0 { total = 0 }
+    minutes = (total - (total % 60)) / 60
+    secs = total % 60
+    when minutes >= 60 {
+        hours = (minutes - (minutes % 60)) / 60
+        minutes = minutes % 60
+        give str(hours) + "h" + str(minutes) + "m"
+    }
+    when minutes > 0 { give str(minutes) + "m" + str(secs) + "s" }
+    give str(secs) + "s"
+}
+
+export model ProgressBar {
+
+    init(total) {
+        self.total = total
+        when total == nil or total < 0 { self.total = 0 }
+        self.current = 0
+        self.width = 30
+        self.label = ""
+        self.filled = "="
+        self.head = ">"
+        self.empty = " "
+        self.startedAt = clock()
+        self.finished = false
+        self.showPercent = true
+        self.showCount = true
+        self.showEta = false
+        self.colorize = false
+    }
+
+    # ── configuration ───────────────────────────────────────────────────────
+
+    task titled(text) { self.label = str(text)  give self }
+    task sized(cells) { self.width = cells  give self }
+
+    task chars(filledChar, headChar, emptyChar) {
+        self.filled = filledChar
+        self.head = headChar
+        self.empty = emptyChar
+        give self
+    }
+
+    # A solid bar, which reads better than = and > at a glance.
+    task solid() { give self.chars("█", "", "░") }
+
+    task withEta() { self.showEta = true  give self }
+    task withoutCount() { self.showCount = false  give self }
+    task withoutPercent() { self.showPercent = false  give self }
+    task colored() { self.colorize = true  give self }
+
+    # ── state ───────────────────────────────────────────────────────────────
+
+    task update(value) {
+        self.current = value
+        when self.current < 0 { self.current = 0 }
+        when self.total > 0 and self.current > self.total { self.current = self.total }
+        give self
+    }
+
+    task increment() { give self.update(self.current + 1) }
+    task advance(amount) { give self.update(self.current + amount) }
+
+    task ratio() {
+        when self.total <= 0 { give 0 }
+        give self.current / self.total
+    }
+
+    task percent() { give floor(self.ratio() * 100) }
+    task isComplete() { give self.total > 0 and self.current >= self.total }
+    task elapsed() { give (clock() - self.startedAt) / 1000 }
+
+    # Seconds remaining, estimated from the rate so far. -1 when there is not
+    # enough information yet -- guessing from a single sample is worse than
+    # admitting it is unknown.
+    task eta() {
+        when self.current <= 0 or self.total <= 0 { give -1 }
+        elapsedSecs = self.elapsed()
+        when elapsedSecs <= 0 { give -1 }
+        rate = self.current / elapsedSecs
+        when rate <= 0 { give -1 }
+        give (self.total - self.current) / rate
+    }
+
+    task rate() {
+        elapsedSecs = self.elapsed()
+        when elapsedSecs <= 0 { give 0 }
+        give self.current / elapsedSecs
+    }
+
+    # ── rendering ───────────────────────────────────────────────────────────
+
+    task barText() {
+        done = floor(self.ratio() * self.width)
+        when done > self.width { done = self.width }
+        body = repeatChar(self.filled, done)
+
+        remaining = self.width - done
+        # The head sits at the boundary, so it only appears mid-progress.
+        when self.head != "" and remaining > 0 and done > 0 {
+            body = body + self.head
+            remaining = remaining - 1
+        }
+        body = body + repeatChar(self.empty, remaining)
+        when self.colorize {
+            when self.isComplete() { give Color().green().text(body) }
+            give Color().cyan().text(body)
+        }
+        give body
+    }
+
+    task render() {
+        parts = []
+        when self.label != "" { push(parts, self.label) }
+        push(parts, "[" + self.barText() + "]")
+        when self.showPercent {
+            body = str(self.percent()) + "%"
+            while len(body) < 4 { body = " " + body }
+            push(parts, body)
+        }
+        when self.showCount and self.total > 0 {
+            push(parts, "(" + str(self.current) + "/" + str(self.total) + ")")
+        }
+        when self.showEta and self.finished == false {
+            remaining = self.eta()
+            when remaining >= 0 { push(parts, "ETA " + formatDuration(remaining)) }
+        }
+        give join(parts, " ")
+    }
+
+    # ── output ──────────────────────────────────────────────────────────────
+
+    # Redraw in place. Needs `write`; without it each update is a new line,
+    # which is noisy but still readable in a log.
+    task draw() {
+        line = self.render()
+        when canWrite() {
+            # Trailing spaces clear whatever the previous, longer line left
+            # behind -- otherwise "100%" over "9%" leaves a stray digit.
+            write(CR + line + "   ")
+        }
+        other { out line }
+        give self
+    }
+
+    # Update and redraw in one call, the usual shape inside a loop.
+    task step() {
+        self.increment()
+        give self.draw()
+    }
+
+    # Fill the bar, draw once more and end the line.
+    task finish() {
+        when self.total > 0 { self.current = self.total }
+        self.finished = true
+        self.draw()
+        out ""
+        give self
+    }
+
+    # End the line without filling -- for a cancelled or failed run.
+    task stopHere() {
+        self.finished = true
+        self.draw()
+        out ""
+        give self
+    }
+
+    task summary() {
+        give self.render() + " in " + formatDuration(self.elapsed())
+    }
+}
+
+# ── spinner ─────────────────────────────────────────────────────────────────
+
+# For work with no measurable total. A spinner says "still running", which is
+# all it can honestly claim.
+export model Spinner {
+
+    init(label) {
+        self.label = str(label)
+        self.frames = ["|", "/", "-", "\\"]
+        self.index = 0
+        self.startedAt = clock()
+        self.colorize = false
+    }
+
+    task titled(text) { self.label = str(text)  give self }
+
+    task withFrames(list) {
+        self.frames = list
+        self.index = 0
+        give self
+    }
+
+    # Braille frames read as smoother motion, where the terminal has the font.
+    task dots() {
+        give self.withFrames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+    }
+
+    task colored() { self.colorize = true  give self }
+
+    task frame() {
+        body = self.frames[self.index % len(self.frames)]
+        when self.colorize { give Color().cyan().text(body) }
+        give body
+    }
+
+    task render() {
+        body = self.frame()
+        when self.label != "" { give body + " " + self.label }
+        give body
+    }
+
+    # Advance one frame and redraw.
+    task tick() {
+        line = self.render()
+        self.index = self.index + 1
+        when canWrite() { write(CR + line + "   ") }
+        other { out line }
+        give self
+    }
+
+    task elapsed() { give (clock() - self.startedAt) / 1000 }
+
+    # Replace the spinner with a final message and end the line.
+    task done(message) {
+        mark = "✓"
+        when self.colorize { mark = Color().green().text(mark) }
+        when canWrite() { write(CR + mark + " " + str(message) + "        ") }
+        other { out mark + " " + str(message) }
+        out ""
+        give self
+    }
+
+    task failed(message) {
+        mark = "✗"
+        when self.colorize { mark = Color().red().text(mark) }
+        when canWrite() { write(CR + mark + " " + str(message) + "        ") }
+        other { out mark + " " + str(message) }
+        out ""
+        give self
+    }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+export task progressBar(total) { give ProgressBar(total) }
+export task spinner(label) { give Spinner(label) }
+
+# Format a byte count for a transfer bar.
+export task humanBytes(count) {
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = count
+    index = 0
+    while value >= 1024 and index < len(units) - 1 {
+        value = value / 1024
+        index = index + 1
+    }
+    when index == 0 { give str(floor(value)) + " B" }
+    # Built from integer parts: str() on a float prints six decimal places,
+    # so "1.5 KB" would come out as "1.500000 KB".
+    tenths = floor(value * 10 + 0.5)
+    whole = floor(tenths / 10)
+    remainder = tenths - (whole * 10)
+    when remainder == 0 { give str(whole) + " " + units[index] }
+    give str(whole) + "." + str(remainder) + " " + units[index]
+}
+
+export task formatSeconds(seconds) { give formatDuration(seconds) }

@@ -1,0 +1,11 @@
+{
+    "name": "taskschd",
+    "version": "1.0.0",
+    "description": "Production-ready Windows Task Scheduler library for EZ.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {
+        "os": "^1.0.0",
+        "csv": "^1.0.0"
+    }
+}

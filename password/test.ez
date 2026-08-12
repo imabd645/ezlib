@@ -1,0 +1,149 @@
+# ============================================================================
+# password — test suite
+#   ez test.ez
+#
+# Hashing at the default 600,000 iterations takes a moment by design, so the
+# tests use a lower count except where the default itself is what is under
+# test.
+# ============================================================================
+
+use "password"
+use "password/encode.ez"
+
+PASS = 0
+FAIL = 0
+FAST = 2000
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+out "password tests"
+
+# ── hashing and verifying ───────────────────────────────────────────────────
+h = Password.hashWith("correct horse battery staple", FAST)
+check("verifies the right password", Password.verify("correct horse battery staple", h), true)
+check("rejects the wrong password", Password.verify("wrong", h), false)
+check("rejects a near miss", Password.verify("correct horse battery stapl", h), false)
+check("rejects empty", Password.verify("", h), false)
+check("rejects nil", Password.verify(nil, h), false)
+
+# The salt is what stops two identical passwords sharing a hash -- without it,
+# one cracked password exposes every account that chose it.
+a = Password.hashWith("same", FAST)
+b = Password.hashWith("same", FAST)
+check("same password hashes differently", a != b, true)
+check("but both still verify", Password.verify("same", a) and Password.verify("same", b), true)
+
+long1 = "a-very-long-passphrase-of-the-kind-people-are-told-to-use-these-days-0123456789"
+check("long passwords work", Password.verify(long1, Password.hashWith(long1, FAST)), true)
+check("a truncated long password fails",
+      Password.verify(substr(long1, 0, 40), Password.hashWith(long1, FAST)), false)
+unicodePw = "pàsswörd-日本"
+check("non-ascii passwords", Password.verify(unicodePw, Password.hashWith(unicodePw, FAST)), true)
+spaced = "  leading and trailing  "
+check("whitespace is significant", Password.verify(spaced, Password.hashWith(spaced, FAST)), true)
+check("trimmed does not match", Password.verify(trim(spaced), Password.hashWith(spaced, FAST)), false)
+
+throws("cannot hash nil", || Password.hashWith(nil, FAST))
+throws("cannot hash empty", || Password.hashWith("", FAST))
+# Too few iterations is refused rather than quietly accepted.
+throws("refuses trivial iteration counts", || Password.hashWith("x", 10))
+
+# ── the stored format ───────────────────────────────────────────────────────
+check("names the algorithm", startsWith(h, "pbkdf2-sha256$"), true)
+check("has four fields", len(split(h, "$")), 4)
+check("is a valid hash", Password.isValidHash(h), true)
+
+info = Password.describe(h)
+check("describes the algorithm", info["algorithm"], "pbkdf2-sha256")
+check("describes the iterations", info["iterations"], FAST)
+check("describes the salt size", info["saltBytes"], 16)
+
+parts = decodeHash(h)
+check("decodes the salt as hex", len(parts["salt"]), 32)
+check("decodes the hash as hex", len(parts["hash"]), 64)
+check("round-trips through encode",
+      decodeHash(encodeHash("alg", 99, "ab", "cd"))["iterations"], 99)
+
+# Malformed input must fail the login, not crash the request.
+get bad in ["", "not-a-hash", "a$b$c", "a$b$c$d$e", "alg$notanumber$ab$cd",
+            "alg$100$zz$cd", "alg$100$ab$zz", "$100$ab$cd"] {
+    check(`rejects malformed hash '{bad}'`, Password.isValidHash(bad), false)
+}
+check("verify survives garbage", Password.verify("x", "not-a-hash"), false)
+check("describe returns nil for garbage", Password.describe("nope"), nil)
+
+# ── parameters travel with the hash ─────────────────────────────────────────
+# A hash made with one iteration count must still verify after the default
+# changes -- otherwise raising the cost factor logs everybody out at once.
+low = Password.hashWith("shared", 1500)
+high = Password.hashWith("shared", 3000)
+check("low-cost hash verifies", Password.verify("shared", low), true)
+check("high-cost hash verifies", Password.verify("shared", high), true)
+check("they are different hashes", low != high, true)
+check("each records its own cost", Password.describe(low)["iterations"], 1500)
+
+# ── rehash detection ────────────────────────────────────────────────────────
+check("weaker hash wants rehashing", Password.needsRehash(low), true)
+check("garbage wants rehashing", Password.needsRehash("nope"), true)
+check("unknown algorithm wants rehashing",
+      Password.needsRehash(encodeHash("md5", 999999, "ab", "cd")), true)
+atDefault = encodeHash("pbkdf2-sha256", DEFAULT_ITERATIONS, "ab", "cd")
+check("current defaults need no rehash", Password.needsRehash(atDefault), false)
+
+# ── timing-safe comparison ──────────────────────────────────────────────────
+check("equal strings", constantTimeEquals("abc", "abc"), true)
+check("different strings", constantTimeEquals("abc", "abd"), false)
+check("different lengths", constantTimeEquals("ab", "abc"), false)
+check("both empty", constantTimeEquals("", ""), true)
+# Differing in the first character must be as false as differing in the last;
+# an early return there is what leaks a hash one character at a time.
+check("first character differs", constantTimeEquals("xbc", "abc"), false)
+check("last character differs", constantTimeEquals("abx", "abc"), false)
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+check("hex encoding", bytesToHex([0, 15, 16, 255]), "000fff" == "000fff" and "000f10ff" or "000f10ff")
+check("hex of zero", bytesToHex([0]), "00")
+check("hex pads single digits", bytesToHex([5]), "05")
+check("random bytes length", len(randomBytes(8)), 8)
+check("random bytes differ", to_json(randomBytes(16)) != to_json(randomBytes(16)), true)
+r = randomBytes(64)
+inRange = true
+get v in r { when v < 0 or v > 255 { inRange = false } }
+check("random bytes are bytes", inRange, true)
+
+# ── strength ────────────────────────────────────────────────────────────────
+check("short password rejected", Password.strength("abc")["ok"], false)
+check("says why", contains(Password.strength("abc")["problems"][0], "8 characters"), true)
+check("long password accepted", Password.strength("a-reasonably-long-one")["ok"], true)
+check("longer scores higher",
+      Password.strength("aaaaaaaaaaaaaaaaaaaa1B!")["score"] > Password.strength("aaaaaaaa")["score"], true)
+check("common password rejected", Password.strength("password")["ok"], false)
+check("common password scores zero", Password.strength("password123")["score"], 0)
+check("case-insensitive common check", Password.strength("PASSWORD")["ok"], false)
+check("repeated character rejected", Password.strength("aaaaaaaaaa")["ok"], false)
+check("mixed kinds score", Password.strength("Tr0ub4dor&3xyz")["score"] >= 2, true)
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+s = hashPassword("shorthand test")
+check("hashPassword and verifyPassword agree", verifyPassword("shorthand test", s), true)
+check("shorthand uses the default cost", Password.describe(s)["iterations"], DEFAULT_ITERATIONS)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

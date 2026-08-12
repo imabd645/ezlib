@@ -1,0 +1,11 @@
+{
+  "name": "decimal",
+  "version": "1.0.0",
+  "description": "Exact decimal and money arithmetic for EZ. Fixed-point integers, no float drift, with rounding modes, formatting and remainder-safe splitting.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["decimal", "money", "currency", "fixed-point", "precision", "rounding"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

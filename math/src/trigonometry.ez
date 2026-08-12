@@ -1,0 +1,109 @@
+use "constants.ez"
+use "core.ez"
+
+export task wrapAngle(angle) {
+    angle = angle % TAU
+    when angle > PI { angle = angle - TAU }
+    when angle < -PI { angle = angle + TAU }
+    give angle
+}
+
+# Range-reduced Taylor series. Fourteen terms keeps ordinary double inputs
+# accurate enough for application, graphics, and statistics workloads.
+export task cos(x) {
+    x = wrapAngle(x)
+    term = 1.0
+    result = 1.0
+    repeat n = 1 to 14 {
+        term = -term * x * x / ((2 * n - 1) * (2 * n))
+        result = result + term
+    }
+    give result
+}
+
+export task sin(x) { give cos(PI / 2.0 - x) }
+
+export task tan(x) {
+    denominator = cos(x)
+    when abs(denominator) <= EPSILON { throw "tan(): undefined for this angle" }
+    give sin(x) / denominator
+}
+
+export task atan(x) {
+    when x == 0 { give 0 }
+    when x < 0 { give -atan(-x) }
+    when x > 1 { give PI / 2.0 - atan(1.0 / x) }
+    # atan(x) = pi/4 + atan((x-1)/(x+1)) improves convergence above 0.5.
+    when x > 0.5 { give PI / 4.0 + atan((x - 1.0) / (x + 1.0)) }
+    term = x
+    result = x
+    repeat n = 1 to 24 {
+        term = -term * x * x
+        result = result + term / (2 * n + 1)
+    }
+    give result
+}
+
+export task atan2(y, x) {
+    when x > 0 { give atan(y / x) }
+    when x < 0 and y >= 0 { give atan(y / x) + PI }
+    when x < 0 and y < 0 { give atan(y / x) - PI }
+    when y > 0 { give PI / 2.0 }
+    when y < 0 { give -PI / 2.0 }
+    throw "atan2(): undefined for (0, 0)"
+}
+
+export task asin(x) {
+    when x < -1 or x > 1 { throw "asin(): x must be in [-1, 1]" }
+    when x == 1 { give PI / 2.0 }
+    when x == -1 { give -PI / 2.0 }
+    give atan2(x, sqrt(1.0 - x * x))
+}
+
+export task acos(x) { give PI / 2.0 - asin(x) }
+export task sinh(x) { give (exp(x) - exp(-x)) / 2.0 }
+export task cosh(x) { give (exp(x) + exp(-x)) / 2.0 }
+export task tanh(x) { give sinh(x) / cosh(x) }
+
+export task ln(x) {
+    when x <= 0 { throw "ln(): x must be greater than zero" }
+    shifts = 0
+    while x > 1.5 { x = x / 2.0  shifts = shifts + 1 }
+    while x < 0.75 { x = x * 2.0  shifts = shifts - 1 }
+    # atanh transform converges rapidly across [0.75, 1.5].
+    y = (x - 1.0) / (x + 1.0)
+    y2 = y * y
+    term = y
+    result = 0.0
+    repeat n = 0 to 24 {
+        result = result + term / (2 * n + 1)
+        term = term * y2
+    }
+    give 2.0 * result + shifts * LN2
+}
+
+export task log10(x) { give ln(x) / LN10 }
+export task log2(x) { give ln(x) / LN2 }
+export task log(base, x) {
+    when base <= 0 or base == 1 { throw "log(): base must be positive and not equal to one" }
+    give ln(x) / ln(base)
+}
+
+export task exp(x) {
+    when x == 0 { give 1.0 }
+    when x < 0 { give 1.0 / exp(-x) }
+    whole = floor(x)
+    fraction = x - whole
+    term = 1.0
+    result = 1.0
+    repeat n = 1 to 20 { term = term * fraction / n  result = result + term }
+    give pow(E, whole) * result
+}
+
+export task cosd(degrees) { give cos(degToRad(degrees)) }
+export task sind(degrees) { give sin(degToRad(degrees)) }
+export task tand(degrees) { give tan(degToRad(degrees)) }
+export task asind(value) { give radToDeg(asin(value)) }
+export task acosd(value) { give radToDeg(acos(value)) }
+export task atand(value) { give radToDeg(atan(value)) }
+export task atan2d(y, x) { give radToDeg(atan2(y, x)) }

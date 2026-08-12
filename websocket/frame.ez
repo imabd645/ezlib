@@ -1,0 +1,127 @@
+# ============================================================================
+# websocket/frame.ez — RFC 6455 framing
+#
+#   byte 0:  FIN(1) RSV(3) OPCODE(4)
+#   byte 1:  MASK(1) LEN(7)
+#   len 126: two more bytes carry the length, big-endian
+#   len 127: eight more bytes carry it
+#   MASK=1:  four more bytes are the masking key
+#   then the payload, XOR-masked when MASK is set
+#
+# A client MUST mask every frame it sends and a server MUST NOT -- the rule
+# exists to stop a malicious page steering an intermediary proxy into caching
+# a forged response.
+# ============================================================================
+
+use "websocket/bytes.ez"
+
+export OP_CONTINUATION = 0
+export OP_TEXT = 1
+export OP_BINARY = 2
+export OP_CLOSE = 8
+export OP_PING = 9
+export OP_PONG = 10
+
+# Control frames carry status and cannot be fragmented or long.
+export task isControlOpcode(opcode) { give opcode >= 8 }
+
+# Builds one frame. `payload` is a list of byte octets.
+export task encodeFrame(opcode, payload, maskKey) {
+    header = []
+    # FIN is always set: this library does not fragment outgoing messages.
+    push(header, bitOr(128, opcode))
+
+    size = len(payload)
+    masked = 0
+    when maskKey != nil { masked = 128 }
+
+    when size < 126 { push(header, bitOr(masked, size)) }
+    other {
+        when size < 65536 {
+            push(header, bitOr(masked, 126))
+            get b in intToBytes(size, 2) { push(header, b) }
+        }
+        other {
+            push(header, bitOr(masked, 127))
+            get b in intToBytes(size, 8) { push(header, b) }
+        }
+    }
+
+    body = payload
+    when maskKey != nil {
+        get b in maskKey { push(header, b) }
+        body = applyMask(payload, maskKey)
+    }
+    get b in body { push(header, b) }
+    give bytesToStr(header)
+}
+
+# Returns [frame, consumed] or nil when more bytes are needed.
+#
+# frame: { fin, opcode, payload (bytes), text (string) }
+export task decodeFrame(data, from) {
+    total = len(data)
+    when total - from < 2 { give nil }
+
+    bytes0 = ord(substr(data, from, 1))
+    bytes1 = ord(substr(data, from + 1, 1))
+
+    fin = bitAnd(bytes0, 128) != 0
+    opcode = bitAnd(bytes0, 15)
+    masked = bitAnd(bytes1, 128) != 0
+    size = bitAnd(bytes1, 127)
+    cursor = from + 2
+
+    when size == 126 {
+        when total - cursor < 2 { give nil }
+        size = bytesToInt(strToBytes(substr(data, cursor, 2)), 0, 2)
+        cursor = cursor + 2
+    }
+    other {
+        when size == 127 {
+            when total - cursor < 8 { give nil }
+            size = bytesToInt(strToBytes(substr(data, cursor, 8)), 0, 8)
+            cursor = cursor + 8
+        }
+    }
+
+    maskKey = nil
+    when masked {
+        when total - cursor < 4 { give nil }
+        maskKey = strToBytes(substr(data, cursor, 4))
+        cursor = cursor + 4
+    }
+
+    when total - cursor < size { give nil }
+    payload = strToBytes(substr(data, cursor, size))
+    when maskKey != nil { payload = applyMask(payload, maskKey) }
+    cursor = cursor + size
+
+    frame = {
+        "fin": fin,
+        "opcode": opcode,
+        "payload": payload,
+        "text": bytesToStr(payload)
+    }
+    give [frame, cursor - from]
+}
+
+# A close frame's payload is a two-byte status code followed by an optional
+# UTF-8 reason.
+export task encodeClosePayload(code, reason) {
+    octets = intToBytes(code, 2)
+    get b in strToBytes(str(reason)) { push(octets, b) }
+    give octets
+}
+
+export task decodeClosePayload(payload) {
+    when len(payload) < 2 { give { "code": 1005, "reason": "" } }
+    code = bytesToInt(payload, 0, 2)
+    tail = []
+    index = 2
+    while index < len(payload) {
+        push(tail, payload[index])
+        index = index + 1
+    }
+    give { "code": code, "reason": bytesToStr(tail) }
+}

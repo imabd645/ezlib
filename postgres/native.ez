@@ -1,0 +1,250 @@
+# ============================================================================
+# postgres/native.ez — libpq through the FFI
+#
+# Everything that touches a pointer lives here. Nothing above this file knows
+# that libpq exists.
+#
+# libpq does not ship with Windows, unlike the WinHTTP and BCrypt libraries the
+# other packages lean on. It comes with PostgreSQL, so this looks in the places
+# it actually lands, and says exactly what to do when it is not there -- an
+# "unable to load library" with no further detail is a bad first experience.
+# ============================================================================
+
+# PQresultStatus
+export PGRES_EMPTY_QUERY = 0
+export PGRES_COMMAND_OK = 1
+export PGRES_TUPLES_OK = 2
+export PGRES_COPY_OUT = 3
+export PGRES_COPY_IN = 4
+export PGRES_BAD_RESPONSE = 5
+export PGRES_NONFATAL_ERROR = 6
+export PGRES_FATAL_ERROR = 7
+
+export CONNECTION_OK = 0
+
+# PQresultErrorField codes, which are single characters.
+FIELD_SQLSTATE = 67                            # 'C'
+FIELD_MESSAGE_PRIMARY = 77                     # 'M'
+FIELD_MESSAGE_DETAIL = 68                      # 'D'
+FIELD_MESSAGE_HINT = 72                        # 'H'
+FIELD_CONSTRAINT_NAME = 110                    # 'n'
+FIELD_TABLE_NAME = 116                         # 't'
+FIELD_COLUMN_NAME = 99                         # 'c'
+
+# PQtransactionStatus
+export PQTRANS_IDLE = 0
+export PQTRANS_ACTIVE = 1
+export PQTRANS_INTRANS = 2
+export PQTRANS_INERROR = 3
+export PQTRANS_UNKNOWN = 4
+
+REQUIRED = ["PQconnectdb", "PQstatus", "PQerrorMessage", "PQfinish", "PQexec",
+            "PQexecParams", "PQresultStatus", "PQntuples", "PQnfields", "PQfname",
+            "PQgetvalue", "PQgetisnull", "PQgetlength", "PQcmdTuples", "PQclear",
+            "PQresultErrorField", "PQresultErrorMessage", "PQftype",
+            "PQserverVersion", "PQtransactionStatus", "PQreset", "PQping"]
+
+# Where libpq actually lands on a Windows machine. PATH first, because a
+# machine with PostgreSQL properly installed will find it there.
+SEARCH_PATHS = [
+    "libpq.dll",
+    "C:/Program Files/PostgreSQL/17/bin/libpq.dll",
+    "C:/Program Files/PostgreSQL/16/bin/libpq.dll",
+    "C:/Program Files/PostgreSQL/15/bin/libpq.dll",
+    "C:/Program Files/PostgreSQL/14/bin/libpq.dll",
+    "C:/Program Files/PostgreSQL/13/bin/libpq.dll",
+    "C:/msys64/mingw64/bin/libpq.dll",
+    "dlls/libpq.dll"
+]
+
+_lib = nil
+_fn = {}
+_ready = false
+_probed = false
+_loadedFrom = nil
+_extraPath = nil
+
+# Point at a libpq.dll somewhere else. Must be called before connecting.
+export task useLibrary(path) {
+    _extraPath = path
+    _probed = false
+    _ready = false
+    give nil
+}
+
+task probe() {
+    when _probed { give _ready }
+    _probed = true
+    candidates = []
+    when _extraPath != nil { push(candidates, _extraPath) }
+    get p in SEARCH_PATHS { push(candidates, p) }
+
+    get path in candidates {
+        try {
+            handle = os_load_lib(path)
+            when handle != nil and handle != 0 {
+                complete = true
+                table = {}
+                get name in REQUIRED {
+                    fnPtr = os_get_func(handle, name)
+                    when fnPtr == nil or fnPtr == 0 { complete = false }
+                    other { table[name] = fnPtr }
+                }
+                when complete {
+                    _lib = handle
+                    _fn = table
+                    _loadedFrom = path
+                    _ready = true
+                }
+            }
+        }
+        catch (e) { }
+    }
+    give _ready
+}
+
+export task isAvailable() { give probe() }
+
+export task libraryPath() {
+    probe()
+    give _loadedFrom
+}
+
+export task requireLibrary() {
+    when probe() { give true }
+    throw Exception("postgres: libpq.dll could not be loaded.\n" +
+        "  It ships with PostgreSQL rather than with Windows. Either:\n" +
+        "    - install PostgreSQL (the client alone is enough), or\n" +
+        "    - copy libpq.dll and its dependencies beside your script in dlls/, or\n" +
+        "    - call useLibrary(\"C:/path/to/libpq.dll\") before connecting.\n" +
+        "  Looked in: " + join(SEARCH_PATHS, ", "))
+}
+
+task call(name, retType, args) {
+    give _fn[name]
+}
+
+# ── connections ─────────────────────────────────────────────────────────────
+
+export task connectRaw(conninfo) {
+    requireLibrary()
+    give os_call(_fn["PQconnectdb"], "ptr", conninfo)
+}
+
+export task connectionOk(conn) {
+    when conn == nil or conn == 0 { give false }
+    give os_call(_fn["PQstatus"], "i32", conn) == CONNECTION_OK
+}
+
+export task connectionError(conn) {
+    when conn == nil or conn == 0 { give "no connection" }
+    give trim(readPtr(os_call(_fn["PQerrorMessage"], "ptr", conn)))
+}
+
+export task closeConnection(conn) {
+    when conn != nil and conn != 0 { os_call(_fn["PQfinish"], "void", conn) }
+    give nil
+}
+
+export task resetConnection(conn) {
+    when conn != nil and conn != 0 { os_call(_fn["PQreset"], "void", conn) }
+    give nil
+}
+
+export task serverVersion(conn) { give os_call(_fn["PQserverVersion"], "i32", conn) }
+
+export task transactionStatus(conn) { give os_call(_fn["PQtransactionStatus"], "i32", conn) }
+
+# ── running statements ──────────────────────────────────────────────────────
+
+export task execRaw(conn, sql) {
+    give os_call(_fn["PQexec"], "ptr", conn, sql)
+}
+
+# The whole reason this package refuses to build SQL by concatenation: values
+# travel beside the statement, never inside it, so a value containing a quote
+# or a semicolon is data and can never become syntax.
+#
+# A nil parameter is sent as a NULL POINTER, which is how libpq distinguishes
+# SQL NULL from an empty string. Writing "" here would silently turn every
+# nil into an empty string.
+export task execParams(conn, sql, params) {
+    count = len(params)
+    when count == 0 { give execRaw(conn, sql) }
+
+    holders = []
+    pointerArray = os_alloc(count * 8)
+    index = 0
+    get value in params {
+        when value == nil { os_write_int64(pointerArray, index * 8, 0) }
+        other {
+            body = str(value)
+            cell = os_alloc(len(body) + 1)
+            os_write_string(cell, 0, body)
+            push(holders, cell)
+            os_write_int64(pointerArray, index * 8, cell)
+        }
+        index = index + 1
+    }
+    # paramTypes / paramLengths / paramFormats all NULL: the server infers the
+    # types and everything travels as text. resultFormat 0 for the same reason.
+    result = os_call(_fn["PQexecParams"], "ptr", conn, sql, count, 0, pointerArray, 0, 0, 0)
+    get cell in holders { os_free(cell) }
+    os_free(pointerArray)
+    give result
+}
+
+# ── reading results ─────────────────────────────────────────────────────────
+
+export task resultStatus(res) { give os_call(_fn["PQresultStatus"], "i32", res) }
+export task rowCount(res) { give os_call(_fn["PQntuples"], "i32", res) }
+export task columnCount(res) { give os_call(_fn["PQnfields"], "i32", res) }
+export task columnName(res, index) { give readPtr(os_call(_fn["PQfname"], "ptr", res, index)) }
+export task columnType(res, index) { give os_call(_fn["PQftype"], "u32", res, index) }
+export task valueIsNull(res, row, col) { give os_call(_fn["PQgetisnull"], "i32", res, row, col) == 1 }
+export task valueLength(res, row, col) { give os_call(_fn["PQgetlength"], "i32", res, row, col) }
+
+export task rawValue(res, row, col) {
+    give readPtr(os_call(_fn["PQgetvalue"], "ptr", res, row, col))
+}
+
+# For INSERT/UPDATE/DELETE, as a string libpq hands back.
+export task affectedRows(res) {
+    text = trim(readPtr(os_call(_fn["PQcmdTuples"], "ptr", res)))
+    when text == "" { give 0 }
+    give num(text)
+}
+
+export task clearResult(res) {
+    when res != nil and res != 0 { os_call(_fn["PQclear"], "void", res) }
+    give nil
+}
+
+# Everything the server said about a failure. The SQLSTATE is the part worth
+# branching on -- the message text is localised and changes between versions.
+export task resultError(res) {
+    give {
+        "sqlstate": field(res, FIELD_SQLSTATE),
+        "message": field(res, FIELD_MESSAGE_PRIMARY),
+        "detail": field(res, FIELD_MESSAGE_DETAIL),
+        "hint": field(res, FIELD_MESSAGE_HINT),
+        "constraint": field(res, FIELD_CONSTRAINT_NAME),
+        "table": field(res, FIELD_TABLE_NAME),
+        "column": field(res, FIELD_COLUMN_NAME),
+        "full": trim(readPtr(os_call(_fn["PQresultErrorMessage"], "ptr", res)))
+    }
+}
+
+task field(res, code) {
+    ptr = os_call(_fn["PQresultErrorField"], "ptr", res, code)
+    when ptr == nil or ptr == 0 { give nil }
+    text = readPtr(ptr)
+    when text == "" { give nil }
+    give text
+}
+
+task readPtr(ptr) {
+    when ptr == nil or ptr == 0 { give "" }
+    try { give os_read_string_ptr(ptr) }
+    catch (e) { give "" }
+}

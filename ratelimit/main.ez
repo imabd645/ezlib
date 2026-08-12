@@ -1,0 +1,253 @@
+# ============================================================================
+# ratelimit — request throttling for EZ
+#
+#   use "ratelimit"
+#
+#   limiter = RateLimit(100, 60)              # 100 requests per 60 seconds
+#
+#   result = limiter.check(req["ip"])
+#   when result["allowed"] == false {
+#       give { "status": 429, "headers": limiter.headers(result) }
+#   }
+#
+# `retry` protects you from a service that is failing. This is the other
+# direction: protecting your service from whoever is calling it.
+#
+# Two algorithms, because they fail differently:
+#
+#   sliding  counts what actually happened in the last N seconds. Strict, and
+#            the right default for an API.
+#   bucket   refills continuously and allows a burst up to its capacity. Right
+#            where occasional spikes are legitimate.
+#
+# A fixed window is deliberately not offered: it lets through twice the limit
+# across a boundary -- the full quota at 0:59 and again at 1:00 -- which is
+# the failure people discover in production.
+# ============================================================================
+
+use "ratelimit/stores.ez"
+
+export SLIDING = "sliding"
+export BUCKET = "bucket"
+
+export model RateLimit {
+
+    # `limit` requests per `windowSeconds`.
+    init(limit, windowSeconds) {
+        self.limit = limit
+        self.window = windowSeconds
+        self.algorithm = SLIDING
+        self.store = MemoryStore()
+        self.pruneEvery = 200
+        self.calls = 0
+    }
+
+    # ── configuration ───────────────────────────────────────────────────────
+
+    task sliding() { self.algorithm = SLIDING  give self }
+
+    # Allow bursts up to the limit, refilling steadily.
+    task bucket() { self.algorithm = BUCKET  give self }
+
+    # Share counters between processes. `client` needs get / setEx / delete.
+    task useRedis(client, prefix) {
+        self.store = RedisStore(client, prefix)
+        give self
+    }
+
+    task useStore(store) {
+        self.store = store
+        give self
+    }
+
+    # ── checking ────────────────────────────────────────────────────────────
+
+    # Consume one unit against `key` and report the outcome:
+    #
+    #   { allowed, remaining, limit, retryAfter, resetAt }
+    #
+    # retryAfter is seconds until the next unit is available, and is 0 when
+    # the request was allowed.
+    task check(key) { give self.consume(key, 1) }
+
+    # Consume `cost` units at once, for endpoints that are more expensive than
+    # others. A request costing more than the whole limit can never pass, so
+    # that is refused rather than silently never allowed.
+    task consume(key, cost) {
+        when cost > self.limit {
+            throw Exception(`ratelimit: a cost of {cost} can never fit a limit of {self.limit}`)
+        }
+        self.calls = self.calls + 1
+        when self.pruneEvery > 0 and self.calls % self.pruneEvery == 0 {
+            self.store.prune(nowSeconds())
+        }
+        when self.algorithm == BUCKET { give self.consumeBucket(str(key), cost) }
+        give self.consumeSliding(str(key), cost)
+    }
+
+    # Report without consuming, for showing a quota.
+    task peek(key) {
+        record = self.store.read(str(key))
+        when record == nil {
+            give { "allowed": true, "remaining": self.limit, "limit": self.limit,
+                   "retryAfter": 0, "resetAt": nowSeconds() + self.window }
+        }
+        when self.algorithm == BUCKET {
+            tokens = self.refilled(record, nowSeconds())
+            give { "allowed": tokens >= 1, "remaining": floor(tokens), "limit": self.limit,
+                   "retryAfter": self.bucketWait(tokens, 1), "resetAt": record["resetAt"] }
+        }
+        used = self.countRecent(record, nowSeconds())
+        remaining = self.limit - used
+        when remaining < 0 { remaining = 0 }
+        give { "allowed": remaining > 0, "remaining": remaining, "limit": self.limit,
+               "retryAfter": self.slidingWait(record, nowSeconds()), "resetAt": record["resetAt"] }
+    }
+
+    task reset(key) {
+        self.store.forget(str(key))
+        give nil
+    }
+
+    task clear() {
+        self.store.clear()
+        give nil
+    }
+
+    # ── sliding window ──────────────────────────────────────────────────────
+
+    # Keeps the timestamp of each request in the window. Exact, at the cost of
+    # remembering `limit` timestamps per key -- fine for the limits people
+    # actually set, and the reason `bucket` exists for very high ones.
+    task consumeSliding(key, cost) {
+        now = nowSeconds()
+        record = self.store.read(key)
+        when record == nil { record = { "hits": [], "resetAt": now + self.window } }
+
+        kept = []
+        get stamp in record["hits"] {
+            when now - stamp < self.window { push(kept, stamp) }
+        }
+
+        when len(kept) + cost > self.limit {
+            record["hits"] = kept
+            record["resetAt"] = kept[0] + self.window
+            record["ttlSeconds"] = self.window
+            self.store.write(key, record)
+            give { "allowed": false, "remaining": self.limit - len(kept), "limit": self.limit,
+                   "retryAfter": self.slidingWait(record, now), "resetAt": record["resetAt"] }
+        }
+
+        repeat i = 1 to cost { push(kept, now) }
+        record["hits"] = kept
+        record["resetAt"] = now + self.window
+        record["expiresAt"] = now + self.window
+        record["ttlSeconds"] = self.window
+        self.store.write(key, record)
+        give { "allowed": true, "remaining": self.limit - len(kept), "limit": self.limit,
+               "retryAfter": 0, "resetAt": record["resetAt"] }
+    }
+
+    task countRecent(record, now) {
+        used = 0
+        get stamp in record["hits"] {
+            when now - stamp < self.window { used = used + 1 }
+        }
+        give used
+    }
+
+    # Until the oldest request leaves the window.
+    task slidingWait(record, now) {
+        when len(record["hits"]) == 0 { give 0 }
+        oldest = record["hits"][0]
+        remaining = self.window - (now - oldest)
+        when remaining < 0 { give 0 }
+        give remaining
+    }
+
+    # ── token bucket ────────────────────────────────────────────────────────
+
+    # Refills at limit/window per second up to a capacity of `limit`, so a
+    # client that has been idle may spend a burst at once and one that is
+    # steady is smoothed to the average rate.
+    task consumeBucket(key, cost) {
+        now = nowSeconds()
+        record = self.store.read(key)
+        when record == nil {
+            record = { "tokens": self.limit, "stamp": now, "resetAt": now + self.window }
+        }
+
+        tokens = self.refilled(record, now)
+        when tokens < cost {
+            record["tokens"] = tokens
+            record["stamp"] = now
+            record["ttlSeconds"] = self.window
+            record["expiresAt"] = now + self.window
+            self.store.write(key, record)
+            give { "allowed": false, "remaining": floor(tokens), "limit": self.limit,
+                   "retryAfter": self.bucketWait(tokens, cost), "resetAt": now + self.bucketWait(tokens, cost) }
+        }
+
+        record["tokens"] = tokens - cost
+        record["stamp"] = now
+        record["resetAt"] = now + self.window
+        record["expiresAt"] = now + self.window
+        record["ttlSeconds"] = self.window
+        self.store.write(key, record)
+        give { "allowed": true, "remaining": floor(record["tokens"]), "limit": self.limit,
+               "retryAfter": 0, "resetAt": record["resetAt"] }
+    }
+
+    task refillRate() { give self.limit / self.window }
+
+    task refilled(record, now) {
+        elapsed = now - record["stamp"]
+        when elapsed < 0 { elapsed = 0 }
+        tokens = record["tokens"] + (elapsed * self.refillRate())
+        when tokens > self.limit { give self.limit }
+        give tokens
+    }
+
+    task bucketWait(tokens, cost) {
+        missing = cost - tokens
+        when missing <= 0 { give 0 }
+        give missing / self.refillRate()
+    }
+
+    # ── responding ──────────────────────────────────────────────────────────
+
+    # The conventional headers, so a client can back off intelligently rather
+    # than hammering until it is banned.
+    task headers(result) {
+        h = {
+            "X-RateLimit-Limit": str(result["limit"]),
+            "X-RateLimit-Remaining": str(result["remaining"]),
+            "X-RateLimit-Reset": str(floor(result["resetAt"]))
+        }
+        when result["allowed"] == false {
+            h["Retry-After"] = str(ceilTo(result["retryAfter"]))
+        }
+        give h
+    }
+
+    # Run `action` when the key is under its limit, otherwise `rejected`.
+    task guard(key, action, rejected) {
+        result = self.check(key)
+        when result["allowed"] { give action() }
+        give rejected(result)
+    }
+}
+
+task nowSeconds() { give clock() / 1000 }
+
+task ceilTo(value) {
+    whole = floor(value)
+    when value > whole { give whole + 1 }
+    give whole
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task perMinute(limit) { give RateLimit(limit, 60) }
+export task perHour(limit) { give RateLimit(limit, 3600) }
+export task perSecond(limit) { give RateLimit(limit, 1) }

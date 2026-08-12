@@ -1,0 +1,8 @@
+{
+    "name": "web",
+    "version": "1.0.0",
+    "description": "Flask/Express style Web App Framework for EZ",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {}
+}

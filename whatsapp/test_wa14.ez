@@ -1,0 +1,5 @@
+# os_* are builtins -- no import needed
+hBuf = os_alloc(8)
+rc = os_call(os_get_func(os_load_lib("bcrypt.dll"), "BCryptOpenAlgorithmProvider"), "int", hBuf, "X\x002\x005\x005\x001\x009\x00\x00\x00", 0, 0)
+out "rc: " + str(rc)
+

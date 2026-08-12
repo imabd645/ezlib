@@ -1,0 +1,108 @@
+# ============================================================================
+# yaml/scalar.ez — scalar text to typed EZ value
+#
+# Plain (unquoted) scalars carry their type in their spelling, so `port: 8080`
+# yields a number while `port: "8080"` yields a string. Quoting is therefore
+# meaningful and is preserved by the emitter for any string that would
+# otherwise be read back as another type.
+# ============================================================================
+
+export NULL_WORDS = ["null", "Null", "NULL", "~", ""]
+export TRUE_WORDS = ["true", "True", "TRUE", "yes", "Yes", "YES", "on", "On", "ON"]
+export FALSE_WORDS = ["false", "False", "FALSE", "no", "No", "NO", "off", "Off", "OFF"]
+
+task yamlInList(word, list) {
+    get w in list {
+        when w == word { give true }
+    }
+    give false
+}
+
+# Decodes the escapes YAML defines for double-quoted scalars. Single-quoted
+# scalars have no escapes at all apart from '' meaning a literal quote.
+task yamlUnescapeDouble(body) {
+    out2 = ""
+    n = len(body)
+    i = 0
+    while i < n {
+        c = substr(body, i, 1)
+        when c == "\\" and i + 1 < n {
+            nx = substr(body, i + 1, 1)
+            when nx == "n" { out2 = out2 + chr(10) }
+            other { when nx == "t" { out2 = out2 + chr(9) }
+            other { when nx == "r" { out2 = out2 + chr(13) }
+            other { when nx == "0" { out2 = out2 + chr(0) }
+            other { when nx == `"` { out2 = out2 + `"` }
+            other { when nx == "\\" { out2 = out2 + "\\" }
+            other { when nx == "/" { out2 = out2 + "/" }
+            other {
+                # Unknown escape: keep it verbatim rather than silently
+                # dropping a character the author clearly meant to include.
+                out2 = out2 + c + nx
+            }}}}}}}
+            i = i + 2
+            skip
+        }
+        out2 = out2 + c
+        i = i + 1
+    }
+    give out2
+}
+
+# True when the text is a YAML number. Written by hand rather than relying on
+# num(), because num("12abc") yields 12 in EZ and would silently corrupt a
+# string value that merely starts with digits.
+export task yamlIsNumber(s) {
+    n = len(s)
+    when n == 0 { give false }
+    i = 0
+    c0 = substr(s, 0, 1)
+    when c0 == "-" or c0 == "+" { i = 1 }
+    digits = 0
+    dots = 0
+    exps = 0
+    while i < n {
+        c = substr(s, i, 1)
+        code = ord(c)
+        when code >= 48 and code <= 57 { digits = digits + 1 }
+        other { when c == "." {
+            dots = dots + 1
+            when dots > 1 { give false }
+            when exps > 0 { give false }
+        }
+        other { when c == "e" or c == "E" {
+            exps = exps + 1
+            when exps > 1 { give false }
+            when digits == 0 { give false }
+            # An exponent may carry its own sign.
+            when i + 1 < n {
+                nx = substr(s, i + 1, 1)
+                when nx == "-" or nx == "+" { i = i + 1 }
+            }
+        }
+        other { give false }}}
+        i = i + 1
+    }
+    give digits > 0
+}
+
+export task yamlParseScalar(raw) {
+    s = trim(raw)
+    when s == "" { give nil }
+
+    first = substr(s, 0, 1)
+
+    # Quoted: the quotes decide the type, so no further inference happens.
+    when first == `"` and len(s) >= 2 and substr(s, len(s) - 1, 1) == `"` {
+        give yamlUnescapeDouble(substr(s, 1, len(s) - 2))
+    }
+    when first == "'" and len(s) >= 2 and substr(s, len(s) - 1, 1) == "'" {
+        give replace(substr(s, 1, len(s) - 2), "''", "'")
+    }
+
+    when yamlInList(s, NULL_WORDS) { give nil }
+    when yamlInList(s, TRUE_WORDS) { give true }
+    when yamlInList(s, FALSE_WORDS) { give false }
+    when yamlIsNumber(s) { give num(s) }
+    give s
+}

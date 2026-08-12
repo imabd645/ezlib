@@ -1,0 +1,123 @@
+# ============================================================================
+# markdown — test suite
+#   ez test.ez
+# ============================================================================
+
+use "markdown"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task r(source) { give Markdown.render(source) }
+
+out "markdown tests"
+
+# ── headings ────────────────────────────────────────────────────────────────
+check("h1", r("# A"), "<h1>A</h1>")
+check("h3", r("### A"), "<h3>A</h3>")
+check("h6", r("###### A"), "<h6>A</h6>")
+check("seven hashes is text", r("####### A"), "<p>####### A</p>")
+check("hash without space", r("#A"), "<p>#A</p>")
+check("closing hashes trimmed", r("## A ##"), "<h2>A</h2>")
+
+# ── paragraphs ──────────────────────────────────────────────────────────────
+check("paragraph", r("hello"), "<p>hello</p>")
+check("wrapped lines join", r("a" + NL + "b"), "<p>a b</p>")
+check("blank splits paragraphs", r("a" + NL + NL + "b"), "<p>a</p>" + NL + "<p>b</p>")
+check("hard break", r("a  " + NL + "b"), "<p>a<br>b</p>")
+
+# ── emphasis ────────────────────────────────────────────────────────────────
+check("bold stars", r("**x**"), "<p><strong>x</strong></p>")
+check("bold underscores", r("__x__"), "<p><strong>x</strong></p>")
+check("italic star", r("*x*"), "<p><em>x</em></p>")
+check("italic underscore", r("_x_"), "<p><em>x</em></p>")
+check("strikethrough", r("~~x~~"), "<p><del>x</del></p>")
+check("bold inside text", r("a **b** c"), "<p>a <strong>b</strong> c</p>")
+check("unclosed bold literal", r("**x"), "<p>**x</p>")
+check("empty emphasis untouched", r("a ** ** b"), "<p>a ** ** b</p>")
+
+# ── code ────────────────────────────────────────────────────────────────────
+check("code span", r("`x`"), "<p><code>x</code></p>")
+check("code span not formatted", r("`**x**`"), "<p><code>**x**</code></p>")
+check("code span escapes", r("`<b>`"), "<p><code>&lt;b&gt;</code></p>")
+check("fenced code", r("```" + NL + "a" + NL + "```"), "<pre><code>a</code></pre>")
+check("fenced with language", r("```ez" + NL + "a" + NL + "```"),
+      `<pre><code class="language-ez">a</code></pre>`)
+check("fenced keeps markdown literal", r("```" + NL + "# not a heading" + NL + "```"),
+      "<pre><code># not a heading</code></pre>")
+check("tilde fence", r("~~~" + NL + "a" + NL + "~~~"), "<pre><code>a</code></pre>")
+
+# ── lists ───────────────────────────────────────────────────────────────────
+check("bullet dash", r("- a" + NL + "- b"), "<ul><li>a</li><li>b</li></ul>")
+check("bullet star", r("* a"), "<ul><li>a</li></ul>")
+check("bullet plus", r("+ a"), "<ul><li>a</li></ul>")
+check("ordered", r("1. a" + NL + "2. b"), "<ol><li>a</li><li>b</li></ol>")
+check("list item formatting", r("- **a**"), "<ul><li><strong>a</strong></li></ul>")
+check("nested list", r("- a" + NL + "  - b"), "<ul><li>a<ul><li>b</li></ul></li></ul>")
+
+# ── rules ───────────────────────────────────────────────────────────────────
+check("rule dashes", r("---"), "<hr>")
+check("rule stars", r("***"), "<hr>")
+check("rule underscores", r("___"), "<hr>")
+check("two dashes not a rule", r("--"), "<p>--</p>")
+
+# ── blockquote ──────────────────────────────────────────────────────────────
+check("blockquote", r("> a"), "<blockquote><p>a</p></blockquote>")
+check("blockquote joins", r("> a" + NL + "> b"), "<blockquote><p>a b</p></blockquote>")
+check("blockquote formatting", r("> **a**"), "<blockquote><p><strong>a</strong></p></blockquote>")
+
+# ── links and images ────────────────────────────────────────────────────────
+check("link", r("[a](https://x.co)"),
+      `<p><a href="https://x.co" rel="nofollow noopener noreferrer" target="_blank">a</a></p>`)
+check("relative link no target attr", r("[a](/page)"), `<p><a href="/page">a</a></p>`)
+check("image", r("![alt](/i.png)"), `<p><img src="/i.png" alt="alt"></p>`)
+check("autolink", r("https://x.co"),
+      `<p><a href="https://x.co" rel="nofollow noopener noreferrer" target="_blank">https://x.co</a></p>`)
+check("bracket without paren", r("[a]"), "<p>[a]</p>")
+check("parens in url", r("[a](/x(1))"), `<p><a href="/x(1)">a</a></p>`)
+
+# ── security: escape-first ──────────────────────────────────────────────────
+check("script tag escaped", r("<script>alert(1)</script>"),
+      "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>")
+check("img onerror escaped", r(`<img src=x onerror="alert(1)">`),
+      "<p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>")
+check("javascript url refused", r("[a](javascript:alert(1))"), "<p>a</p>")
+check("data url refused", r("[a](data:text/html,x)"), "<p>a</p>")
+check("vbscript url refused", r("[a](vbscript:x)"), "<p>a</p>")
+check("javascript image refused", r("![a](javascript:x)"), "<p>a</p>")
+check("ampersand escaped", r("a & b"), "<p>a &amp; b</p>")
+check("quotes escaped", r(`say "hi"`), "<p>say &quot;hi&quot;</p>")
+check("html in heading escaped", r("# <b>x</b>"), "<h1>&lt;b&gt;x&lt;/b&gt;</h1>")
+check("html in list escaped", r("- <b>x</b>"), "<ul><li>&lt;b&gt;x&lt;/b&gt;</li></ul>")
+
+# ── tables ──────────────────────────────────────────────────────────────────
+check("table", r("| a | b |" + NL + "|---|---|" + NL + "| 1 | 2 |"),
+      "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>")
+check("table alignment row ignored", r("| a |" + NL + "|:-:|" + NL + "| 1 |"),
+      "<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>1</td></tr></tbody></table>")
+check("pipe without separator is text", r("a | b"), "<p>a | b</p>")
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+check("renderInline no wrapper", Markdown.renderInline("**a**"), "<strong>a</strong>")
+check("escape helper", Markdown.escape("<a>"), "&lt;a&gt;")
+check("toText strips", Markdown.toText("# A" + NL + NL + "b **c**"), "A b c")
+check("toText unescapes", Markdown.toText("a & b"), "a & b")
+check("excerpt short", Markdown.excerpt("short", 50), "short")
+check("excerpt truncates", contains(Markdown.excerpt("aaa bbb ccc ddd eee", 10), "..."), true)
+check("empty source", r(""), "")
+check("nil source", r(nil), "")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

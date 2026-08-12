@@ -1,0 +1,11 @@
+{
+  "name": "xml",
+  "version": "1.0.0",
+  "description": "XML parser and builder for EZ. Elements, attributes, CDATA, comments and entities, with find/findAll queries and serialisation.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["xml", "parser", "rss", "soap", "feed", "markup"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

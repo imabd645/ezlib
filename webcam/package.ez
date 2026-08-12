@@ -1,0 +1,6 @@
+{
+    "name": "webcam",
+    "version": "1.0.0",
+    "description": "Live webcam stream and photo capture via Video for Windows FFI.",
+    "entry": "main.ez"
+}

@@ -1,0 +1,156 @@
+# ============================================================================
+# totp — test suite
+#   ez test.ez
+# ============================================================================
+
+use "totp"
+use "totp/base32.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task bytesOf(s) {
+    octets = []
+    repeat i = 0 to len(s) - 1 { push(octets, ord(substr(s, i, 1))) }
+    give octets
+}
+task textOf(octets) {
+    body = ""
+    get b in octets { body = body + chr(b) }
+    give body
+}
+
+out "totp tests"
+
+# ── base32 (RFC 4648 vectors) ───────────────────────────────────────────────
+check("encode f", base32Encode(bytesOf("f")), "MY")
+check("encode fo", base32Encode(bytesOf("fo")), "MZXQ")
+check("encode foo", base32Encode(bytesOf("foo")), "MZXW6")
+check("encode foob", base32Encode(bytesOf("foob")), "MZXW6YQ")
+check("encode fooba", base32Encode(bytesOf("fooba")), "MZXW6YTB")
+check("encode foobar", base32Encode(bytesOf("foobar")), "MZXW6YTBOI")
+check("encode empty", base32Encode([]), "")
+
+check("decode foobar", textOf(base32Decode("MZXW6YTBOI")), "foobar")
+check("decode f", textOf(base32Decode("MY")), "f")
+check("decode is case-insensitive", textOf(base32Decode("mzxw6ytboi")), "foobar")
+check("decode ignores padding", textOf(base32Decode("MZXW6===")), "foo")
+check("decode ignores spaces", textOf(base32Decode("MZXW 6YTB OI")), "foobar")
+check("round trip bytes", base32Encode(base32Decode("JBSWY3DP")), "JBSWY3DP")
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("invalid base32 character", || base32Decode("8!!"))
+
+# ── RFC 6238 test vectors ───────────────────────────────────────────────────
+# Secret "12345678901234567890" in base32. These are the published vectors;
+# matching them is what says the implementation is correct rather than merely
+# self-consistent.
+SEC = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+check("T=59", TOTP.atWith(SEC, 59, 30, 8, "SHA1"), "94287082")
+check("T=1111111109", TOTP.atWith(SEC, 1111111109, 30, 8, "SHA1"), "07081804")
+check("T=1111111111", TOTP.atWith(SEC, 1111111111, 30, 8, "SHA1"), "14050471")
+check("T=1234567890", TOTP.atWith(SEC, 1234567890, 30, 8, "SHA1"), "89005924")
+check("T=2000000000", TOTP.atWith(SEC, 2000000000, 30, 8, "SHA1"), "69279037")
+check("T=20000000000", TOTP.atWith(SEC, 20000000000, 30, 8, "SHA1"), "65353130")
+
+# ── HOTP (RFC 4226 vectors) ─────────────────────────────────────────────────
+# Same secret, counters 0-5, six digits.
+check("HOTP counter 0", TOTP.hotp(SEC, 0, 6, "SHA1"), "755224")
+check("HOTP counter 1", TOTP.hotp(SEC, 1, 6, "SHA1"), "287082")
+check("HOTP counter 2", TOTP.hotp(SEC, 2, 6, "SHA1"), "359152")
+check("HOTP counter 3", TOTP.hotp(SEC, 3, 6, "SHA1"), "969429")
+check("HOTP counter 4", TOTP.hotp(SEC, 4, 6, "SHA1"), "338314")
+check("HOTP counter 5", TOTP.hotp(SEC, 5, 6, "SHA1"), "254676")
+
+# ── shape ───────────────────────────────────────────────────────────────────
+code = TOTP.generate(SEC)
+check("default is six digits", len(code), 6)
+check("code is all digits", re_test(code, "^[0-9]{6}$"), true)
+# A code below 100000 must keep its leading zero, or verification fails.
+check("eight-digit padding", len(TOTP.atWith(SEC, 1111111109, 30, 8, "SHA1")), 8)
+check("padded code keeps zero", startsWith(TOTP.atWith(SEC, 1111111109, 30, 8, "SHA1"), "0"), true)
+
+# Codes are stable within a period and change across one. A 30-second step
+# starting at 990 covers 990-1019, so those are the bounds to test -- 1000
+# and 1029 straddle the boundary and are correctly different.
+check("stable at the start of a period", TOTP.at(SEC, 990) == TOTP.at(SEC, 1000), true)
+check("stable at the end of a period", TOTP.at(SEC, 990) == TOTP.at(SEC, 1019), true)
+check("changes at the boundary", TOTP.at(SEC, 1019) != TOTP.at(SEC, 1020), true)
+
+# ── verification ────────────────────────────────────────────────────────────
+current = TOTP.generate(SEC)
+check("accepts the current code", TOTP.verify(SEC, current), true)
+check("rejects a wrong code", TOTP.verify(SEC, "000000"), false)
+check("rejects the wrong length", TOTP.verify(SEC, "1234"), false)
+check("rejects empty", TOTP.verify(SEC, ""), false)
+check("tolerates spaces", TOTP.verify(SEC, substr(current, 0, 3) + " " + substr(current, 3, 3)), true)
+
+# The window absorbs clock drift: the previous and next codes are accepted,
+# but one further out is not.
+now = TOTP.now()
+previous = TOTP.at(SEC, now - 30)
+following = TOTP.at(SEC, now + 30)
+faraway = TOTP.at(SEC, now + 300)
+check("accepts the previous code", TOTP.verify(SEC, previous), true)
+check("accepts the next code", TOTP.verify(SEC, following), true)
+check("rejects a distant code", TOTP.verify(SEC, faraway), false)
+check("zero window rejects neighbours",
+      TOTP.verifyWith(SEC, previous, 0, 30, 6, "SHA1"), false)
+
+check("constant-time equal", TOTP.constantTimeEquals("123456", "123456"), true)
+check("constant-time differs", TOTP.constantTimeEquals("123456", "123457"), false)
+check("constant-time length", TOTP.constantTimeEquals("123", "123456"), false)
+
+# ── algorithms and digits ───────────────────────────────────────────────────
+check("SHA256 differs from SHA1",
+      TOTP.atWith(SEC, 59, 30, 8, "SHA256") != TOTP.atWith(SEC, 59, 30, 8, "SHA1"), true)
+check("SHA512 is eight digits", len(TOTP.atWith(SEC, 59, 30, 8, "SHA512")), 8)
+check("SHA256 verifies", TOTP.verifyWith(SEC, TOTP.atWith(SEC, TOTP.now(), 30, 6, "SHA256"),
+      1, 30, 6, "SHA256"), true)
+check("custom period", TOTP.atWith(SEC, 60, 60, 6, "SHA1") == TOTP.atWith(SEC, 119, 60, 6, "SHA1"), true)
+
+# ── secrets ─────────────────────────────────────────────────────────────────
+secret = TOTP.generateSecret()
+check("secret is 32 chars", len(secret), 32)
+check("secret is valid", TOTP.isValidSecret(secret), true)
+check("secrets differ", TOTP.generateSecret() != TOTP.generateSecret(), true)
+check("generated secret produces codes", len(TOTP.generate(secret)), 6)
+check("generated secret verifies", TOTP.verify(secret, TOTP.generate(secret)), true)
+check("custom length secret", len(TOTP.generateSecretOf(10)), 16)
+check("invalid secret rejected", TOTP.isValidSecret("!!!!"), false)
+check("formatted in fours", TOTP.formatSecret("ABCDEFGH"), "ABCD EFGH")
+check("format handles remainder", TOTP.formatSecret("ABCDE"), "ABCD E")
+
+# ── enrolment URI ───────────────────────────────────────────────────────────
+uri = TOTP.uri(SEC, "ali@example.com", "My App")
+check("uri scheme", startsWith(uri, "otpauth://totp/"), true)
+check("uri carries the secret", contains(uri, "secret=" + SEC), true)
+check("uri carries the issuer", contains(uri, "issuer="), true)
+check("uri carries the algorithm", contains(uri, "algorithm=SHA1"), true)
+check("uri carries the period", contains(uri, "period=30"), true)
+# The account contains an @, which must be escaped or the label breaks.
+check("uri escapes the account", contains(uri, "%40"), true)
+
+check("seconds remaining in range",
+      TOTP.secondsRemaining() > 0 and TOTP.secondsRemaining() <= 30, true)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

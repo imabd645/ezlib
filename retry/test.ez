@@ -1,0 +1,204 @@
+# ============================================================================
+# retry — test suite
+#   ez test.ez
+#
+# Delays are set to a millisecond or two throughout: the point is to exercise
+# the policy, not to wait for it.
+# ============================================================================
+
+use "retry"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+CALLS = 0
+task reset() { CALLS = 0  give nil }
+
+# Fails until it has been called `succeedOn` times.
+FAIL_UNTIL = 3
+task flaky() {
+    CALLS = CALLS + 1
+    when CALLS < FAIL_UNTIL { throw Exception("transient") }
+    give "ok"
+}
+task always() {
+    CALLS = CALLS + 1
+    throw Exception("permanent")
+}
+task never() {
+    CALLS = CALLS + 1
+    give "first try"
+}
+
+FAST = Retry().times(5).waiting(0.001).withoutJitter()
+
+out "retry tests"
+
+# ── succeeding ──────────────────────────────────────────────────────────────
+reset()
+check("returns the value", FAST.run(|| never()), "first try")
+check("no retry when it works", CALLS, 1)
+
+reset()
+FAIL_UNTIL = 3
+check("succeeds after retries", FAST.run(|| flaky()), "ok")
+check("called until success", CALLS, 3)
+
+# ── giving up ───────────────────────────────────────────────────────────────
+reset()
+threw = false
+try { FAST.run(|| always()) } catch (e) { threw = true }
+check("rethrows after the last attempt", threw, true)
+check("used every attempt", CALLS, 5)
+
+reset()
+check("runOr falls back", FAST.runOr(|| always(), "fb"), "fb")
+reset()
+check("runOr passes success through", FAST.runOr(|| never(), "fb"), "first try")
+
+# times(1) means try once and do not retry.
+reset()
+once = Retry().times(1).waiting(0.001)
+try { once.run(|| always()) } catch (e) { }
+check("times(1) does not retry", CALLS, 1)
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("zero attempts rejected", || Retry().times(0))
+
+# ── the original error survives ─────────────────────────────────────────────
+# A retry wrapper that swallows the cause makes failures unreadable.
+reset()
+message = ""
+try { FAST.run(|| always()) } catch (e) { message = e.message }
+check("last exception is rethrown", message, "permanent")
+
+# ── deciding what to retry ──────────────────────────────────────────────────
+# A 404 should not be retried; a timeout should.
+reset()
+picky = Retry().times(5).waiting(0.001).onlyWhen(|e| contains(e.message, "timeout"))
+try { picky.run(|| always()) } catch (e) { }
+check("stops on a non-retryable error", CALLS, 1)
+
+reset()
+FAIL_UNTIL = 2
+timeouts = 0
+task timeoutOnce() {
+    CALLS = CALLS + 1
+    when CALLS < 2 { throw Exception("timeout reached") }
+    give "recovered"
+}
+retryTimeouts = Retry().times(4).waiting(0.001).onlyWhen(|e| contains(e.message, "timeout"))
+check("retries a matching error", retryTimeouts.run(|| timeoutOnce()), "recovered")
+check("retried exactly once", CALLS, 2)
+
+# ── notification ────────────────────────────────────────────────────────────
+reset()
+NOTICES = 0
+watched = Retry().times(3).waiting(0.001).notify(|attempt, e, delay| {
+    NOTICES = NOTICES + 1
+    give nil
+})
+try { watched.run(|| always()) } catch (e) { }
+# Notified before each wait, so once fewer than the attempts.
+check("notified between attempts", NOTICES, 2)
+
+# ── backoff shape ───────────────────────────────────────────────────────────
+plain = Retry().waiting(1).backoff(2).capped(30).withoutJitter()
+check("no delay before the first", plain.delayFor(1), 0)
+check("first wait", plain.delayFor(2), 1)
+check("doubles", plain.delayFor(3), 2)
+check("doubles again", plain.delayFor(4), 4)
+check("capped", plain.delayFor(20), 30)
+
+flat = Retry().waiting(2).backoff(1).withoutJitter()
+check("constant backoff", flat.delayFor(5), 2)
+
+# Jitter must stay within the computed delay -- full jitter picks a point in
+# [0, delay], never beyond it.
+jittery = Retry().waiting(1).backoff(2).capped(30)
+inRange = true
+repeat i = 1 to 40 {
+    d = jittery.delayFor(3)
+    when d < 0 or d > 2 { inRange = false }
+}
+check("jitter stays within the delay", inRange, true)
+
+# ── attempt() report ────────────────────────────────────────────────────────
+reset()
+FAIL_UNTIL = 2
+report = Retry().times(4).waiting(0.001).attempt(|| flaky())
+check("report ok", report["ok"], true)
+check("report value", report["value"], "ok")
+check("report has no error", report["error"], nil)
+check("report counts attempts", report["attempts"], 2)
+
+reset()
+bad = Retry().times(2).waiting(0.001).attempt(|| always())
+check("failed report ok", bad["ok"], false)
+check("failed report carries the error", bad["error"].message, "permanent")
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+reset()
+check("retryOr shorthand", retryOr(|| always(), "fb"), "fb")
+reset()
+check("retryTimes shorthand", retryTimes(1, || never()), "first try")
+check("networkRetry attempts", networkRetry().attempts, 5)
+check("networkRetry cap", networkRetry().maxDelay, 10)
+
+# ── circuit breaker ─────────────────────────────────────────────────────────
+b = CircuitBreaker(2, 10)
+check("starts closed", b.currentState(), "closed")
+check("passes values through", b.run(|| "value"), "value")
+
+try { b.run(|| always()) } catch (e) { }
+check("one failure stays closed", b.currentState(), "closed")
+try { b.run(|| always()) } catch (e) { }
+check("threshold opens it", b.currentState(), "open")
+check("open reports isOpen", b.isOpen(), true)
+
+# Once open it fails fast without calling the action at all.
+reset()
+check("fails fast", b.runOr(|| never(), "blocked"), "blocked")
+check("action was not called", CALLS, 0)
+
+b.reset()
+check("reset closes it", b.currentState(), "closed")
+check("works again after reset", b.run(|| "back"), "back")
+
+# A success clears the failure count, so intermittent errors never trip it.
+c = CircuitBreaker(2, 10)
+try { c.run(|| always()) } catch (e) { }
+c.run(|| "fine")
+try { c.run(|| always()) } catch (e) { }
+check("success resets the count", c.currentState(), "closed")
+
+# After the cooldown it moves to half-open and lets one call through.
+d = CircuitBreaker(1, 0.02)
+try { d.run(|| always()) } catch (e) { }
+check("opened", d.currentState(), "open")
+until = clock() + 40
+while clock() < until { }
+check("cools down to half-open", d.currentState(), "half-open")
+check("half-open allows a trial", d.run(|| "trial"), "trial")
+check("success closes it", d.currentState(), "closed")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

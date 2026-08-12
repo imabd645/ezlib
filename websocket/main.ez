@@ -1,0 +1,285 @@
+# ============================================================================
+# websocket — RFC 6455 client for EZ
+#
+#   use "websocket"
+#
+#   ws = WebSocket("ws://echo.example.com/socket")
+#   ws.connect()
+#   ws.send("hello")
+#   out ws.receive()
+#   ws.close()
+#
+# A WebSocket starts life as an HTTP request that asks to be upgraded; once
+# the server agrees, the same TCP connection carries frames in both
+# directions. Everything below is built on `socket`, so there is no native
+# dependency.
+# ============================================================================
+
+use "socket"
+use "crypto"
+use "websocket/bytes.ez"
+use "websocket/frame.ez"
+
+# Fixed by the RFC. The server appends it to the client key, hashes with
+# SHA-1 and base64s the result; a client checks the answer to be sure it is
+# talking to a WebSocket server and not something that merely said 101.
+MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+export model WebSocket {
+
+    init(url) {
+        parsed = wsParseUrl(url)
+        self.host = parsed["host"]
+        self.port = parsed["port"]
+        self.path = parsed["path"]
+        self.secure = parsed["secure"]
+        self.conn = nil
+        self.buffer = ""
+        self.open = false
+        self.timeoutMs = 10000
+        self.headers = {}
+        self.closeCode = 0
+        self.closeReason = ""
+    }
+
+    task timeout(ms) {
+        self.timeoutMs = ms
+        when self.conn != nil { self.conn.setTimeout(ms) }
+        give self
+    }
+
+    # Extra HTTP headers for the handshake -- Authorization, Cookie, Origin.
+    task header(name, value) {
+        self.headers[name] = str(value)
+        give self
+    }
+
+    # ── handshake ───────────────────────────────────────────────────────────
+
+    task connect() {
+        when self.open { give self }
+        when self.secure {
+            throw Exception("websocket: wss:// needs TLS, which this client does not implement -- use ws:// behind a TLS-terminating proxy")
+        }
+
+        self.conn = tcp_connect(self.host, self.port, self.timeoutMs)
+        self.conn.setTimeout(self.timeoutMs)
+
+        key = wsNonce()
+        request = "GET " + self.path + " HTTP/1.1" + chr(13) + chr(10)
+        request = request + "Host: " + self.host + ":" + str(self.port) + chr(13) + chr(10)
+        request = request + "Upgrade: websocket" + chr(13) + chr(10)
+        request = request + "Connection: Upgrade" + chr(13) + chr(10)
+        request = request + "Sec-WebSocket-Key: " + key + chr(13) + chr(10)
+        request = request + "Sec-WebSocket-Version: 13" + chr(13) + chr(10)
+        get name in keys(self.headers) {
+            request = request + name + ": " + self.headers[name] + chr(13) + chr(10)
+        }
+        request = request + chr(13) + chr(10)
+        self.conn.sendAll(request)
+
+        response = self.readHandshake()
+        firstLine = response
+        lineEnd = indexOf(response, chr(13) + chr(10))
+        when lineEnd >= 0 { firstLine = substr(response, 0, lineEnd) }
+        when contains(firstLine, "101") == false {
+            self.conn.close()
+            throw Exception(`websocket: the server refused to upgrade -- "{firstLine}"`)
+        }
+
+        expected = wsAcceptFor(key)
+        when contains(response, expected) == false {
+            self.conn.close()
+            throw Exception("websocket: Sec-WebSocket-Accept did not match; this is not a WebSocket server")
+        }
+
+        self.open = true
+        give self
+    }
+
+    # Reads until the blank line that ends the HTTP headers. Anything after
+    # it is the first frame data and is kept.
+    task readHandshake() {
+        marker = chr(13) + chr(10) + chr(13) + chr(10)
+        while true {
+            at = indexOf(self.buffer, marker)
+            when at >= 0 {
+                head = substr(self.buffer, 0, at)
+                rest = at + 4
+                self.buffer = substr(self.buffer, rest, len(self.buffer) - rest)
+                give head
+            }
+            chunk = self.conn.recv(4096)
+            when len(chunk) == 0 {
+                throw Exception("websocket: the connection closed during the handshake")
+            }
+            self.buffer = self.buffer + chunk
+        }
+    }
+
+    # ── sending ─────────────────────────────────────────────────────────────
+
+    task sendFrame(opcode, payload) {
+        when self.open == false { throw Exception("websocket: not connected") }
+        # A client must mask every frame.
+        self.conn.sendAll(encodeFrame(opcode, payload, wsMaskKey()))
+        give nil
+    }
+
+    task send(text) { give self.sendFrame(OP_TEXT, strToBytes(str(text))) }
+
+    task sendBytes(octets) { give self.sendFrame(OP_BINARY, octets) }
+
+    task ping(payload) {
+        body = []
+        when payload != nil { body = strToBytes(str(payload)) }
+        give self.sendFrame(OP_PING, body)
+    }
+
+    # ── receiving ───────────────────────────────────────────────────────────
+
+    # Next text or binary message, or nil once the peer closes.
+    #
+    # Ping is answered and close is acknowledged here rather than handed to
+    # the caller: a connection that ignores those is closed by the peer, and
+    # making every caller remember to handle them is a trap.
+    task receive() {
+        message = self.receiveMessage()
+        when message == nil { give nil }
+        give message["text"]
+    }
+
+    # As receive(), but returns { opcode, text, payload } so binary messages
+    # keep their bytes.
+    task receiveMessage() {
+        parts = []
+        firstOpcode = -1
+        while true {
+            frame = self.nextFrame()
+            when frame == nil { give nil }
+            opcode = frame["opcode"]
+
+            when opcode == OP_PING {
+                self.sendFrame(OP_PONG, frame["payload"])
+                skip
+            }
+            when opcode == OP_PONG { skip }
+            when opcode == OP_CLOSE {
+                info = decodeClosePayload(frame["payload"])
+                self.closeCode = info["code"]
+                self.closeReason = info["reason"]
+                # Echo the close before hanging up, as the RFC requires.
+                try { self.sendFrame(OP_CLOSE, frame["payload"]) } catch (e) { }
+                self.shutdown()
+                give nil
+            }
+
+            # A message may arrive fragmented; the first frame carries the
+            # opcode and the rest are continuations until FIN.
+            when opcode != OP_CONTINUATION { firstOpcode = opcode }
+            get b in frame["payload"] { push(parts, b) }
+            when frame["fin"] {
+                give {
+                    "opcode": firstOpcode,
+                    "payload": parts,
+                    "text": bytesToStr(parts)
+                }
+            }
+        }
+    }
+
+    task nextFrame() {
+        while true {
+            when len(self.buffer) > 0 {
+                decoded = decodeFrame(self.buffer, 0)
+                when decoded != nil {
+                    self.buffer = substr(self.buffer, decoded[1], len(self.buffer) - decoded[1])
+                    give decoded[0]
+                }
+            }
+            when self.open == false { give nil }
+            chunk = self.conn.recv(4096)
+            when len(chunk) == 0 {
+                self.shutdown()
+                give nil
+            }
+            self.buffer = self.buffer + chunk
+        }
+    }
+
+    # ── closing ─────────────────────────────────────────────────────────────
+
+    task close() { give self.closeWith(1000, "") }
+
+    task closeWith(code, reason) {
+        when self.open {
+            try { self.sendFrame(OP_CLOSE, encodeClosePayload(code, reason)) }
+            catch (e) { }
+        }
+        self.shutdown()
+        give nil
+    }
+
+    task shutdown() {
+        when self.conn != nil {
+            try { self.conn.close() } catch (e) { }
+        }
+        self.conn = nil
+        self.open = false
+        give nil
+    }
+
+    task isOpen() { give self.open }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+# ws://host:port/path  (or wss://, which connect() refuses)
+export task wsParseUrl(url) {
+    body = str(url)
+    secure = false
+    when startsWith(body, "wss://") { secure = true  body = substr(body, 6, len(body) - 6) }
+    other {
+        when startsWith(body, "ws://") { body = substr(body, 5, len(body) - 5) }
+    }
+
+    path = "/"
+    slashAt = indexOf(body, "/")
+    when slashAt >= 0 {
+        path = substr(body, slashAt, len(body) - slashAt)
+        body = substr(body, 0, slashAt)
+    }
+
+    port = 80
+    when secure { port = 443 }
+    host = body
+    colonAt = indexOf(body, ":")
+    when colonAt >= 0 {
+        host = substr(body, 0, colonAt)
+        port = num(substr(body, colonAt + 1, len(body) - colonAt - 1))
+    }
+    give { "host": host, "port": port, "path": path, "secure": secure }
+}
+
+# 16 random bytes, base64'd, as the RFC requires.
+export task wsNonce() {
+    octets = []
+    repeat i = 1 to 16 { push(octets, randint(0, 255)) }
+    give Crypto.base64Encode(bytesToStr(octets))
+}
+
+export task wsMaskKey() {
+    octets = []
+    repeat i = 1 to 4 { push(octets, randint(0, 255)) }
+    give octets
+}
+
+# base64(sha1(key + MAGIC)) -- what the server is required to send back.
+#
+# Crypto.sha1 returns hex, and the RFC needs the raw 20-byte digest, so it is
+# converted back to bytes before base64. Encoding the hex text instead would
+# produce a 40-character answer that never matches.
+export task wsAcceptFor(key) {
+    digest = hex_to_bytes(Crypto.sha1(key + MAGIC))
+    give Crypto.base64Encode(bytesToStr(digest))
+}

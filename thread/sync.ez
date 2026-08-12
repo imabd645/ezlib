@@ -1,0 +1,153 @@
+// ============================================================================
+// thread — Synchronisation primitives
+//
+// Built on the interpreter's native Channel, which is a real mutex plus
+// condition variable. The previous versions of these tracked a counter in a
+// dictionary and spun on `wait(1)`:
+//
+//     while self.state["count"] <= 0 { wait(1) }
+//     self.state["count"] = self.state["count"] - 1
+//
+// The check and the decrement are separate steps, so two threads could both
+// see the last permit and both take it. That is not a semaphore -- it hands
+// out more permits than it has while looking correct. Handing tokens through a
+// channel makes taking a permit a single atomic operation, and blocks in the
+// OS rather than polling.
+//
+// For a plain mutual-exclusion lock, use the interpreter's own `mutex()` and
+// `lock(m, fn)` -- a real std::mutex with RAII release. This package no longer
+// ships its own Mutex model, which had the same broken check-then-act.
+// ============================================================================
+use "errors.ez"
+
+// Counting semaphore. `n` permits may be held at once.
+export model Semaphore {
+    init(n) {
+        when typeOf(n) != "integer" and typeOf(n) != "number" {
+            throw ThreadError("Semaphore(n) expects a number of permits, got " + typeOf(n))
+        }
+        when n < 1 {
+            throw ThreadError("Semaphore needs at least 1 permit, got " + str(n))
+        }
+        self.permits = n
+        self._ch = Channel()
+        // One token per permit. Holding a permit means holding a token.
+        i = 0
+        while i < n {
+            self._ch.send(1)
+            i = i + 1
+        }
+    }
+
+    // Blocks until a permit is free.
+    task acquire() {
+        self._ch.receive()
+        give self
+    }
+
+    // Blocks up to ms. Throws TimeoutError rather than returning quietly, so a
+    // caller cannot mistake a timeout for having taken a permit.
+    task acquireTimeout(ms) {
+        got = self._ch.receiveTimeout(ms)
+        when got == nil {
+            throw TimeoutError("Semaphore: no permit available after " + str(ms) + "ms")
+        }
+        give self
+    }
+
+    // Takes a permit only if one is free right now. Never blocks.
+    task tryAcquire() {
+        give self._ch.tryReceive() != nil
+    }
+
+    task release() {
+        self._ch.send(1)
+        give self
+    }
+
+    // Runs fn() holding a permit, releasing it even if fn throws.
+    task withPermit(fn) {
+        self.acquire()
+        try {
+            result = fn()
+            self.release()
+            give result
+        } catch (e) {
+            self.release()
+            throw e
+        }
+    }
+
+    // Permits currently free.
+    task available() { give self._ch.size() }
+
+    task max() { give self.permits }
+}
+
+// Runs work across at most `size` threads at a time.
+//
+// The bound is real now: it used to rest on the racy semaphore above, so a pool
+// of 4 could run considerably more than 4 tasks at once.
+export model WorkerPool {
+    init(size) {
+        self.size = size
+        self.sem = Semaphore(size)
+    }
+
+    // Maps items concurrently, never more than `size` in flight. Results come
+    // back in the order of `items`, not completion order.
+    task mapAll(items, mapper) {
+        sem = self.sem
+        task pooled(item) {
+            sem.acquire()
+            try {
+                r = mapper(item)
+                sem.release()
+                give r
+            } catch (e) {
+                sem.release()
+                throw e
+            }
+        }
+        futures = []
+        get item in items {
+            push(futures, spawn(pooled, item))
+        }
+        give awaitAll(futures)
+    }
+
+    // Fire and forget across the pool, waiting for everything to finish.
+    task forEach(items, fn) {
+        self.mapAll(items, | item | {
+            fn(item)
+            give nil
+        })
+        give nil
+    }
+}
+
+// A one-shot latch: waiters block until it is opened, then all proceed.
+// Opening twice is harmless.
+export model Latch {
+    init() {
+        self._ch = Channel()
+        self.opened = false
+    }
+
+    task open() {
+        when not self.opened {
+            self.opened = true
+            // Closing wakes every waiter at once; receive() on a closed empty
+            // channel returns immediately.
+            self._ch.close()
+        }
+        give self
+    }
+
+    task await() {
+        self._ch.receive()
+        give self
+    }
+
+    task isOpen() { give self.opened }
+}

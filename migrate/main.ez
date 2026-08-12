@@ -1,0 +1,280 @@
+# ============================================================================
+# migrate — schema migrations for EZ
+#
+#   use "migrate"
+#   use "orm"
+#
+#   engine = Engine(SQLiteDriver("app.db"))
+#   m = Migrator(engine.driver)
+#
+#   m.add("001_users",
+#       |db| db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", []),
+#       |db| db.execute("DROP TABLE users", []))
+#
+#   m.up()
+#
+# The ORM's createAll() uses CREATE TABLE IF NOT EXISTS, so changing a model
+# does not alter an existing table -- the schema silently drifts from the code
+# and you find out when a query fails. Migrations are the record of how the
+# schema got to where it is, applied in order, exactly once each.
+# ============================================================================
+
+use "migrate/store.ez"
+
+export model Migrator {
+
+    init(driver) {
+        self.driver = driver
+        self.migrations = []
+        self.verbose = true
+        self.logger = nil
+    }
+
+    # Silence progress output, or route it somewhere.
+    task quiet() {
+        self.verbose = false
+        give self
+    }
+
+    task onLog(handler) {
+        self.logger = handler
+        give self
+    }
+
+    task say(message) {
+        when self.logger != nil { self.logger(message)  give nil }
+        when self.verbose { out message }
+        give nil
+    }
+
+    # ── declaring ───────────────────────────────────────────────────────────
+
+    # `id` orders the migration and identifies it forever, so use a sortable
+    # prefix: "001_users" or "20260812_1430_add_email".
+    #
+    # `up` and `down` each receive the driver. `down` may be nil for a
+    # migration that cannot be undone -- rolling back past it then fails
+    # loudly rather than pretending.
+    task add(id, up, down) {
+        name = str(id)
+        get existing in self.migrations {
+            when existing["id"] == name {
+                throw Exception(`migrate: '{name}' is declared twice`)
+            }
+        }
+        push(self.migrations, { "id": name, "up": up, "down": down, "checksum": "" })
+        give self
+    }
+
+    # Attach a fingerprint so an edit to an already-applied migration can be
+    # detected. Optional: pass the migration's source text.
+    task addWithSource(id, up, down, source) {
+        self.add(id, up, down)
+        self.migrations[len(self.migrations) - 1]["checksum"] = fingerprint(source)
+        give self
+    }
+
+    # Sorted by id, which is why ids must sort in the order they should run.
+    task ordered() {
+        copy = []
+        get m in self.migrations { push(copy, m) }
+        # Insertion sort on id: migration lists are short and this keeps the
+        # comparison explicit.
+        result = []
+        get m in copy {
+            placed = false
+            index = 0
+            get seen in result {
+                when m["id"] < seen["id"] {
+                    insert(result, index, m)
+                    placed = true
+                    escape
+                }
+                index = index + 1
+            }
+            when placed == false { push(result, m) }
+        }
+        give result
+    }
+
+    task find(id) {
+        get m in self.migrations {
+            when m["id"] == str(id) { give m }
+        }
+        give nil
+    }
+
+    # ── inspecting ──────────────────────────────────────────────────────────
+
+    task applied() { give appliedIds(self.driver) }
+
+    task pending() {
+        done = self.applied()
+        waiting = []
+        get m in self.ordered() {
+            seen = false
+            get id in done {
+                when id == m["id"] { seen = true }
+            }
+            when seen == false { push(waiting, m["id"]) }
+        }
+        give waiting
+    }
+
+    # Per migration: { id, applied, changed }. `changed` flags a migration
+    # whose source no longer matches what was recorded when it ran.
+    task status() {
+        rows = []
+        done = self.applied()
+        get m in self.ordered() {
+            wasApplied = false
+            get id in done {
+                when id == m["id"] { wasApplied = true }
+            }
+            changed = false
+            when wasApplied and m["checksum"] != "" {
+                recorded = checksumOf(self.driver, m["id"])
+                when recorded != nil and recorded != "" and recorded != m["checksum"] {
+                    changed = true
+                }
+            }
+            push(rows, { "id": m["id"], "applied": wasApplied, "changed": changed })
+        }
+        give rows
+    }
+
+    # Migrations that were applied but are no longer declared. Usually means a
+    # file was deleted, or the database is ahead of the code -- both worth
+    # knowing before deploying.
+    task orphans() {
+        found = []
+        get id in self.applied() {
+            when self.find(id) == nil { push(found, id) }
+        }
+        give found
+    }
+
+    # Editing an applied migration is the mistake this exists to catch: it
+    # runs cleanly on a fresh database and does nothing on an existing one,
+    # so environments diverge with no error anywhere.
+    task drifted() {
+        found = []
+        get row in self.status() {
+            when row["changed"] { push(found, row["id"]) }
+        }
+        give found
+    }
+
+    # ── running ─────────────────────────────────────────────────────────────
+
+    # Apply every pending migration, oldest first. Returns the ids applied.
+    task up() { give self.upTo(nil) }
+
+    # Apply pending migrations up to and including `targetId`.
+    task upTo(targetId) {
+        ensureLedger(self.driver)
+        done = []
+        get m in self.ordered() {
+            when isApplied(self.driver, m["id"]) {
+                when targetId != nil and m["id"] == str(targetId) { escape }
+                skip
+            }
+            self.runOne(m, true)
+            push(done, m["id"])
+            when targetId != nil and m["id"] == str(targetId) { escape }
+        }
+        when len(done) == 0 { self.say("migrate: nothing to apply") }
+        give done
+    }
+
+    # Roll back the last `count` applied migrations, newest first.
+    task down(count) {
+        ensureLedger(self.driver)
+        howMany = count
+        when howMany == nil { howMany = 1 }
+
+        # Newest first, restricted to what is actually applied.
+        applieds = []
+        get m in self.ordered() {
+            when isApplied(self.driver, m["id"]) { push(applieds, m) }
+        }
+        applieds = reverse(applieds)
+
+        undone = []
+        get m in applieds {
+            when len(undone) >= howMany { escape }
+            self.runOne(m, false)
+            push(undone, m["id"])
+        }
+        when len(undone) == 0 { self.say("migrate: nothing to roll back") }
+        give undone
+    }
+
+    # Roll everything back, newest first.
+    task reset() { give self.down(len(self.migrations)) }
+
+    # Roll back one migration and reapply it. For iterating on the newest one
+    # during development -- never on a database holding real data.
+    task redo() {
+        undone = self.down(1)
+        when len(undone) == 0 { give [] }
+        give self.up()
+    }
+
+    # Runs one migration inside a transaction, so a failure part-way leaves
+    # the schema as it was rather than half-changed. The ledger row is written
+    # in the same transaction: recording a migration that did not fully apply
+    # is worse than not recording one that did.
+    task runOne(m, forward) {
+        direction = "down"
+        action = m["down"]
+        when forward { direction = "up"  action = m["up"] }
+
+        when action == nil {
+            throw Exception(`migrate: '{m["id"]}' has no {direction} step`)
+        }
+
+        self.driver.begin()
+        try {
+            action(self.driver)
+            when forward {
+                recordApplied(self.driver, m["id"], m["checksum"], nowStamp())
+            }
+            other {
+                recordReverted(self.driver, m["id"])
+            }
+            self.driver.commit()
+        }
+        catch (e) {
+            try { self.driver.rollback() } catch (inner) { }
+            throw Exception(`migrate: '{m["id"]}' failed going {direction} -- {e.message}`)
+        }
+        self.say("  " + direction + "  " + m["id"])
+        give nil
+    }
+
+    # A readable summary, for a CLI or a health check.
+    task report() {
+        lines = []
+        get row in self.status() {
+            mark = "pending"
+            when row["applied"] { mark = "applied" }
+            when row["changed"] { mark = "CHANGED" }
+            push(lines, "  " + mark + "  " + row["id"])
+        }
+        get id in self.orphans() {
+            push(lines, "  orphan   " + id + " (applied but no longer declared)")
+        }
+        when len(lines) == 0 { give "  no migrations declared" }
+        give join(lines, chr(10))
+    }
+}
+
+task nowStamp() {
+    d = DateTime()
+    give d.format("%Y-%m-%d %H:%M:%S")
+}
+
+# ── shorthand ───────────────────────────────────────────────────────────────
+
+export task migrator(driver) { give Migrator(driver) }

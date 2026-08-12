@@ -1,0 +1,89 @@
+# ============================================================================
+# queue/memory.ez — in-process driver
+#
+# Everything lives in this process, so it is lost on restart. Right for tests,
+# single-process tools and development; wrong for anything that must survive a
+# deploy, which is what the Redis driver is for.
+# ============================================================================
+
+export model MemoryDriver {
+
+    init() {
+        self.pending = []      # jobs waiting, oldest first
+        self.reserved = {}     # id -> job, taken but not yet finished
+        self.failed = []
+        self.nextId = 1
+    }
+
+    task push(name, payload, options) {
+        job = {
+            "id": str(self.nextId),
+            "name": name,
+            "payload": payload,
+            "attempts": 0,
+            "availableAt": 0,
+            "queue": options["queue"]
+        }
+        self.nextId = self.nextId + 1
+        when has_key(options, "delay") {
+            job["availableAt"] = clock() + (options["delay"] * 1000)
+        }
+        push(self.pending, job)
+        give job["id"]
+    }
+
+    # Oldest job that is due, moved to reserved. nil when nothing is ready.
+    task reserve(queueName) {
+        now = clock()
+        index = 0
+        get job in self.pending {
+            when job["queue"] == queueName and job["availableAt"] <= now {
+                remove(self.pending, index)
+                job["attempts"] = job["attempts"] + 1
+                self.reserved[job["id"]] = job
+                give job
+            }
+            index = index + 1
+        }
+        give nil
+    }
+
+    task complete(job) {
+        when has_key(self.reserved, job["id"]) { dictRemove(self.reserved, job["id"]) }
+        give nil
+    }
+
+    # Back to pending, optionally after a delay.
+    task release(job, delaySeconds) {
+        when has_key(self.reserved, job["id"]) { dictRemove(self.reserved, job["id"]) }
+        job["availableAt"] = clock() + (delaySeconds * 1000)
+        push(self.pending, job)
+        give nil
+    }
+
+    task fail(job, reason) {
+        when has_key(self.reserved, job["id"]) { dictRemove(self.reserved, job["id"]) }
+        job["error"] = str(reason)
+        push(self.failed, job)
+        give nil
+    }
+
+    task size(queueName) {
+        count = 0
+        get job in self.pending {
+            when job["queue"] == queueName { count = count + 1 }
+        }
+        give count
+    }
+
+    task failedJobs() { give self.failed }
+
+    task clear(queueName) {
+        kept = []
+        get job in self.pending {
+            when job["queue"] != queueName { push(kept, job) }
+        }
+        self.pending = kept
+        give nil
+    }
+}

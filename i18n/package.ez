@@ -1,0 +1,11 @@
+{
+  "name": "i18n",
+  "version": "1.0.0",
+  "description": "Translation and localisation for EZ. Nested catalogues, interpolation, CLDR plural rules and locale-aware number and currency formatting.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["i18n", "l10n", "translation", "locale", "plural", "internationalization"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

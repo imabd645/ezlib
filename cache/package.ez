@@ -1,0 +1,11 @@
+{
+  "name": "cache",
+  "version": "1.0.0",
+  "description": "In-memory caching for EZ. TTL expiry, LRU eviction, compute-on-miss fetch, memoisation and hit-rate statistics.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["cache", "ttl", "lru", "memoize", "memoise", "performance"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

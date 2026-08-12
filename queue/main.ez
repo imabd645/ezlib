@@ -1,0 +1,178 @@
+# ============================================================================
+# queue — background job queues for EZ
+#
+#   use "queue"
+#
+#   q = Queue()                                 # in-process
+#   q.handle("email", |payload| sendEmail(payload))
+#
+#   q.push("email", { "to": "a@b.co" })
+#   q.work()                                    # run everything queued
+#
+# Work that does not have to finish inside a request -- sending mail,
+# resizing an image, calling a slow API -- belongs on a queue. Backed by
+# memory for development and by Redis when the jobs must survive a restart or
+# be shared between workers.
+# ============================================================================
+
+use "queue/memory.ez"
+use "queue/redisdriver.ez"
+
+DEFAULT_QUEUE = "default"
+DEFAULT_ATTEMPTS = 3
+
+export model Queue {
+
+    # With no driver, jobs live in this process only.
+    init() {
+        self.driver = MemoryDriver()
+        self.name = DEFAULT_QUEUE
+        self.handlers = {}
+        self.maxAttempts = DEFAULT_ATTEMPTS
+        self.retryDelay = 0
+        self.onFailed = nil
+        self.onCompleted = nil
+    }
+
+    # Persist through Redis. `prefix` namespaces the keys so several apps can
+    # share one server.
+    task useRedis(client, prefix) {
+        self.driver = RedisDriver(client, prefix)
+        give self
+    }
+
+    # Queues are named so different work can be processed at different rates.
+    task on(queueName) {
+        self.name = queueName
+        give self
+    }
+
+    task attempts(count) {
+        self.maxAttempts = count
+        give self
+    }
+
+    # Seconds to wait before retrying a failed job.
+    task backoff(seconds) {
+        self.retryDelay = seconds
+        give self
+    }
+
+    task handle(jobName, handler) {
+        self.handlers[jobName] = handler
+        give self
+    }
+
+    task whenFailed(handler) {
+        self.onFailed = handler
+        give self
+    }
+
+    task whenCompleted(handler) {
+        self.onCompleted = handler
+        give self
+    }
+
+    # ── queueing ────────────────────────────────────────────────────────────
+
+    # Queue a job. Returns its id.
+    task push(jobName, payload) {
+        give self.driver.push(jobName, payload, { "queue": self.name })
+    }
+
+    # Queue a job to become available after `seconds`.
+    task later(jobName, payload, seconds) {
+        give self.driver.push(jobName, payload, { "queue": self.name, "delay": seconds })
+    }
+
+    task size() { give self.driver.size(self.name) }
+    task isEmpty() { give self.size() == 0 }
+    task clear() { give self.driver.clear(self.name) }
+    task failed() { give self.driver.failedJobs() }
+
+    # ── processing ──────────────────────────────────────────────────────────
+
+    # Run one job if any is ready. Returns the job, or nil when idle.
+    task runNext() {
+        job = self.driver.reserve(self.name)
+        when job == nil { give nil }
+
+        handler = nil
+        when has_key(self.handlers, job["name"]) { handler = self.handlers[job["name"]] }
+        when handler == nil {
+            # No handler is a permanent failure: retrying will not conjure
+            # one, and burning the attempts would hide the real problem.
+            self.driver.fail(job, `no handler registered for '{job["name"]}'`)
+            when self.onFailed != nil { self.onFailed(job, "no handler") }
+            give job
+        }
+
+        try {
+            handler(job["payload"])
+            self.driver.complete(job)
+            when self.onCompleted != nil { self.onCompleted(job) }
+        }
+        catch (e) {
+            when job["attempts"] >= self.maxAttempts {
+                self.driver.fail(job, e.message)
+                when self.onFailed != nil { self.onFailed(job, e.message) }
+            }
+            other {
+                self.driver.release(job, self.retryDelay)
+            }
+        }
+        give job
+    }
+
+    # Run until the queue is empty. Returns how many jobs were processed.
+    #
+    # Jobs released for retry come back around, so a job that keeps failing
+    # is retried within this same call until its attempts run out.
+    task work() { give self.workLimit(0) }
+
+    # As work(), but stops after `limit` jobs. 0 means no limit.
+    task workLimit(limit) {
+        processed = 0
+        while true {
+            when limit > 0 and processed >= limit { escape }
+            job = self.runNext()
+            when job == nil { escape }
+            processed = processed + 1
+        }
+        give processed
+    }
+
+    # Keep processing, waiting when idle, until `seconds` have passed.
+    # A long-running worker calls this in a loop.
+    task workFor(seconds) {
+        until = clock() + (seconds * 1000)
+        processed = 0
+        while clock() < until {
+            job = self.runNext()
+            when job != nil { processed = processed + 1 }
+            other {
+                # Idle: pause briefly rather than spinning the CPU flat.
+                pauseUntil = clock() + 50
+                while clock() < pauseUntil and clock() < until { }
+            }
+        }
+        give processed
+    }
+
+    # Put jobs abandoned by a dead worker back on the queue. Redis only;
+    # returns 0 for the memory driver, where a dead process loses everything
+    # regardless.
+    task recoverStalled() {
+        when hasattr(self.driver, "recoverStalled") {
+            give self.driver.recoverStalled(self.name)
+        }
+        give 0
+    }
+}
+
+# A queue backed by Redis in one call.
+export task redisQueue(client, prefix) {
+    q = Queue()
+    q.useRedis(client, prefix)
+    give q
+}

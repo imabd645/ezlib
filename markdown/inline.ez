@@ -1,0 +1,202 @@
+# ============================================================================
+# markdown/inline.ez — spans inside a line of text
+#
+# SECURITY: the whole text is HTML-escaped BEFORE any formatting is applied,
+# and formatting only ever inserts tags into already-escaped text. Raw HTML in
+# the source therefore cannot survive as markup -- not because a filter caught
+# it, but because there is no path by which it stays unescaped. Markdown is
+# usually written by someone other than the person rendering it, so an
+# allow-list of "safe" tags would be the wrong trade.
+# ============================================================================
+
+# A byte that cannot appear in escaped text, used to park code spans while the
+# rest of the line is formatted.
+MARK = chr(1)
+
+export task mdEscape(s) {
+    body = replace(str(s), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    body = replace(body, `"`, "&quot;")
+    body = replace(body, "'", "&#39;")
+    give body
+}
+
+# Rejects anything that is not clearly a safe link target. `javascript:` and
+# `data:` URLs in an href are script execution, so they are dropped rather
+# than rendered as dead links -- a visible "#" is easier to notice than a
+# silently working exploit.
+export task mdSafeUrl(url) {
+    trimmed = trim(url)
+    lowered = lower(trimmed)
+    get bad in ["javascript:", "data:", "vbscript:", "file:"] {
+        when startsWith(lowered, bad) { give "" }
+    }
+    # A colon before any slash means an unknown scheme; allow only known ones.
+    colon = indexOf(trimmed, ":")
+    slash = indexOf(trimmed, "/")
+    when colon >= 0 {
+        when slash < 0 or colon < slash {
+            allowed = false
+            get ok in ["http:", "https:", "mailto:", "tel:", "ftp:"] {
+                when startsWith(lowered, ok) { allowed = true }
+            }
+            when allowed == false { give "" }
+        }
+    }
+    give trimmed
+}
+
+task mdFindClose(s, openAt, marker) {
+    markLen = len(marker)
+    total = len(s)
+    i = openAt + markLen
+    while i + markLen <= total {
+        when substr(s, i, markLen) == marker { give i }
+        i = i + 1
+    }
+    give -1
+}
+
+# Replaces `marker text marker` with <tag>text</tag>, left to right.
+task mdWrap(s, marker, tag) {
+    result = ""
+    rest = s
+    markLen = len(marker)
+    while true {
+        at = indexOf(rest, marker)
+        when at < 0 { escape }
+        closeAt = mdFindClose(rest, at, marker)
+        when closeAt < 0 { escape }
+        inner = substr(rest, at + markLen, closeAt - at - markLen)
+        # `** **` with nothing between is not emphasis.
+        when trim(inner) == "" {
+            result = result + substr(rest, 0, at + markLen)
+            rest = substr(rest, at + markLen, len(rest) - at - markLen)
+            skip
+        }
+        result = result + substr(rest, 0, at) + "<" + tag + ">" + inner + "</" + tag + ">"
+        rest = substr(rest, closeAt + markLen, len(rest) - closeAt - markLen)
+    }
+    give result + rest
+}
+
+# ![alt](url) and [text](url)
+task mdLinks(s) {
+    result = ""
+    rest = s
+    while true {
+        openAt = indexOf(rest, "[")
+        when openAt < 0 { escape }
+        isImage = openAt > 0 and substr(rest, openAt - 1, 1) == "!"
+
+        closeAt = -1
+        total = len(rest)
+        i = openAt + 1
+        while i < total {
+            when substr(rest, i, 1) == "]" { closeAt = i  escape }
+            i = i + 1
+        }
+        when closeAt < 0 { escape }
+        when closeAt + 1 >= total or substr(rest, closeAt + 1, 1) != "(" {
+            result = result + substr(rest, 0, closeAt + 1)
+            rest = substr(rest, closeAt + 1, len(rest) - closeAt - 1)
+            skip
+        }
+        # Parens are counted rather than matched on the first ')', so a URL
+        # containing them -- (a) Wikipedia-style, or javascript:alert(1) --
+        # is captured whole instead of being truncated and leaving a stray ')'
+        # in the output.
+        parenAt = -1
+        depth = 0
+        i = closeAt + 1
+        while i < total {
+            c = substr(rest, i, 1)
+            when c == "(" { depth = depth + 1 }
+            when c == ")" {
+                depth = depth - 1
+                when depth == 0 { parenAt = i  escape }
+            }
+            i = i + 1
+        }
+        when parenAt < 0 { escape }
+
+        label = substr(rest, openAt + 1, closeAt - openAt - 1)
+        target = mdSafeUrl(substr(rest, closeAt + 2, parenAt - closeAt - 2))
+        head = substr(rest, 0, openAt)
+        when isImage { head = substr(rest, 0, openAt - 1) }
+
+        when target == "" {
+            # Refused target: keep the label as plain text so the content is
+            # not lost, but emit no link.
+            result = result + head + label
+        }
+        other {
+            when isImage {
+                result = result + head + `<img src="` + target + `" alt="` + label + `">`
+            }
+            other {
+                external = startsWith(lower(target), "http")
+                attrs = ""
+                when external { attrs = ` rel="nofollow noopener noreferrer" target="_blank"` }
+                result = result + head + `<a href="` + target + `"` + attrs + ">" + label + "</a>"
+            }
+        }
+        rest = substr(rest, parenAt + 1, len(rest) - parenAt - 1)
+    }
+    give result + rest
+}
+
+# Bare http(s) URLs become links, but only when not already inside one.
+task mdAutoLink(s) {
+    words = split(s, " ")
+    outWords = []
+    get w in words {
+        when startsWith(w, "http://") or startsWith(w, "https://") {
+            target = mdSafeUrl(w)
+            when target == "" { push(outWords, w) }
+            other {
+                push(outWords, `<a href="` + target + `" rel="nofollow noopener noreferrer" target="_blank">` + w + "</a>")
+            }
+        }
+        other { push(outWords, w) }
+    }
+    give join(outWords, " ")
+}
+
+export task mdInline(text) {
+    body = mdEscape(text)
+
+    # Code spans are parked before anything else so their contents are never
+    # treated as emphasis or links.
+    spans = []
+    result = ""
+    rest = body
+    while true {
+        at = indexOf(rest, "`")
+        when at < 0 { escape }
+        closeAt = mdFindClose(rest, at, "`")
+        when closeAt < 0 { escape }
+        code = substr(rest, at + 1, closeAt - at - 1)
+        push(spans, code)
+        result = result + substr(rest, 0, at) + MARK + str(len(spans) - 1) + MARK
+        rest = substr(rest, closeAt + 1, len(rest) - closeAt - 1)
+    }
+    body = result + rest
+
+    body = mdLinks(body)
+    body = mdAutoLink(body)
+    body = mdWrap(body, "***", "strong")
+    body = mdWrap(body, "**", "strong")
+    body = mdWrap(body, "__", "strong")
+    body = mdWrap(body, "~~", "del")
+    body = mdWrap(body, "*", "em")
+    body = mdWrap(body, "_", "em")
+
+    index = 0
+    get code in spans {
+        body = replace(body, MARK + str(index) + MARK, "<code>" + code + "</code>")
+        index = index + 1
+    }
+    give body
+}

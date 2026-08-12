@@ -1,0 +1,42 @@
+// ============================================================================
+// src/callback.ez — Create native-callable trampolines that invoke EZ closures.
+//
+// createCallback(sigArray, retType, ezFunc) → Pointer
+//
+//   sigArray — array of type descriptors for the C-side argument types
+//   retType  — type descriptor for the C-side return type
+//   ezFunc   — any EZ callable (task, closure, lambda, or __call__ instance)
+//
+// The returned Pointer wraps the trampoline address.  It MUST be freed with
+// ptr.free() when no longer needed — this cleans up the ffi_closure allocation.
+// Forgetting to free leaks the trampoline.
+//
+// Example:
+//   cb = ffi.createCallback([ffi.c_int, ffi.c_int], ffi.c_int,
+//            |a, b| => a + b)
+//   // pass cb.ptr to EnumWindows, SetTimer, etc.
+//   // ... when done:
+//   cb.free()
+// ============================================================================
+
+use "errors.ez"
+use "types.ez"
+use "pointer.ez"
+
+export task createCallback(sigArray, retType, ezFunc) {
+    // Convert type descriptors to raw type strings for the C++ layer
+    rawSig = []
+    get t in sigArray {
+        push(rawSig, typeStr(t))
+    }
+    rawRet = typeStr(retType)
+
+    rawPtr = os_ffi_create_callback(rawSig, rawRet, ezFunc)
+    when rawPtr == 0 {
+        throw FFIError("createCallback: failed to allocate ffi_closure")
+    }
+
+    // _isCallback=true routes Pointer.free() to os_ffi_free_callback instead
+    // of os_free, avoiding the double-free / wrong-free guard in os_free.
+    give Pointer(rawPtr, true, true)
+}

@@ -1,0 +1,152 @@
+# ============================================================================
+# oauth/providers.ez — endpoints and quirks for the common services
+#
+# "OAuth 2.0" is a framework, not a protocol, and every provider reads it
+# slightly differently. The differences that actually break integrations are
+# recorded here rather than discovered one at a time:
+#
+#   GitHub  returns form-encoded token responses unless you ask for JSON
+#   Google  only issues a refresh token with access_type=offline, and only on
+#           the first consent unless you also force prompt=consent
+#   Slack   nests the token under authed_user for user tokens
+#
+# Nothing here is required -- you can always pass endpoints yourself.
+# ============================================================================
+
+export PROVIDERS = {
+
+    "google": {
+        "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+        "tokenUrl": "https://oauth2.googleapis.com/token",
+        "userInfoUrl": "https://openidconnect.googleapis.com/v1/userinfo",
+        "revokeUrl": "https://oauth2.googleapis.com/revoke",
+        "scopes": ["openid", "email", "profile"],
+        # Without these two Google returns no refresh token, and the second
+        # time a user signs in it returns none even with access_type=offline.
+        "authorizeParams": { "access_type": "offline", "prompt": "consent" },
+        "idField": "sub",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "github": {
+        "authorizeUrl": "https://github.com/login/oauth/authorize",
+        "tokenUrl": "https://github.com/login/oauth/access_token",
+        "userInfoUrl": "https://api.github.com/user",
+        "scopes": ["read:user", "user:email"],
+        # The default response is application/x-www-form-urlencoded, which
+        # parses as nothing useful.
+        "tokenHeaders": { "Accept": "application/json" },
+        # The API requires a User-Agent and will refuse the request without one.
+        "userInfoHeaders": { "Accept": "application/vnd.github+json", "User-Agent": "ez-oauth" },
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "microsoft": {
+        "authorizeUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        "userInfoUrl": "https://graph.microsoft.com/v1.0/me",
+        "scopes": ["openid", "email", "profile", "offline_access"],
+        "idField": "id",
+        "emailField": "mail",
+        "nameField": "displayName"
+    },
+
+    "discord": {
+        "authorizeUrl": "https://discord.com/oauth2/authorize",
+        "tokenUrl": "https://discord.com/api/oauth2/token",
+        "userInfoUrl": "https://discord.com/api/users/@me",
+        "revokeUrl": "https://discord.com/api/oauth2/token/revoke",
+        "scopes": ["identify", "email"],
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "username"
+    },
+
+    "slack": {
+        "authorizeUrl": "https://slack.com/openid/connect/authorize",
+        "tokenUrl": "https://slack.com/api/openid.connect.token",
+        "userInfoUrl": "https://slack.com/api/openid.connect.userInfo",
+        "scopes": ["openid", "email", "profile"],
+        "idField": "sub",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "gitlab": {
+        "authorizeUrl": "https://gitlab.com/oauth/authorize",
+        "tokenUrl": "https://gitlab.com/oauth/token",
+        "userInfoUrl": "https://gitlab.com/api/v4/user",
+        "revokeUrl": "https://gitlab.com/oauth/revoke",
+        "scopes": ["read_user"],
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "spotify": {
+        "authorizeUrl": "https://accounts.spotify.com/authorize",
+        "tokenUrl": "https://accounts.spotify.com/api/token",
+        "userInfoUrl": "https://api.spotify.com/v1/me",
+        "scopes": ["user-read-email", "user-read-private"],
+        # Spotify rejects client_secret in the body for the authorization code
+        # grant and wants HTTP Basic.
+        "tokenAuth": "basic",
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "display_name"
+    },
+
+    "linkedin": {
+        "authorizeUrl": "https://www.linkedin.com/oauth/v2/authorization",
+        "tokenUrl": "https://www.linkedin.com/oauth/v2/accessToken",
+        "userInfoUrl": "https://api.linkedin.com/v2/userinfo",
+        "scopes": ["openid", "email", "profile"],
+        "idField": "sub",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "facebook": {
+        "authorizeUrl": "https://www.facebook.com/v18.0/dialog/oauth",
+        "tokenUrl": "https://graph.facebook.com/v18.0/oauth/access_token",
+        "userInfoUrl": "https://graph.facebook.com/me?fields=id,name,email",
+        "scopes": ["email", "public_profile"],
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "name"
+    },
+
+    "twitch": {
+        "authorizeUrl": "https://id.twitch.tv/oauth2/authorize",
+        "tokenUrl": "https://id.twitch.tv/oauth2/token",
+        "userInfoUrl": "https://api.twitch.tv/helix/users",
+        "revokeUrl": "https://id.twitch.tv/oauth2/revoke",
+        "scopes": ["user:read:email"],
+        "idField": "id",
+        "emailField": "email",
+        "nameField": "display_name"
+    }
+}
+
+export task providerNames() { give sort(keys(PROVIDERS)) }
+
+export task providerFor(name) {
+    key = lower(str(name))
+    when has_key(PROVIDERS, key) == false {
+        throw Exception(`oauth: unknown provider '{name}' -- known: {join(providerNames(), ", ")}`)
+    }
+    give PROVIDERS[key]
+}
+
+# Microsoft and other multi-tenant providers put the tenant in the path, so the
+# preset has to be rewritten rather than parameterised.
+export task microsoftTenant(tenant) {
+    preset = {}
+    get field in keys(PROVIDERS["microsoft"]) { preset[field] = PROVIDERS["microsoft"][field] }
+    preset["authorizeUrl"] = `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize`
+    preset["tokenUrl"] = `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
+    give preset
+}

@@ -1,0 +1,67 @@
+# ============================================================================
+# password/encode.ez — the stored hash format
+#
+#   pbkdf2-sha256$600000$<salt-hex>$<hash-hex>
+#
+# Everything needed to verify travels with the hash. Storing the salt and
+# iteration count in separate columns works right up until someone changes the
+# default, at which point every existing row verifies against the wrong
+# parameters and every login fails at once. Naming the algorithm as well means
+# a future one can be added without a migration.
+# ============================================================================
+
+SEPARATOR = "$"
+
+export task encodeHash(algorithm, iterations, salt, hash) {
+    give algorithm + SEPARATOR + str(iterations) + SEPARATOR + salt + SEPARATOR + hash
+}
+
+task allDigits(s) {
+    when len(s) == 0 { give false }
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+task isHex(s) {
+    when len(s) == 0 { give false }
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        c = lower(substr(s, i, 1))
+        code = ord(c)
+        digit = code >= 48 and code <= 57
+        letter = code >= 97 and code <= 102
+        when digit == false and letter == false { give false }
+    }
+    give true
+}
+
+# Returns { algorithm, iterations, salt, hash } or nil.
+#
+# nil rather than a throw: a corrupt row in the users table should fail the
+# login, not crash the request handler.
+export task decodeHash(stored) {
+    body = str(stored)
+    parts = split(body, SEPARATOR)
+    when len(parts) != 4 { give nil }
+
+    algorithm = parts[0]
+    iterations = parts[1]
+    salt = parts[2]
+    hash = parts[3]
+
+    when algorithm == "" { give nil }
+    when allDigits(iterations) == false { give nil }
+    when isHex(salt) == false { give nil }
+    when isHex(hash) == false { give nil }
+
+    give {
+        "algorithm": algorithm,
+        "iterations": num(iterations),
+        "salt": salt,
+        "hash": hash
+    }
+}

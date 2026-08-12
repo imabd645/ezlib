@@ -1,0 +1,29 @@
+use "constants.ez"
+use "core.ez"
+use "trigonometry.ez"
+
+export task lerp(a, b, t) { give a + (b - a) * clamp(t, 0, 1) }
+export task map(value, inMin, inMax, outMin, outMax) {
+    when inMin == inMax { throw "map(): input range must not be zero" }
+    give outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin)
+}
+export task step(edge, x) { when x < edge { give 0 }  give 1 }
+export task smoothstep(edge0, edge1, x) {
+    when edge0 == edge1 { throw "smoothstep(): edges must differ" }
+    t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
+    give t * t * (3 - 2 * t)
+}
+export task smootherstep(edge0, edge1, x) {
+    when edge0 == edge1 { throw "smootherstep(): edges must differ" }
+    t = clamp((x - edge0) / (edge1 - edge0), 0, 1)
+    give t * t * t * (t * (t * 6 - 15) + 10)
+}
+export task easeInQuad(t) { give t * t }
+export task easeOutQuad(t) { give 1 - (1 - t) * (1 - t) }
+export task easeInOutQuad(t) { when t < 0.5 { give 2 * t * t }  give 1 - pow(-2 * t + 2, 2) / 2 }
+export task easeInCubic(t) { give t * t * t }
+export task easeOutCubic(t) { give 1 - pow(1 - t, 3) }
+export task easeInOutCubic(t) { when t < 0.5 { give 4 * t * t * t }  give 1 - pow(-2 * t + 2, 3) / 2 }
+export task easeInSine(t) { give 1 - cos(PI * t / 2) }
+export task easeOutSine(t) { give sin(PI * t / 2) }
+export task easeInOutSine(t) { give -(cos(PI * t) - 1) / 2 }

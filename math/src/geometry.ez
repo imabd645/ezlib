@@ -1,0 +1,7 @@
+use "trigonometry.ez"
+
+export task dist2D(x1, y1, x2, y2) { dx = x2 - x1  dy = y2 - y1  give sqrt(dx * dx + dy * dy) }
+export task dist3D(x1, y1, z1, x2, y2, z2) { dx = x2 - x1  dy = y2 - y1  dz = z2 - z1  give sqrt(dx * dx + dy * dy + dz * dz) }
+export task manhattan2D(x1, y1, x2, y2) { give abs(x2 - x1) + abs(y2 - y1) }
+export task angleBetween(x1, y1, x2, y2) { give atan2(y2 - y1, x2 - x1) }
+export task pointOnCircle(cx, cy, radius, angleRad) { give { "x": cx + radius * cos(angleRad), "y": cy + radius * sin(angleRad) } }

@@ -1,0 +1,20 @@
+// ============================================================================
+// regex — Errors
+// ============================================================================
+
+// Raised for anything the caller got wrong about a pattern: a syntax error in
+// the pattern itself, an unknown flag, or a group index that does not exist.
+//
+// The interpreter's re_* builtins throw a native RegexError for a pattern that
+// does not compile; this model is the package-level equivalent so user code has
+// one type to catch either way.
+export model RegexError extends Exception {
+    init(message) {
+        super(message)
+        self.message = message
+    }
+
+    task toString() {
+        give "RegexError: " + self.message
+    }
+}

@@ -1,0 +1,136 @@
+// ============================================================================
+// EZ ORM — Relationships
+// ============================================================================
+//
+// Declare relations in a `static relations` block, and read them like ordinary
+// properties:
+//
+//     model User extends Model {
+//         static relations = { "posts": hasMany("Post", "userId") }
+//         init() {
+//             self.id   = Column("integer", primaryKey=true, autoIncrement=true)
+//             self.name = Column("string")
+//         }
+//     }
+//
+//     model Post extends Model {
+//         static relations = { "author": belongsTo("User", "userId") }
+//         init() {
+//             self.id     = Column("integer", primaryKey=true, autoIncrement=true)
+//             self.title  = Column("string")
+//             self.userId = Column("integer", foreignKey="User.id")
+//         }
+//     }
+//
+//     u = session.get(User, 1)
+//     get p in u.posts { out p.title }     // loaded on first touch, then cached
+//     out post.author.name
+//
+// Why `static` rather than alongside the columns in init(): a relation declared
+// as an instance property would still BE an instance property on every loaded
+// row, so reading it would return the declaration object instead of the related
+// rows. Resolution depends on the read missing, and there is no way to remove a
+// property once init() has set it.
+
+use "errors.ez"
+
+// One-to-many. `foreignKey` is the column on the TARGET table pointing back here.
+//   User hasMany Post via Post.userId
+export task hasMany(target, foreignKey) {
+    give {
+        "_isRelation": true,
+        "kind": "hasMany",
+        "target": str(target),
+        "foreignKey": str(foreignKey)
+    }
+}
+
+// Many-to-one. `foreignKey` is the column on THIS table pointing at the target.
+//   Post belongsTo User via Post.userId
+export task belongsTo(target, foreignKey) {
+    give {
+        "_isRelation": true,
+        "kind": "belongsTo",
+        "target": str(target),
+        "foreignKey": str(foreignKey)
+    }
+}
+
+// Resolve one relation for one instance and return the loaded value:
+// an array for hasMany, a single instance (or nil) for belongsTo.
+//
+// Kept as a plain task rather than a method so that Model.__getattr__ stays a
+// one-liner and this is testable on its own.
+export task loadRelation(instance, name) {
+    session = getattr(instance, "_session")
+    when typeOf(session) == "nil" {
+        throw SchemaError("Cannot load '" + str(name) + "': this instance is not attached to a session. Relations resolve through the session that loaded the row.")
+    }
+
+    modelClass = instance.__class__
+    rel = session.engine.relationMeta(modelClass, name)
+    when typeOf(rel) == "nil" {
+        throw SchemaError("No relation named '" + str(name) + "' on model '" + modelClass.__name__ + "'. It is also not a column or method -- check the spelling.")
+    }
+
+    targetClass = session.engine.classFor(rel["target"])
+    meta = session.engine.getMeta(modelClass)
+
+    when rel["kind"] == "hasMany" {
+        // Parent's primary key value matches the FK column on the child table.
+        pkVal = getattr(instance, meta["pk"])
+        when typeOf(pkVal) == "nil" { give [] }
+        give session.query(targetClass).filter(rel["foreignKey"], "=", pkVal).all()
+    }
+
+    // belongsTo: this row's FK value matches the target's primary key.
+    fkVal = getattr(instance, rel["foreignKey"])
+    when typeOf(fkVal) == "nil" { give nil }
+    give session.get(targetClass, fkVal)
+}
+
+// Every relation declared on a model class, as name → descriptor. Never nil.
+//
+// Read once, at registration, and cached in the engine's metadata from then on
+// (see Engine.relationMeta) -- so the try/catch here is paid once per model at
+// startup rather than on every relation access.
+//
+// try/catch rather than hasattr(): hasattr only accepts dictionaries and
+// instances, and `relations` is a STATIC, which lives on the class object.
+export task relationsOf(modelClass) {
+    rels = nil
+    try {
+        rels = modelClass.relations
+    } catch (e) {
+        give {}
+    }
+    when typeOf(rels) != "dictionary" { give {} }
+    give rels
+}
+
+// ── Base model ──────────────────────────────────────────────────────────────
+//
+// Extend this to get relation access and change tracking. Both are inherited,
+// so a subclass declares nothing beyond its columns and relations.
+//
+//     model User extends Model { ... }
+export model Model {
+    // Fires only when a property genuinely does not exist, so columns and
+    // methods never reach here. A resolved relation is cached with setattr()
+    // -- which writes without going through __setattr__ -- so the second read
+    // is an ordinary property hit and does not mark the row dirty.
+    task __getattr__(name) {
+        value = loadRelation(self, name)
+        setattr(self, name, value)
+        give value
+    }
+
+    // Records which columns were assigned, so UPDATE can write just those
+    // instead of every column on the row. setattr() is the raw write; using
+    // `self.x = value` here would re-enter this hook forever.
+    task __setattr__(name, value) {
+        dirty = getattr(self, "_dirty")
+        when typeOf(dirty) == "dictionary" { dirty[name] = true }
+        setattr(self, name, value)
+    }
+}

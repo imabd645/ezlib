@@ -1,0 +1,119 @@
+# ============================================================================
+# semver/parse.ez — version text to parts, and ordering
+# ============================================================================
+
+export task svAllDigits(s) {
+    when len(s) == 0 { give false }
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+# Leading zeroes are invalid in a semver numeric part ("01.0.0"), and
+# accepting them would make "01" and "1" two spellings of one version.
+task svNumericPart(s) {
+    when svAllDigits(s) == false { give -1 }
+    when len(s) > 1 and startsWith(s, "0") { give -1 }
+    give num(s)
+}
+
+# Returns { major, minor, patch, prerelease, build } or nil.
+# A leading "v" is accepted because tags are so often written that way.
+export task svParse(version) {
+    when version == nil { give nil }
+    body = trim(str(version))
+    when startsWith(body, "v") or startsWith(body, "V") {
+        body = substr(body, 1, len(body) - 1)
+    }
+    when body == "" { give nil }
+
+    build = ""
+    plusAt = indexOf(body, "+")
+    when plusAt >= 0 {
+        build = substr(body, plusAt + 1, len(body) - plusAt - 1)
+        body = substr(body, 0, plusAt)
+    }
+
+    prerelease = ""
+    dashAt = indexOf(body, "-")
+    when dashAt >= 0 {
+        prerelease = substr(body, dashAt + 1, len(body) - dashAt - 1)
+        body = substr(body, 0, dashAt)
+    }
+
+    parts = split(body, ".")
+    when len(parts) != 3 { give nil }
+
+    major = svNumericPart(parts[0])
+    minor = svNumericPart(parts[1])
+    patch = svNumericPart(parts[2])
+    when major < 0 or minor < 0 or patch < 0 { give nil }
+
+    # An empty prerelease ("1.0.0-") is malformed, not "no prerelease".
+    when dashAt >= 0 and prerelease == "" { give nil }
+
+    give {
+        "major": major,
+        "minor": minor,
+        "patch": patch,
+        "prerelease": prerelease,
+        "build": build
+    }
+}
+
+# Compares two dot-separated prerelease identifiers per semver.org:
+# numeric identifiers compare numerically and rank below alphanumeric ones.
+task svComparePrerelease(a, b) {
+    # Absent prerelease outranks present: 1.0.0 > 1.0.0-beta.
+    when a == "" and b == "" { give 0 }
+    when a == "" { give 1 }
+    when b == "" { give -1 }
+
+    left = split(a, ".")
+    right = split(b, ".")
+    total = len(left)
+    when len(right) > total { total = len(right) }
+
+    repeat i = 0 to total - 1 {
+        # Running out of identifiers ranks lower: 1.0.0-a < 1.0.0-a.1
+        when i >= len(left) { give -1 }
+        when i >= len(right) { give 1 }
+        l = left[i]
+        r = right[i]
+        lNum = svAllDigits(l)
+        rNum = svAllDigits(r)
+        when lNum and rNum {
+            ln = num(l)
+            rn = num(r)
+            when ln < rn { give -1 }
+            when ln > rn { give 1 }
+        }
+        other {
+            when lNum { give -1 }
+            when rNum { give 1 }
+            when l < r { give -1 }
+            when l > r { give 1 }
+        }
+    }
+    give 0
+}
+
+# -1 / 0 / 1. Build metadata is ignored, as semver.org specifies.
+export task svCompare(a, b) {
+    when a["major"] != b["major"] {
+        when a["major"] < b["major"] { give -1 }
+        give 1
+    }
+    when a["minor"] != b["minor"] {
+        when a["minor"] < b["minor"] { give -1 }
+        give 1
+    }
+    when a["patch"] != b["patch"] {
+        when a["patch"] < b["patch"] { give -1 }
+        give 1
+    }
+    give svComparePrerelease(a["prerelease"], b["prerelease"])
+}

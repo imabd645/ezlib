@@ -1,0 +1,181 @@
+# ============================================================================
+# ini/parse.ez — reading and writing INI text
+# ============================================================================
+
+task iniFail(msg, line) {
+    throw Exception(`INI parse error (line {line}): {msg}`)
+}
+
+# Strips a trailing ; or # comment that sits outside quotes. `pass=a#b` keeps
+# its hash, because an unquoted password with a # in it is common enough that
+# eating it silently would be worse than the alternative.
+task iniStripComment(s) {
+    quote = ""
+    total = len(s)
+    i = 0
+    while i < total {
+        c = substr(s, i, 1)
+        when quote != "" {
+            when c == quote { quote = "" }
+        }
+        other {
+            when c == `"` or c == "'" { quote = c }
+            other {
+                when c == ";" or c == "#" {
+                    prev = ""
+                    when i > 0 { prev = substr(s, i - 1, 1) }
+                    when i == 0 or prev == " " or prev == chr(9) {
+                        give trim(substr(s, 0, i))
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    give trim(s)
+}
+
+task iniAllDigits(s) {
+    when len(s) == 0 { give false }
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+task iniIsNumber(s) {
+    body = s
+    when startsWith(body, "-") or startsWith(body, "+") {
+        body = substr(body, 1, len(body) - 1)
+    }
+    when len(body) == 0 { give false }
+    dotAt = indexOf(body, ".")
+    when dotAt < 0 { give iniAllDigits(body) }
+    left = substr(body, 0, dotAt)
+    right = substr(body, dotAt + 1, len(body) - dotAt - 1)
+    when len(left) == 0 or len(right) == 0 { give false }
+    give iniAllDigits(left) and iniAllDigits(right)
+}
+
+# Quoted values keep their type as text; unquoted ones are inferred.
+export task iniValue(raw) {
+    s = trim(raw)
+    when s == "" { give "" }
+    total = len(s)
+    first = substr(s, 0, 1)
+    last = substr(s, total - 1, 1)
+    when total >= 2 and first == `"` and last == `"` {
+        body = substr(s, 1, total - 2)
+        body = replace(body, "\\n", chr(10))
+        body = replace(body, "\\t", chr(9))
+        body = replace(body, "\\" + `"`, `"`)
+        give replace(body, "\\\\", "\\")
+    }
+    when total >= 2 and first == "'" and last == "'" { give substr(s, 1, total - 2) }
+
+    lowered = lower(s)
+    get word in ["true", "yes", "on"] { when lowered == word { give true } }
+    get word in ["false", "no", "off"] { when lowered == word { give false } }
+    get word in ["null", "nil", "none"] { when lowered == word { give nil } }
+    when iniIsNumber(s) { give num(s) }
+    give s
+}
+
+export task iniParse(source) {
+    normalized = replace(replace(source, chr(13) + chr(10), chr(10)), chr(13), chr(10))
+    result = {}
+    section = nil
+    lineNo = 0
+
+    get raw in split(normalized, chr(10)) {
+        lineNo = lineNo + 1
+        body = iniStripComment(raw)
+        when body == "" { skip }
+
+        # [section]
+        when startsWith(body, "[") {
+            when endsWith(body, "]") == false {
+                iniFail(`section header '{body}' is missing its ']'`, lineNo)
+            }
+            name = trim(substr(body, 1, len(body) - 2))
+            when name == "" { iniFail("section name is empty", lineNo) }
+            when has_key(result, name) == false { result[name] = {} }
+            section = name
+            skip
+        }
+
+        # key = value  (or key: value)
+        sepAt = indexOf(body, "=")
+        colonAt = indexOf(body, ":")
+        when sepAt < 0 or (colonAt >= 0 and colonAt < sepAt) { sepAt = colonAt }
+        when sepAt < 0 {
+            iniFail(`'{body}' is not 'key = value' or a [section]`, lineNo)
+        }
+
+        key = trim(substr(body, 0, sepAt))
+        when key == "" { iniFail("key name is empty", lineNo) }
+        value = iniValue(substr(body, sepAt + 1, len(body) - sepAt - 1))
+
+        when section == nil { result[key] = value }
+        other { result[section][key] = value }
+    }
+    give result
+}
+
+# ── emitting ────────────────────────────────────────────────────────────────
+
+task iniNeedsQuote(s) {
+    when s == "" { give false }
+    lowered = lower(s)
+    get word in ["true", "false", "yes", "no", "on", "off", "null", "nil", "none"] {
+        when lowered == word { give true }
+    }
+    when iniIsNumber(s) { give true }
+    when trim(s) != s { give true }
+    when contains(s, chr(10)) or contains(s, ";") or contains(s, "#") { give true }
+    give false
+}
+
+task iniScalar(value) {
+    when value == nil { give "null" }
+    t = typeOf(value)
+    when t == "bool" { when value { give "true" }  give "false" }
+    when t == "integer" or t == "float" { give str(value) }
+    body = str(value)
+    when iniNeedsQuote(body) {
+        escaped = replace(body, "\\", "\\\\")
+        escaped = replace(escaped, `"`, "\\" + `"`)
+        escaped = replace(escaped, chr(10), "\\n")
+        escaped = replace(escaped, chr(9), "\\t")
+        give `"` + escaped + `"`
+    }
+    give body
+}
+
+export task iniEmit(data) {
+    topLines = []
+    sectionLines = []
+
+    get k in keys(data) {
+        v = data[k]
+        when typeOf(v) == "dictionary" {
+            push(sectionLines, "[" + k + "]")
+            get innerKey in keys(v) {
+                push(sectionLines, innerKey + " = " + iniScalar(v[innerKey]))
+            }
+            push(sectionLines, "")
+        }
+        other {
+            push(topLines, k + " = " + iniScalar(v))
+        }
+    }
+
+    # Top-level keys must come first: anything after a [section] header
+    # belongs to that section when read back.
+    all = topLines
+    when len(topLines) > 0 and len(sectionLines) > 0 { push(all, "") }
+    get lineText in sectionLines { push(all, lineText) }
+    give join(all, chr(10))
+}

@@ -1,0 +1,134 @@
+// ============================================================================
+// thread — Parallel iteration
+//
+// Each of these spawns work and collects it with the native awaitAll, so the
+// results come back in the order of the input rather than completion order.
+//
+// Unbounded: `parallelMap` over 10,000 items starts 10,000 threads. Use a
+// WorkerPool from sync.ez, or parallelMapBatched, when the input is large.
+// ============================================================================
+use "errors.ez"
+
+// mapper(item) for every item, concurrently.
+export task parallelMap(items, mapper) {
+    futures = []
+    get item in items {
+        push(futures, spawn(mapper, item))
+    }
+    give awaitAll(futures)
+}
+
+// Keeps the items for which predicate(item) is true. The predicate runs
+// concurrently; the order of the survivors is preserved.
+export task parallelFilter(items, predicate) {
+    verdicts = parallelMap(items, predicate)
+    kept = []
+    i = 0
+    get item in items {
+        when verdicts[i] { push(kept, item) }
+        i = i + 1
+    }
+    give kept
+}
+
+// fn(item) for every item, concurrently, discarding results. Still waits for
+// all of them, so an error surfaces rather than vanishing on a stray thread.
+export task parallelForEach(items, fn) {
+    parallelMap(items, | item | {
+        fn(item)
+        give nil
+    })
+    give nil
+}
+
+// Like parallelMap but at most batchSize threads run at once -- the simple way
+// to keep a big input from starting a thread per element.
+export task parallelMapBatched(items, mapper, batchSize=8) {
+    when batchSize < 1 {
+        throw ThreadError("parallelMapBatched() needs a batch size of at least 1")
+    }
+    results = []
+    batch = []
+    get item in items {
+        push(batch, item)
+        when len(batch) >= batchSize {
+            get r in parallelMap(batch, mapper) { push(results, r) }
+            batch = []
+        }
+    }
+    when len(batch) > 0 {
+        get r in parallelMap(batch, mapper) { push(results, r) }
+    }
+    give results
+}
+
+// Runs fn(i) for i in 0..n-1, concurrently.
+export task times(n, fn) {
+    futures = []
+    i = 0
+    while i < n {
+        push(futures, spawn(fn, i))
+        i = i + 1
+    }
+    give awaitAll(futures)
+}
+
+// Runs zero-argument functions one after another on this thread, collecting
+// results. The counterpart to parallelMap when order of execution matters.
+export task sequential(fns) {
+    results = []
+    get f in fns {
+        push(results, f())
+    }
+    give results
+}
+
+// A set of related tasks awaited together.
+export model TaskGroup {
+    init() {
+        self.tasks = []
+    }
+
+    // Spawn fn(arg) and track it.
+    task add(fn, arg) {
+        t = spawn(fn, arg)
+        push(self.tasks, t)
+        give t
+    }
+
+    // Spawn a no-argument fn and track it.
+    task addTask(fn) {
+        t = spawn(fn)
+        push(self.tasks, t)
+        give t
+    }
+
+    // Results in the order added. Throws on the first failure.
+    task waitAll() {
+        give awaitAll(self.tasks)
+    }
+
+    // Every outcome, never throws.
+    task waitSettled() {
+        results = []
+        get t in self.tasks {
+            try {
+                push(results, {"ok": true, "value": await(t), "error": nil})
+            } catch (e) {
+                push(results, {"ok": false, "value": nil, "error": errorText(e)})
+            }
+        }
+        give results
+    }
+
+    task cancelAll() {
+        get t in self.tasks {
+            try { cancel(t) } catch (e) { }
+        }
+        give self
+    }
+
+    task size() { give len(self.tasks) }
+}
+
+export task createGroup() { give TaskGroup() }

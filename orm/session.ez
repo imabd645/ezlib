@@ -1,0 +1,492 @@
+// ============================================================================
+// EZ ORM — Session (Unit of Work)
+// Manages pending inserts, updates, deletes, and transactions
+// ============================================================================
+
+use "query.ez"
+use "errors.ez"
+use "sql.ez"
+
+export model Session {
+    init(engine) {
+        self.engine = engine
+        self._pending_adds = []
+        self._pending_deletes = []
+        // Identity map: "ModelName#pk" -> instance. One row is one object for
+        // the life of the session, so two queries that hit the same row hand
+        // back the same instance instead of two that can drift apart and then
+        // both get flushed over each other.
+        self._identity = {}
+        // Objects this session has inserted. They are not in the identity map
+        // (see _markInserted) but still need watching, because a change made
+        // after the insert has nothing else staging it.
+        self._managed = []
+        // Depth of explicitly opened transactions. commit() used to issue an
+        // unconditional BEGIN, so begin() followed by commit() raised
+        // "cannot start a transaction within a transaction".
+        self._txDepth = 0
+    }
+
+    // Starts a new query for the given model class.
+    task query(modelClass) {
+        give Query(self, modelClass)
+    }
+
+    // Stages an instance for INSERT or UPDATE.
+    // Staging the same instance twice is a no-op rather than two INSERTs.
+    task add(instance) {
+        when instance == nil {
+            throw IntegrityError("Cannot add nil to a session.")
+        }
+        get existing in self._pending_adds {
+            when existing == instance {
+                give nil
+            }
+        }
+        // Attach the session, exactly as hydration does, so an object built by
+        // hand can resolve its relations too. Without this, a freshly
+        // constructed row could be saved but reading one of its relations
+        // failed with "not attached to a session", which is a confusing
+        // distinction to draw between a row you loaded and one you just made.
+        //
+        // setattr(), not assignment: this is bookkeeping, not a column change,
+        // and must not show up as dirty.
+        setattr(instance, "_session", self)
+        when typeOf(getattr(instance, "_dirty")) != "dictionary" {
+            setattr(instance, "_dirty", {})
+        }
+        // Mark it new -- but never downgrade an object that was loaded from
+        // the database, so re-adding a row you fetched still updates it.
+        when getattr(instance, "_persisted") != true {
+            setattr(instance, "_persisted", false)
+        }
+        push(self._pending_adds, instance)
+    }
+
+    // Stages every instance in an array.
+    task addAll(instances) {
+        get inst in instances {
+            self.add(inst)
+        }
+    }
+
+    // Stages an instance for DELETE.
+    task delete(instance) {
+        when instance == nil {
+            throw IntegrityError("Cannot delete nil.")
+        }
+        get existing in self._pending_deletes {
+            when existing == instance {
+                give nil
+            }
+        }
+        push(self._pending_deletes, instance)
+    }
+
+    // ── Identity map ────────────────────────────────────────────────────────
+
+    task _identityKey(modelClass, pkValue) {
+        give modelClass.__name__ + "#" + str(pkValue)
+    }
+
+    task _identityGet(modelClass, pkValue) {
+        k = self._identityKey(modelClass, pkValue)
+        when has_key(self._identity, k) { give self._identity[k] }
+        give nil
+    }
+
+    task _identityPut(modelClass, pkValue, instance) {
+        self._identity[self._identityKey(modelClass, pkValue)] = instance
+    }
+
+    // Fetches a single instance by primary key, or nil.
+    // Answers from the identity map when the row is already loaded, which also
+    // makes belongsTo resolution free once the parent has been seen.
+    task get(modelClass, pkValue) {
+        cached = self._identityGet(modelClass, pkValue)
+        when typeOf(cached) != "nil" { give cached }
+        meta = self.engine.getMeta(modelClass)
+        give self.query(modelClass).filter(meta["pk"], "=", pkValue).first()
+    }
+
+    // Begins an explicit transaction.
+    // Nested calls are tracked rather than issuing a second BEGIN.
+    task begin() {
+        when self._txDepth == 0 {
+            self.engine.driver.begin()
+        }
+        self._txDepth = self._txDepth + 1
+    }
+
+    // Commits all staged operations.
+    // Opens a transaction only when one is not already open, so an explicit
+    // begin() followed by commit() no longer double-BEGINs.
+    task commit() {
+        ownsTx = self._txDepth == 0
+        when ownsTx {
+            self.engine.driver.begin()
+        }
+
+        try {
+            self._flush()
+            when ownsTx {
+                self.engine.driver.commit()
+            } other {
+                // An explicit begin() is being closed by this commit.
+                self._txDepth = self._txDepth - 1
+                when self._txDepth == 0 {
+                    self.engine.driver.commit()
+                }
+            }
+        } catch e {
+            try {
+                self.engine.driver.rollback()
+            } catch inner {
+                // Rollback failure must not mask the original error.
+            }
+            self._txDepth = 0
+            self._clear()
+            throw e
+        }
+    }
+
+    // Rolls back the current transaction and clears staged operations.
+    task rollback() {
+        try {
+            self.engine.driver.rollback()
+        } finally {
+            self._txDepth = 0
+            self._clear()
+        }
+    }
+
+    // Closes the session (and underlying connection if applicable).
+    task close() {
+        // An open transaction at close time would otherwise be left dangling.
+        when self._txDepth > 0 {
+            try {
+                self.engine.driver.rollback()
+            } catch e {
+                // Best effort.
+            }
+            self._txDepth = 0
+        }
+        self._clear()
+        // Session does not own the engine, so we don't close the engine here.
+    }
+
+    // ── Internal Helpers ──────────────────────────────────────────
+
+    task _clear() {
+        self._pending_adds = []
+        self._pending_deletes = []
+    }
+
+    // True when a property still holds its Column definition, meaning the user
+    // never assigned a value. hasattr replaces the old getattr-in-try/catch.
+    task _isUnset(val) {
+        when typeOf(val) != "instance" { give false }
+        give hasattr(val, "_isColumn")
+    }
+
+    task _flush() {
+        // Inserts are grouped per model so they can go out as multi-row
+        // statements instead of one round trip per object.
+        inserts = {}
+        get inst in self._pending_adds {
+            meta = self.engine.getMeta(inst.__class__)
+            when self._isUpdate(inst, meta) {
+                self._doUpdate(inst, meta)
+            } other {
+                key = meta["table"]
+                when not has_key(inserts, key) {
+                    inserts[key] = { "meta": meta, "rows": [] }
+                }
+                push(inserts[key]["rows"], inst)
+            }
+        }
+
+        get key in keys(inserts) {
+            self._doInsertBatch(inserts[key]["meta"], inserts[key]["rows"])
+        }
+
+        get inst in self._pending_deletes {
+            self._deleteInstance(inst)
+        }
+
+        self._flushDirty()
+        self._clear()
+    }
+
+    // Writes back rows that were loaded and then modified.
+    //
+    // Only instances staged with add() used to be flushed, so the obvious thing
+    //
+    //     u = session.get(User, 1)
+    //     u.name = "new"
+    //     session.commit()
+    //
+    // silently did nothing -- the row was never staged, so nothing looked at it.
+    // Model.__setattr__ records assignments in _dirty, which is what makes it
+    // possible to find those rows here and to write only the columns that
+    // actually changed instead of every column on the row.
+    task _flushDirty() {
+        watched = []
+        get key in keys(self._identity) { push(watched, self._identity[key]) }
+        get inst in self._managed { push(watched, inst) }
+
+        get inst in watched {
+            dirty = getattr(inst, "_dirty")
+            when typeOf(dirty) != "dictionary" { skip }
+            changed = keys(dirty)
+            when len(changed) == 0 { skip }
+
+            meta = self.engine.getMeta(inst.__class__)
+            pkValue = getattr(inst, meta["pk"])
+            when self._isUnset(pkValue) { skip }
+
+            setParts = []
+            params = []
+            get colInfo in meta["columns"] {
+                colName = colInfo["name"]
+                // The primary key identifies the row; it is not something an
+                // UPDATE should try to rewrite.
+                when colName != meta["pk"] and has_key(dirty, colName) {
+                    push(setParts, quoteIdent(colName, self.engine.dialect) + " = ?")
+                    push(params, getattr(inst, colName))
+                }
+            }
+            when len(setParts) == 0 { skip }
+
+            push(params, pkValue)
+            sql = "UPDATE " + quoteIdent(meta["table"], self.engine.dialect) + " SET " + join(setParts, ", ") + " WHERE " + quoteIdent(meta["pk"], self.engine.dialect) + " = ?"
+            self.engine.driver.execute(sql, params)
+
+            // Written; it is no longer pending.
+            setattr(inst, "_dirty", {})
+        }
+    }
+
+    // Whether this instance already exists as a row.
+    //
+    // This used to be inferred from "the primary key has a value", which is
+    // only true for database-generated keys. Any application-assigned key --
+    // a username, an email, an ISBN, a UUID -- is set before the row exists,
+    // so a brand new object was mistaken for an existing one and flushed as
+    // an UPDATE. That matched no rows, reported no error, and silently saved
+    // nothing.
+    //
+    // _persisted is set by hydration (the row came out of the database) and
+    // after a successful INSERT. Anything else is new.
+    task _isUpdate(instance, meta) {
+        give getattr(instance, "_persisted") == true
+    }
+
+    // Returns the columns that carry a real value for this instance,
+    // validating that every required column is present.
+    task _boundColumns(instance, meta) {
+        cols = []
+        get colInfo in meta["columns"] {
+            colName = colInfo["name"]
+            val = getattr(instance, colName)
+
+            when not self._isUnset(val) {
+                push(cols, colName)
+            } other {
+                // Unset and the database will not fill it in for us.
+                when not colInfo["autoIncrement"] and colInfo["default"] == nil and not colInfo["nullable"] {
+                    throw IntegrityError("Missing required value for column '" + colName + "' on insert into '" + meta["table"] + "'.")
+                }
+            }
+        }
+        give cols
+    }
+
+    // Inserts a group of instances of the same model.
+    // Rows sharing an identical column set are sent as a single multi-row
+    // INSERT; previously every object cost its own prepare/step/finalize.
+    task _doInsertBatch(meta, instances) {
+        when len(instances) == 0 { give nil }
+
+        tableName = meta["table"]
+        dialect = self.engine.dialect
+        pkName = meta["pk"]
+
+        // Group by the exact set of bound columns — rows that leave different
+        // fields unset cannot share one statement.
+        groups = {}
+        order = []
+        get inst in instances {
+            cols = self._boundColumns(inst, meta)
+            sig = join(cols, "|")
+            when not has_key(groups, sig) {
+                groups[sig] = { "cols": cols, "rows": [] }
+                push(order, sig)
+            }
+            push(groups[sig]["rows"], inst)
+        }
+
+        get sig in order {
+            g = groups[sig]
+            cols = g["cols"]
+            rows = g["rows"]
+
+            when len(cols) == 0 {
+                // Nothing bound at all: let the database apply every default.
+                // MySQL spells this "() VALUES ()"; SQLite and Postgres use
+                // "DEFAULT VALUES".
+                emptySql = "INSERT INTO " + quoteIdent(tableName, dialect) + " DEFAULT VALUES"
+                when dialect == "mysql" {
+                    emptySql = "INSERT INTO " + quoteIdent(tableName, dialect) + " () VALUES ()"
+                }
+                get inst in rows {
+                    self.engine.driver.execute(emptySql, [])
+                    self._assignGeneratedPk(inst, meta)
+                    self._markInserted(inst, meta)
+                }
+                skip
+            }
+
+            quotedCols = []
+            get c in cols {
+                push(quotedCols, quoteIdent(c, dialect))
+            }
+
+            marks = []
+            get c in cols {
+                push(marks, "?")
+            }
+            rowMark = "(" + join(marks, ", ") + ")"
+
+            // Auto-increment ids have to be read back per row, so batching is
+            // only safe when the driver can tell us each new id. Batch when the
+            // primary key was supplied explicitly; otherwise insert one at a
+            // time and capture lastInsertId() after each.
+            pkSupplied = contains(cols, pkName)
+
+            when pkSupplied and len(rows) > 1 {
+                allMarks = []
+                params = []
+                get inst in rows {
+                    push(allMarks, rowMark)
+                    get c in cols {
+                        push(params, getattr(inst, c))
+                    }
+                }
+                sql = "INSERT INTO " + quoteIdent(tableName, dialect) + " (" + join(quotedCols, ", ") + ") VALUES " + join(allMarks, ", ")
+                self.engine.driver.execute(sql, params)
+                get inst in rows { self._markInserted(inst, meta) }
+            } other {
+                sql = "INSERT INTO " + quoteIdent(tableName, dialect) + " (" + join(quotedCols, ", ") + ") VALUES " + rowMark
+                get inst in rows {
+                    params = []
+                    get c in cols {
+                        push(params, getattr(inst, c))
+                    }
+                    self.engine.driver.execute(sql, params)
+                    self._assignGeneratedPk(inst, meta)
+                    self._markInserted(inst, meta)
+                }
+            }
+        }
+    }
+
+    // Copies a database-generated primary key back onto the instance.
+    // Records that an instance has just become a row.
+    //
+    // Three things have to happen together, and doing them in only some of the
+    // insert paths is how rows went missing:
+    //   _persisted  so a later commit UPDATEs instead of inserting a duplicate
+    //   _dirty      cleared, or the next commit rewrites every column
+    //   identity    registered, or a later modification is never flushed --
+    //               _flushDirty only walks the identity map, so an object that
+    //               was inserted and then changed saved nothing at all
+    task _markInserted(instance, meta) {
+        setattr(instance, "_persisted", true)
+
+        // A column left unset was omitted from the INSERT so the database
+        // could apply its default. The instance still holds the Column
+        // definition for it, so copy the declared default across -- otherwise
+        // reading the field back gives a Column object instead of a value.
+        get colInfo in meta["columns"] {
+            colName = colInfo["name"]
+            when self._isUnset(getattr(instance, colName)) and colInfo["default"] != nil {
+                setattr(instance, colName, colInfo["default"])
+            }
+        }
+        setattr(instance, "_dirty", {})
+
+        // Into the identity map, exactly like a hydrated row. One row is one
+        // object for the life of the session: without this the object you
+        // inserted and the object a later query returns are two different
+        // instances of the same row, and a change to one leaves the other
+        // stale.
+        pkValue = getattr(instance, meta["pk"])
+        when not self._isUnset(pkValue) and pkValue != nil {
+            self._identityPut(instance.__class__, pkValue, instance)
+        }
+
+        // Also tracked directly, so a row whose primary key the database has
+        // not handed back yet is still watched for later changes.
+        get seen in self._managed {
+            when seen == instance { give nil }
+        }
+        push(self._managed, instance)
+    }
+
+    task _assignGeneratedPk(instance, meta) {
+        pkName = meta["pk"]
+        pkValue = getattr(instance, pkName)
+        when not self._isUnset(pkValue) { give nil }
+
+        get c in meta["columns"] {
+            when c["name"] == pkName and c["autoIncrement"] {
+                setattr(instance, pkName, self.engine.driver.lastInsertId())
+                give nil
+            }
+        }
+    }
+
+    task _doUpdate(instance, meta) {
+        columns = meta["columns"]
+        tableName = meta["table"]
+        pkName = meta["pk"]
+        dialect = self.engine.dialect
+        pkValue = getattr(instance, pkName)
+
+        setParts = []
+        vals = []
+
+        get colInfo in columns {
+            colName = colInfo["name"]
+            when colName != pkName {
+                val = getattr(instance, colName)
+                when not self._isUnset(val) {
+                    push(setParts, quoteIdent(colName, dialect) + " = ?")
+                    push(vals, val)
+                }
+            }
+        }
+
+        when len(setParts) > 0 {
+            sql = "UPDATE " + quoteIdent(tableName, dialect) + " SET " + join(setParts, ", ") + " WHERE " + quoteIdent(pkName, dialect) + " = ?"
+            push(vals, pkValue)
+            self.engine.driver.execute(sql, vals)
+        }
+    }
+
+    task _deleteInstance(instance) {
+        meta = self.engine.getMeta(instance.__class__)
+        tableName = meta["table"]
+        pkName = meta["pk"]
+        dialect = self.engine.dialect
+        pkValue = getattr(instance, pkName)
+
+        when pkValue == nil or self._isUnset(pkValue) {
+            throw IntegrityError("Cannot delete an instance of '" + instance.__class__.__name__ + "' with no primary key value.")
+        }
+
+        sql = "DELETE FROM " + quoteIdent(tableName, dialect) + " WHERE " + quoteIdent(pkName, dialect) + " = ?"
+        self.engine.driver.execute(sql, [pkValue])
+    }
+}

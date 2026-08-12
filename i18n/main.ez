@@ -1,0 +1,226 @@
+# ============================================================================
+# i18n — translation and localisation for EZ
+#
+#   use "i18n"
+#
+#   I18n.load("en", { "greeting": "Hello, {name}!" })
+#   I18n.load("fr", { "greeting": "Bonjour, {name} !" })
+#   I18n.locale("fr")
+#
+#   out I18n.t("greeting", { "name": "Ali" })       # Bonjour, Ali !
+#
+# Keys are dotted paths into a nested catalogue, so translations can be
+# organised the way the interface is. A missing translation falls back to the
+# fallback locale and then to the key itself -- never to a blank, which is
+# invisible in a layout and easy to ship by accident.
+# ============================================================================
+
+use "i18n/plural.ez"
+
+catalogues = {}
+currentLocale = "en"
+fallbackLocale = "en"
+missingHandler = nil
+
+export model I18n {
+
+    # ── catalogues ──────────────────────────────────────────────────────────
+
+    # Add or merge translations for a locale. Calling it twice merges rather
+    # than replaces, so a catalogue can be split across files.
+    static task load(locale, table) {
+        code = str(locale)
+        when has_key(catalogues, code) == false { catalogues[code] = {} }
+        I18n.mergeInto(catalogues[code], table)
+        give nil
+    }
+
+    static task mergeInto(target, source) {
+        get k in keys(source) {
+            value = source[k]
+            when typeOf(value) == "dictionary" {
+                when has_key(target, k) == false { target[k] = {} }
+                when typeOf(target[k]) == "dictionary" { I18n.mergeInto(target[k], value) }
+                other { target[k] = value }
+            }
+            other { target[k] = value }
+        }
+        give nil
+    }
+
+    static task locale(code) {
+        when code == nil { give currentLocale }
+        currentLocale = str(code)
+        give currentLocale
+    }
+
+    static task fallback(code) {
+        when code == nil { give fallbackLocale }
+        fallbackLocale = str(code)
+        give fallbackLocale
+    }
+
+    static task locales() { give sort(keys(catalogues)) }
+
+    static task has(key) { give I18n.lookup(currentLocale, key) != nil }
+
+    static task clear() {
+        catalogues = {}
+        give nil
+    }
+
+    # Called with the key when a translation is missing. Wire it to your log
+    # in development to find gaps before users do.
+    static task onMissing(handler) {
+        missingHandler = handler
+        give nil
+    }
+
+    # ── lookup ──────────────────────────────────────────────────────────────
+
+    # Walks a dotted path. Returns nil rather than throwing: a missing key is
+    # a content problem, not a program error.
+    static task lookup(locale, key) {
+        code = str(locale)
+        when has_key(catalogues, code) == false { give nil }
+        node = catalogues[code]
+        get part in split(str(key), ".") {
+            when typeOf(node) != "dictionary" { give nil }
+            when has_key(node, part) == false { give nil }
+            node = node[part]
+        }
+        give node
+    }
+
+    # ── translating ─────────────────────────────────────────────────────────
+
+    # Translate `key`, substituting {placeholders} from `values`.
+    static task t(key, values) {
+        entry = I18n.lookup(currentLocale, key)
+        when entry == nil and currentLocale != fallbackLocale {
+            entry = I18n.lookup(fallbackLocale, key)
+        }
+        when entry == nil {
+            when missingHandler != nil { missingHandler(key) }
+            # The key itself, so a gap shows up as readable text rather than
+            # an empty space that nobody notices.
+            give str(key)
+        }
+        # A dictionary here means a plural table used without a count.
+        when typeOf(entry) == "dictionary" {
+            entry = selectPlural(entry, "other")
+            when entry == nil { give str(key) }
+        }
+        give I18n.interpolate(str(entry), values)
+    }
+
+    # Translate with a count, choosing the right plural form. `values` may be
+    # nil; `count` is always available to the template as {count}.
+    static task plural(key, count, values) {
+        entry = I18n.lookup(currentLocale, key)
+        locale = currentLocale
+        when entry == nil and currentLocale != fallbackLocale {
+            entry = I18n.lookup(fallbackLocale, key)
+            locale = fallbackLocale
+        }
+        when entry == nil {
+            when missingHandler != nil { missingHandler(key) }
+            give str(key)
+        }
+
+        text = entry
+        when typeOf(entry) == "dictionary" {
+            text = selectPlural(entry, pluralCategory(locale, count))
+            when text == nil { give str(key) }
+        }
+
+        merged = {}
+        when values != nil {
+            get k in keys(values) { merged[k] = values[k] }
+        }
+        merged["count"] = count
+        give I18n.interpolate(str(text), merged)
+    }
+
+    # Replaces {name} with values["name"]. An unknown placeholder is left as
+    # written, which makes the mistake visible in the output.
+    static task interpolate(text, values) {
+        when values == nil { give text }
+        body = text
+        get k in keys(values) {
+            body = replace(body, "{" + str(k) + "}", str(values[k]))
+        }
+        give body
+    }
+
+    # ── formatting ──────────────────────────────────────────────────────────
+
+    # Group digits for the current locale. Most of Europe swaps the separators
+    # relative to English, which makes "1,50" mean one and a half.
+    static task number(value, decimals) {
+        style = I18n.numberStyle(currentLocale)
+        give I18n.formatNumber(value, decimals, style["group"], style["decimal"])
+    }
+
+    static task numberStyle(locale) {
+        code = lower(str(locale))
+        dash = indexOf(code, "-")
+        when dash >= 0 { code = substr(code, 0, dash) }
+        get lang in ["de", "es", "it", "pt", "nl", "da", "tr", "id", "vi"] {
+            when code == lang { give { "group": ".", "decimal": "," } }
+        }
+        get lang in ["fr", "ru", "pl", "cs", "sv", "nb", "fi", "uk"] {
+            when code == lang { give { "group": " ", "decimal": "," } }
+        }
+        when code == "ch" { give { "group": "'", "decimal": "." } }
+        give { "group": ",", "decimal": "." }
+    }
+
+    static task formatNumber(value, decimals, group, point) {
+        negative = value < 0
+        magnitude = value
+        when negative { magnitude = -magnitude }
+
+        scale = 1
+        repeat i = 1 to decimals { scale = scale * 10 }
+        scaled = floor(magnitude * scale + 0.5)
+        whole = floor(scaled / scale)
+        fraction = scaled - (whole * scale)
+
+        digits = str(whole)
+        grouped = ""
+        count = 0
+        index = len(digits) - 1
+        while index >= 0 {
+            grouped = substr(digits, index, 1) + grouped
+            count = count + 1
+            when count % 3 == 0 and index > 0 { grouped = group + grouped }
+            index = index - 1
+        }
+
+        body = grouped
+        when decimals > 0 {
+            tail = str(floor(fraction))
+            while len(tail) < decimals { tail = "0" + tail }
+            body = body + point + tail
+        }
+        when negative { give "-" + body }
+        give body
+    }
+
+    # Currency for the current locale. Symbol placement differs: English puts
+    # it in front, most of Europe after.
+    static task currency(value, symbol) {
+        body = I18n.number(value, 2)
+        code = lower(currentLocale)
+        get lang in ["de", "fr", "es", "it", "pt", "nl", "pl", "cs", "sv", "fi", "ru", "uk", "tr"] {
+            when startsWith(code, lang) { give body + " " + symbol }
+        }
+        when startsWith(body, "-") { give "-" + symbol + substr(body, 1, len(body) - 1) }
+        give symbol + body
+    }
+}
+
+# Shorthand, since translating is the most frequent call in any interface.
+export task t(key, values) { give I18n.t(key, values) }
+export task tn(key, count, values) { give I18n.plural(key, count, values) }

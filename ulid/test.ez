@@ -1,0 +1,143 @@
+# ============================================================================
+# ulid — test suite
+#   ez test.ez
+# ============================================================================
+
+use "ulid"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+out "ulid tests"
+
+# ── shape ───────────────────────────────────────────────────────────────────
+id = ulid()
+check("length", len(id), 26)
+check("is valid", isUlid(id), true)
+check("exported length", ULID_LENGTH, 26)
+
+# Every character must come from the Crockford alphabet -- no I, L, O or U.
+ok = true
+repeat i = 0 to 25 {
+    c = substr(id, i, 1)
+    when indexOf(ALPHABET, c) < 0 { ok = false }
+}
+check("uses only the alphabet", ok, true)
+check("alphabet excludes I", indexOf(ALPHABET, "I"), -1)
+check("alphabet excludes L", indexOf(ALPHABET, "L"), -1)
+check("alphabet excludes O", indexOf(ALPHABET, "O"), -1)
+check("alphabet excludes U", indexOf(ALPHABET, "U"), -1)
+check("alphabet is 32 long", len(ALPHABET), 32)
+
+# ── timestamp ───────────────────────────────────────────────────────────────
+# The spec's own example: this millisecond encodes to this prefix.
+check("spec timestamp prefix", substr(ulidAt(1469918176385), 0, 10), "01ARYZ6S41")
+check("time round trips", ulidTimeOf(ulidAt(1469918176385)), 1469918176385)
+check("epoch zero", substr(ulidAt(0), 0, 10), "0000000000")
+check("time of a fresh id is now-ish", ulidTime() - ulidTimeOf(ulid()) < 1000, true)
+check("random part length", len(ulidRandomOf(id)), 16)
+
+# ── sortability: the reason ULIDs exist ─────────────────────────────────────
+early = ulidAt(1000)
+late = ulidAt(2000)
+check("later sorts after earlier", late > early, true)
+check("compare says the same", ulidCompare(early, late), -1)
+check("compare equal", ulidCompare(early, early), 0)
+
+# Plain string order must match chronological order across magnitudes, which
+# is why the timestamp is fixed-width rather than variable.
+check("across digit counts", ulidAt(999999) < ulidAt(1000000), true)
+check("large timestamps", ulidAt(1469918176385) < ulidAt(1469918176386), true)
+
+# Within a single millisecond, the random part is stepped rather than
+# redrawn, so creation order still holds.
+sameMs = []
+repeat i = 1 to 20 { push(sameMs, ulid()) }
+monotonic = true
+repeat i = 1 to 19 {
+    when sameMs[i] <= sameMs[i - 1] { monotonic = false }
+}
+check("monotonic within a millisecond", monotonic, true)
+
+# ── uniqueness ──────────────────────────────────────────────────────────────
+seen = {}
+collisions = 0
+repeat i = 1 to 500 {
+    fresh = ulid()
+    when has_key(seen, fresh) { collisions = collisions + 1 }
+    seen[fresh] = true
+}
+check("500 ids are distinct", collisions, 0)
+
+# Different milliseconds must not reuse the previous randomness.
+r1 = ulidRandomOf(ulidAt(5000))
+r2 = ulidRandomOf(ulidAt(6000))
+check("new millisecond redraws randomness", r1 != r2, true)
+
+# ── sorting helper ──────────────────────────────────────────────────────────
+shuffled = [ulidAt(3000), ulidAt(1000), ulidAt(2000)]
+ordered = ulidSort(shuffled)
+check("sort ascending", ulidTimeOf(ordered[0]), 1000)
+check("sort middle", ulidTimeOf(ordered[1]), 2000)
+check("sort last", ulidTimeOf(ordered[2]), 3000)
+check("sort empty", len(ulidSort([])), 0)
+
+# ── validation ──────────────────────────────────────────────────────────────
+check("too short", isUlid("0123"), false)
+check("too long", isUlid(id + "X"), false)
+check("nil", isUlid(nil), false)
+check("empty", isUlid(""), false)
+# U is not in the alphabet.
+check("invalid character", isUlid("U1ARZ3NDEKTSV4RRFFQ69G5FAV"), false)
+# A leading character above 7 overflows 48 bits of timestamp.
+check("overflowing timestamp", isUlid("8ZZZZZZZZZZZZZZZZZZZZZZZZZ"), false)
+check("max valid", isUlid("7ZZZZZZZZZZZZZZZZZZZZZZZZZ"), true)
+
+# ── canonical form ──────────────────────────────────────────────────────────
+# Confusable characters are accepted and normalised, so an ID read off a
+# screen and retyped still resolves.
+check("lowercase normalised", ulidCanonical("01arz3ndekTSV4RRFFQ69G5FAV"),
+      "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+check("letter I becomes 1", ulidCanonical("0IARZ3NDEKTSV4RRFFQ69G5FAV"),
+      "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+check("letter O becomes 0", ulidCanonical("O1ARZ3NDEKTSV4RRFFQ69G5FAV"),
+      "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+check("already canonical unchanged", ulidCanonical("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+      "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+
+# ── range bounds ────────────────────────────────────────────────────────────
+floorId = ulidFloor(1469918176385)
+ceilId = ulidCeiling(1469918176385)
+check("floor is all zeros after the time", substr(floorId, 10, 16), "0000000000000000")
+check("ceiling is all Z after the time", substr(ceilId, 10, 16), "ZZZZZZZZZZZZZZZZ")
+check("floor sorts before ceiling", floorId < ceilId, true)
+sample = ulidAt(1469918176385)
+check("a real id sits inside the range", sample >= floorId and sample <= ceilId, true)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("time of a non-ulid", || ulidTimeOf("nope"))
+throws("random of a non-ulid", || ulidRandomOf("nope"))
+throws("canonical of junk", || ulidCanonical("!!!"))
+throws("negative time", || ulidAt(-1))
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

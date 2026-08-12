@@ -1,0 +1,11 @@
+{
+  "name": "oauth",
+  "version": "1.0.0",
+  "description": "OAuth 2.0 client for EZ. Authorization code flow with PKCE, refresh, client credentials, and presets for the providers people actually sign in with.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["oauth", "oauth2", "pkce", "login", "sso", "google", "github", "auth"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "crypto": "^1.0.0" }
+}

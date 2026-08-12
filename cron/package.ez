@@ -1,0 +1,11 @@
+{
+  "name": "cron",
+  "version": "1.0.0",
+  "description": "Recurring schedules for EZ. Cron expression parsing, next-occurrence calculation and an in-process scheduler with failure handling.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["cron", "schedule", "scheduler", "recurring", "crontab", "jobs"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

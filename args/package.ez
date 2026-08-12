@@ -1,0 +1,11 @@
+{
+  "name": "args",
+  "version": "1.0.0",
+  "description": "Command-line argument parsing for EZ. Flags, options, positionals, type coercion, choices and generated help.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["args", "argv", "cli", "argparse", "options", "flags"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

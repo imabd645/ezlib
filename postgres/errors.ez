@@ -1,0 +1,152 @@
+# ============================================================================
+# postgres/errors.ez — knowing what went wrong
+#
+# Every PostgreSQL error carries a five-character SQLSTATE. That is the part
+# worth branching on: the message text is localised and changes between
+# versions, so `contains(message, "duplicate key")` is a check that breaks on
+# a server with a different locale.
+#
+# Two of these classes mean "try again" rather than "you are wrong", and
+# getting that distinction right is most of what separates a database layer
+# that survives load from one that does not.
+# ============================================================================
+
+export UNIQUE_VIOLATION = "23505"
+export FOREIGN_KEY_VIOLATION = "23503"
+export NOT_NULL_VIOLATION = "23502"
+export CHECK_VIOLATION = "23514"
+export EXCLUSION_VIOLATION = "23P01"
+export SERIALIZATION_FAILURE = "40001"
+export DEADLOCK_DETECTED = "40P01"
+export QUERY_CANCELED = "57014"
+export ADMIN_SHUTDOWN = "57P01"
+export CRASH_SHUTDOWN = "57P02"
+export CANNOT_CONNECT_NOW = "57P03"
+export UNDEFINED_TABLE = "42P01"
+export UNDEFINED_COLUMN = "42703"
+export UNDEFINED_FUNCTION = "42883"
+export SYNTAX_ERROR = "42601"
+export INSUFFICIENT_PRIVILEGE = "42501"
+export DUPLICATE_TABLE = "42P07"
+export INVALID_PASSWORD = "28P01"
+export READ_ONLY_TRANSACTION = "25006"
+export CONNECTION_EXCEPTION = "08000"
+export NUMERIC_VALUE_OUT_OF_RANGE = "22003"
+export DIVISION_BY_ZERO = "22012"
+export INVALID_TEXT_REPRESENTATION = "22P02"
+
+# The two that mean "the database is fine, you lost a race". Retrying the whole
+# transaction is the correct response and is why `withRetry` exists; retrying
+# anything else just produces the same error again.
+export task isRetryable(sqlstate) {
+    give sqlstate == SERIALIZATION_FAILURE or sqlstate == DEADLOCK_DETECTED
+}
+
+# Class 08 is connection failure, and 57P01-03 mean the server went away.
+export task isConnectionError(sqlstate) {
+    when sqlstate == nil { give false }
+    when startsWith(sqlstate, "08") { give true }
+    give sqlstate == ADMIN_SHUTDOWN or sqlstate == CRASH_SHUTDOWN or sqlstate == CANNOT_CONNECT_NOW
+}
+
+export task isConstraintViolation(sqlstate) {
+    when sqlstate == nil { give false }
+    give startsWith(sqlstate, "23")
+}
+
+export task isUniqueViolation(sqlstate) { give sqlstate == UNIQUE_VIOLATION }
+export task isForeignKeyViolation(sqlstate) { give sqlstate == FOREIGN_KEY_VIOLATION }
+export task isNotNullViolation(sqlstate) { give sqlstate == NOT_NULL_VIOLATION }
+export task isCheckViolation(sqlstate) { give sqlstate == CHECK_VIOLATION }
+
+# The class is the first two characters and is coarser but stable.
+export task errorClass(sqlstate) {
+    when sqlstate == nil or len(sqlstate) < 2 { give nil }
+    give substr(sqlstate, 0, 2)
+}
+
+CLASS_NAMES = {
+    "00": "success", "01": "warning", "02": "no data",
+    "08": "connection failure", "0A": "feature not supported",
+    "21": "cardinality violation", "22": "data error",
+    "23": "constraint violation", "25": "invalid transaction state",
+    "28": "invalid authorization", "40": "transaction rollback",
+    "42": "syntax error or access rule violation",
+    "53": "insufficient resources", "54": "program limit exceeded",
+    "55": "object not in prerequisite state", "57": "operator intervention",
+    "58": "system error", "XX": "internal error"
+}
+
+export task describeClass(sqlstate) {
+    cls = errorClass(sqlstate)
+    when cls != nil and has_key(CLASS_NAMES, cls) { give CLASS_NAMES[cls] }
+    give "database error"
+}
+
+# What to actually do about it, for the ones where the server's own message
+# does not say. These are the errors people hit on day one.
+task advice(info) {
+    code = info["sqlstate"]
+    when code == UNIQUE_VIOLATION {
+        when info["constraint"] != nil {
+            give ` (the '{info["constraint"]}' constraint -- this row already exists)`
+        }
+        give " (this row already exists)"
+    }
+    when code == FOREIGN_KEY_VIOLATION {
+        give " (the row it points at does not exist, or something still points at this one)"
+    }
+    when code == NOT_NULL_VIOLATION {
+        when info["column"] != nil { give ` (column '{info["column"]}' cannot be null)` }
+        give " (a required column was null)"
+    }
+    when code == UNDEFINED_TABLE { give " (no such table -- has the migration run?)" }
+    when code == UNDEFINED_COLUMN { give " (no such column -- has the migration run?)" }
+    when code == SERIALIZATION_FAILURE {
+        give " (a concurrent transaction conflicted -- retry the whole transaction)"
+    }
+    when code == DEADLOCK_DETECTED {
+        give " (two transactions each held what the other wanted -- retry, and take locks in a consistent order)"
+    }
+    when code == INVALID_PASSWORD { give " (check the user and password)" }
+    when code == QUERY_CANCELED { give " (the statement timeout was reached)" }
+    when code == READ_ONLY_TRANSACTION { give " (this connection or transaction is read-only)" }
+    when code == INVALID_TEXT_REPRESENTATION {
+        give " (a value could not be read as the column's type)"
+    }
+    give ""
+}
+
+# One readable line, with the SQL that caused it. A database error without the
+# statement is nearly useless when it surfaces in a log an hour later.
+export task describe(info, sql) {
+    code = info["sqlstate"]
+    message = info["message"]
+    when message == nil { message = info["full"] }
+    when message == nil or message == "" { message = "the server gave no explanation" }
+
+    text = "postgres: " + trim(str(message)) + advice(info)
+    when code != nil { text = text + ` [{code}]` }
+    when info["detail"] != nil { text = text + "\n  detail: " + info["detail"] }
+    when info["hint"] != nil { text = text + "\n  hint: " + info["hint"] }
+    when sql != nil and sql != "" { text = text + "\n  sql: " + shorten(sql) }
+    give text
+}
+
+task shorten(sql) {
+    body = trim(str(sql))
+    collapsed = ""
+    spaced = false
+    get ch in split(body, "") {
+        when ch == "\n" or ch == "\r" or ch == "\t" or ch == " " {
+            when spaced == false { collapsed = collapsed + " " }
+            spaced = true
+        }
+        other {
+            collapsed = collapsed + ch
+            spaced = false
+        }
+    }
+    when len(collapsed) <= 300 { give collapsed }
+    give substr(collapsed, 0, 300) + "…"
+}

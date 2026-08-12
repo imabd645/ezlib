@@ -1,0 +1,168 @@
+# ============================================================================
+# yaml/emitter.ez — EZ values to YAML text
+#
+# The emitter must round-trip: anything it writes has to parse back to an
+# equal value. That drives the quoting rules below -- a string like "true" or
+# "8080" is quoted, because unquoted it would read back as a bool or a number.
+# ============================================================================
+
+use "yaml/scalar.ez"
+
+task yamlNeedsQuote(s) {
+    when s == "" { give true }
+
+    # Would be re-read as a non-string.
+    when yamlIsNumber(s) { give true }
+    get w in NULL_WORDS { when w == s { give true } }
+    get w in TRUE_WORDS { when w == s { give true } }
+    get w in FALSE_WORDS { when w == s { give true } }
+
+    # Leading characters that carry structural meaning.
+    first = substr(s, 0, 1)
+    get ch in ["-", "?", ":", ",", "[", "]", "{", "}", "#", "&", "*", "!",
+               "|", ">", "'", `"`, "%", "@", "`"] {
+        when first == ch { give true }
+    }
+    # Leading or trailing space would be lost on the way back in.
+    when first == " " { give true }
+    when substr(s, len(s) - 1, 1) == " " { give true }
+
+    # ": " and " #" would split the line into key/value or start a comment.
+    when contains(s, ": ") { give true }
+    when contains(s, " #") { give true }
+    when contains(s, chr(9)) { give true }
+    give false
+}
+
+task yamlQuote(s) {
+    body = replace(s, "\\", "\\\\")
+    body = replace(body, `"`, "\\" + `"`)
+    body = replace(body, chr(10), "\\n")
+    body = replace(body, chr(13), "\\r")
+    body = replace(body, chr(9), "\\t")
+    give `"` + body + `"`
+}
+
+task yamlPad(depth) {
+    pad = ""
+    repeat i = 1 to depth { pad = pad + "  " }
+    give pad
+}
+
+task yamlScalarText(value) {
+    t = typeOf(value)
+    when value == nil { give "null" }
+    when t == "bool" { when value { give "true" }  give "false" }
+    when t == "integer" or t == "float" { give str(value) }
+    s = str(value)
+    when yamlNeedsQuote(s) { give yamlQuote(s) }
+    give s
+}
+
+task yamlIsContainer(value) {
+    t = typeOf(value)
+    give t == "dictionary" or t == "array" or t == "list"
+}
+
+task yamlIsEmptyContainer(value) {
+    when yamlIsContainer(value) == false { give false }
+    when typeOf(value) == "dictionary" { give len(keys(value)) == 0 }
+    give len(value) == 0
+}
+
+# Emits `value` as the body of a block at `depth`. Containers recurse onto
+# their own lines; scalars are appended to the caller's line instead, which is
+# why this returns lines rather than writing directly.
+task yamlEmitNode(value, depth, lines) {
+    t = typeOf(value)
+    pad = yamlPad(depth)
+
+    when t == "dictionary" {
+        ks = keys(value)
+        when len(ks) == 0 { push(lines, pad + "{}")  give nil }
+        get k in ks {
+            v = value[k]
+            keyText = str(k)
+            when yamlNeedsQuote(keyText) { keyText = yamlQuote(keyText) }
+            when yamlIsContainer(v) and yamlIsEmptyContainer(v) == false {
+                push(lines, pad + keyText + ":")
+                yamlEmitNode(v, depth + 1, lines)
+            }
+            other {
+                when yamlIsEmptyContainer(v) {
+                    inline = "{}"
+                    when typeOf(v) != "dictionary" { inline = "[]" }
+                    push(lines, pad + keyText + ": " + inline)
+                }
+                other {
+                    # Multi-line strings become literal blocks; escaping every
+                    # newline into one long quoted line is unreadable.
+                    #
+                    # The chomping indicator has to match how the value ends or
+                    # the round trip is lossy: a plain `|` always reads back
+                    # with exactly one trailing newline, so a string without
+                    # one needs `|-`. More than one trailing newline cannot be
+                    # expressed by a block reliably, so those fall back to a
+                    # quoted scalar where the newlines are escaped explicitly.
+                    when typeOf(v) == "string" and contains(v, chr(10)) {
+                        trailing = 0
+                        idx = len(v) - 1
+                        while idx >= 0 and substr(v, idx, 1) == chr(10) {
+                            trailing = trailing + 1
+                            idx = idx - 1
+                        }
+                        when trailing > 1 {
+                            push(lines, pad + keyText + ": " + yamlQuote(v))
+                        }
+                        other {
+                            header = "|-"
+                            body = v
+                            when trailing == 1 {
+                                header = "|"
+                                body = substr(v, 0, len(v) - 1)
+                            }
+                            push(lines, pad + keyText + ": " + header)
+                            get part in split(body, chr(10)) {
+                                push(lines, yamlPad(depth + 1) + part)
+                            }
+                        }
+                    }
+                    other {
+                        push(lines, pad + keyText + ": " + yamlScalarText(v))
+                    }
+                }
+            }
+        }
+        give nil
+    }
+
+    when t == "array" or t == "list" {
+        when len(value) == 0 { push(lines, pad + "[]")  give nil }
+        get item in value {
+            when yamlIsContainer(item) and yamlIsEmptyContainer(item) == false {
+                # Render the child, then fold its first line onto the dash so
+                # `- name: Ali` comes out instead of a bare `-`.
+                sub = []
+                yamlEmitNode(item, depth + 1, sub)
+                firstLine = sub[0]
+                push(lines, pad + "- " + trim(firstLine))
+                repeat i = 1 to len(sub) - 1 {
+                    push(lines, sub[i])
+                }
+            }
+            other {
+                push(lines, pad + "- " + yamlScalarText(item))
+            }
+        }
+        give nil
+    }
+
+    push(lines, pad + yamlScalarText(value))
+    give nil
+}
+
+export task yamlEmit(value) {
+    lines = []
+    yamlEmitNode(value, 0, lines)
+    give join(lines, chr(10)) + chr(10)
+}

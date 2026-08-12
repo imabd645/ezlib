@@ -1,0 +1,89 @@
+# ============================================================================
+# args/spec.ez — what a program declares it accepts
+#
+# Options are described up front rather than pulled out of argv ad hoc, so one
+# declaration can drive parsing, validation and the help text. Help that is
+# generated from the same source as the parser cannot drift out of date, which
+# hand-written usage strings always do.
+# ============================================================================
+
+export KIND_FLAG = "flag"          # --verbose, no value
+export KIND_OPTION = "option"      # --output file
+export KIND_POSITIONAL = "positional"
+
+export task makeOption(kind, name, short, help) {
+    give {
+        "kind": kind,
+        "name": name,
+        "short": short,
+        "help": help,
+        "default": nil,
+        "required": false,
+        "valueType": "string",
+        "choices": nil,
+        "many": false,
+        "placeholder": ""
+    }
+}
+
+# The name a user types, for help and error messages.
+export task optionLabel(option) {
+    when option["kind"] == KIND_POSITIONAL { give "<" + option["name"] + ">" }
+    body = "--" + option["name"]
+    when option["short"] != "" and option["short"] != nil {
+        body = "-" + option["short"] + ", " + body
+    }
+    when option["kind"] == KIND_OPTION {
+        placeholder = option["placeholder"]
+        when placeholder == "" { placeholder = upper(option["name"]) }
+        body = body + " <" + placeholder + ">"
+    }
+    give body
+}
+
+# Converts a raw string to the declared type. Returns { ok, value, error } --
+# a bad value is the user's mistake, so it needs a message rather than a
+# throw the program has to catch.
+export task coerceValue(option, raw) {
+    kind = option["valueType"]
+    when kind == "string" { give { "ok": true, "value": raw } }
+
+    when kind == "number" {
+        body = trim(raw)
+        negative = false
+        when startsWith(body, "-") { negative = true  body = substr(body, 1, len(body) - 1) }
+        when body == "" { give { "ok": false, "error": "expects a number" } }
+        dots = 0
+        digits = 0
+        total = len(body)
+        repeat i = 0 to total - 1 {
+            c = substr(body, i, 1)
+            when c == "." { dots = dots + 1 }
+            other {
+                code = ord(c)
+                when code < 48 or code > 57 { give { "ok": false, "error": "expects a number" } }
+                digits = digits + 1
+            }
+        }
+        when digits == 0 or dots > 1 { give { "ok": false, "error": "expects a number" } }
+        value = num(raw)
+        give { "ok": true, "value": value }
+    }
+
+    when kind == "bool" {
+        lowered = lower(trim(raw))
+        get word in ["true", "yes", "1", "on"] { when lowered == word { give { "ok": true, "value": true } } }
+        get word in ["false", "no", "0", "off"] { when lowered == word { give { "ok": true, "value": false } } }
+        give { "ok": false, "error": "expects true or false" }
+    }
+
+    give { "ok": true, "value": raw }
+}
+
+export task checkChoices(option, value) {
+    when option["choices"] == nil { give nil }
+    get allowed in option["choices"] {
+        when str(value) == str(allowed) { give nil }
+    }
+    give "must be one of: " + join(option["choices"], ", ")
+}

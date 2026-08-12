@@ -1,0 +1,291 @@
+// ============================================================================
+// ezenv / test_env.ez -- test suite
+//
+//   ez test_env.ez
+//
+// Tests cover: parsing, quoting, escaping, comments, export prefix, key
+// validation, typed accessors, required keys, merge, load_string, and
+// load_files.
+// ============================================================================
+
+use "main.ez"
+
+__pass = 0
+__fail = 0
+
+task assert(condition, label) {
+    when condition {
+        __pass = __pass + 1
+    } other {
+        __fail = __fail + 1
+        out "  FAIL: " + label
+    }
+}
+
+task assertEq(actual, expected, label) {
+    when str(actual) == str(expected) {
+        __pass = __pass + 1
+    } other {
+        __fail = __fail + 1
+        out "  FAIL: " + label + "  (got " + str(actual) + ", expected " + str(expected) + ")"
+    }
+}
+
+task section(name) {
+    out "--- " + name + " ---"
+}
+
+// ── Parser: basic key=value ─────────────────────────────────────────────────
+
+section("Basic parsing")
+
+env = load_string("PORT=3000\nHOST=localhost\nNAME=myapp")
+assertEq(env.get("PORT"), "3000", "simple value")
+assertEq(env.get("HOST"), "localhost", "simple value 2")
+assertEq(env.get("NAME"), "myapp", "simple value 3")
+assertEq(env.size(), 3, "size")
+
+// ── Spaces around = ────────────────────────────────────────────────────────
+
+section("Spaces around =")
+
+env = load_string("PORT = 3000\n HOST = localhost \nDB_NAME=  test  ")
+assertEq(env.get("PORT"), "3000", "spaces around =")
+assertEq(env.get("HOST"), "localhost", "leading/trailing spaces on line")
+assertEq(env.get("DB_NAME"), "test", "spaces in value")
+
+// ── Comments ────────────────────────────────────────────────────────────────
+
+section("Comments and blank lines")
+
+env = load_string("# This is a comment\nPORT=3000\n\n# Another comment\nHOST=localhost\n   \nNAME=app")
+assertEq(env.size(), 3, "comments and blanks skipped")
+assertEq(env.get("PORT"), "3000", "value after comment")
+
+// ── Inline comments ─────────────────────────────────────────────────────────
+
+section("Inline comments")
+
+env = load_string("PORT=3000 # the port\nHOST=localhost  # server host")
+assertEq(env.get("PORT"), "3000", "inline comment stripped")
+assertEq(env.get("HOST"), "localhost", "inline comment stripped 2")
+
+// ── Double-quoted values ────────────────────────────────────────────────────
+
+section("Double-quoted values")
+
+env = load_string("MSG=\"hello world\"\nPATH=\"C:\\\\Users\\\\test\"\nNEWLINE=\"line1\\nline2\"")
+assertEq(env.get("MSG"), "hello world", "double-quoted value")
+assertEq(env.get("PATH"), "C:\\Users\\test", "escaped backslash")
+assertEq(env.get("NEWLINE"), "line1\nline2", "escaped newline")
+
+// ── Double-quoted with # inside ─────────────────────────────────────────────
+
+section("Hash inside quotes")
+
+env = load_string("COLOR=\"#FF0000\"")
+assertEq(env.get("COLOR"), "#FF0000", "# inside double quotes is literal")
+
+// ── Single-quoted values ────────────────────────────────────────────────────
+
+section("Single-quoted values")
+
+env = load_string("MSG='hello world'\nNOESCAPE='no\\nescaping'")
+assertEq(env.get("MSG"), "hello world", "single-quoted value")
+assertEq(env.get("NOESCAPE"), "no\\nescaping", "single-quoted: no escaping")
+
+// ── Backtick-quoted values ──────────────────────────────────────────────────
+
+section("Backtick-quoted values")
+
+env = load_string("CMD=`echo hello`")
+assertEq(env.get("CMD"), "echo hello", "backtick-quoted value")
+
+// ── Export prefix ───────────────────────────────────────────────────────────
+
+section("export prefix")
+
+env = load_string("export PORT=3000\nexport HOST=localhost\nNAME=app")
+assertEq(env.get("PORT"), "3000", "export prefix stripped")
+assertEq(env.get("HOST"), "localhost", "export prefix stripped 2")
+assertEq(env.get("NAME"), "app", "no export prefix still works")
+assertEq(env.size(), 3, "export does not create extra keys")
+
+// ── Empty value ─────────────────────────────────────────────────────────────
+
+section("Empty values")
+
+env = load_string("EMPTY=\nALSO_EMPTY=\"\"\nBLANK=''")
+assertEq(env.get("EMPTY"), "", "empty unquoted value")
+assertEq(env.get("ALSO_EMPTY"), "", "empty double-quoted value")
+assertEq(env.get("BLANK"), "", "empty single-quoted value")
+assert(env.has("EMPTY"), "has() returns true for empty value")
+
+// ── Duplicate keys (last wins) ──────────────────────────────────────────────
+
+section("Duplicate keys")
+
+env = load_string("PORT=3000\nPORT=4000\nPORT=5000")
+assertEq(env.get("PORT"), "5000", "last value wins for duplicates")
+
+// ── Typed accessors ─────────────────────────────────────────────────────────
+
+section("Typed accessors")
+
+env = load_string("PORT=3000\nPI=3.14\nDEBUG=true\nVERBOSE=false\nFLAG_YES=yes\nFLAG_NO=no\nON=on\nOFF=off\nONE=1\nZERO=0\nHOSTS=a,b,c")
+
+assertEq(env.getInt("PORT"), 3000, "getInt")
+assertEq(env.getInt("MISSING", 8080), 8080, "getInt fallback")
+
+assertEq(env.getFloat("PI"), 3.14, "getFloat")
+assertEq(env.getFloat("MISSING", 0.0), 0.0, "getFloat fallback")
+
+assertEq(env.getBool("DEBUG"), true, "getBool true")
+assertEq(env.getBool("VERBOSE"), false, "getBool false")
+assertEq(env.getBool("FLAG_YES"), true, "getBool yes")
+assertEq(env.getBool("FLAG_NO"), false, "getBool no")
+assertEq(env.getBool("ON"), true, "getBool on")
+assertEq(env.getBool("OFF"), false, "getBool off")
+assertEq(env.getBool("ONE"), true, "getBool 1")
+assertEq(env.getBool("ZERO"), false, "getBool 0")
+assertEq(env.getBool("MISSING", false), false, "getBool fallback")
+
+list = env.getList("HOSTS")
+assertEq(len(list), 3, "getList length")
+assertEq(list[0], "a", "getList item 0")
+assertEq(list[1], "b", "getList item 1")
+assertEq(list[2], "c", "getList item 2")
+
+// ── get with fallback ───────────────────────────────────────────────────────
+
+section("get with fallback")
+
+env = load_string("PORT=3000")
+assertEq(env.get("PORT"), "3000", "existing key")
+assertEq(env.get("MISSING"), nil, "missing key returns nil")
+assertEq(env.get("MISSING", "default"), "default", "missing key returns fallback")
+
+// ── set / remove / has ──────────────────────────────────────────────────────
+
+section("set / remove / has")
+
+env = load_string("A=1")
+assert(env.has("A"), "has existing key")
+assert(not env.has("B"), "has missing key")
+
+env.set("B", "2")
+assertEq(env.get("B"), "2", "set new key")
+assert(env.has("B"), "has after set")
+
+env.remove("A")
+assert(not env.has("A"), "has after remove")
+assertEq(env.size(), 1, "size after remove")
+
+// ── require / validate ──────────────────────────────────────────────────────
+
+section("require / validate")
+
+env = load_string("DB_HOST=localhost\nDB_PORT=5432")
+env.require("DB_HOST")
+env.require("DB_PORT")
+assertEq(env.validate(), true, "validate passes when all required keys present")
+
+caught = false
+try {
+    env2 = load_string("DB_HOST=localhost", { "required": ["DB_HOST", "DB_PASS"] })
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "DB_PASS") >= 0, "error names the missing key")
+}
+assert(caught, "validate throws on missing required key")
+
+// ── merge ───────────────────────────────────────────────────────────────────
+
+section("merge")
+
+env = load_string("A=1\nB=2")
+env.merge({"B": "override", "C": "3"}, false)
+assertEq(env.get("A"), "1", "merge: existing key kept")
+assertEq(env.get("B"), "2", "merge: existing key NOT overwritten (overwrite=false)")
+assertEq(env.get("C"), "3", "merge: new key added")
+
+env.merge({"B": "override"}, true)
+assertEq(env.get("B"), "override", "merge: existing key overwritten (overwrite=true)")
+
+// ── defaults option ─────────────────────────────────────────────────────────
+
+section("defaults option")
+
+env = load_string("PORT=3000", { "defaults": { "PORT": "8080", "HOST": "0.0.0.0" } })
+assertEq(env.get("PORT"), "3000", "file value wins over default")
+assertEq(env.get("HOST"), "0.0.0.0", "default fills in missing key")
+
+// ── Parser errors ───────────────────────────────────────────────────────────
+
+section("Parser errors")
+
+caught = false
+try {
+    load_string("=value")
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "ParseError") >= 0, "ParseError for empty key")
+}
+assert(caught, "empty key throws ParseError")
+
+caught = false
+try {
+    load_string("BAD KEY=value")
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "ParseError") >= 0, "ParseError for space in key")
+}
+assert(caught, "space in key throws ParseError")
+
+caught = false
+try {
+    load_string("MSG=\"unterminated")
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "unterminated") >= 0, "unterminated quote error")
+}
+assert(caught, "unterminated quote throws ParseError")
+
+// ── Type errors ─────────────────────────────────────────────────────────────
+
+section("Type errors")
+
+env = load_string("BAD_INT=notanumber")
+caught = false
+try {
+    env.getInt("BAD_INT")
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "TypeError") >= 0, "TypeError for bad int")
+}
+assert(caught, "getInt throws TypeError for non-numeric value")
+
+env = load_string("BAD_BOOL=maybe")
+caught = false
+try {
+    env.getBool("BAD_BOOL")
+} catch e {
+    caught = true
+    assert(indexOf(str(e), "TypeError") >= 0, "TypeError for bad bool")
+}
+assert(caught, "getBool throws TypeError for ambiguous value")
+
+// ── Summary ─────────────────────────────────────────────────────────────────
+
+out ""
+out "========================================="
+out "  ezenv test suite"
+out "  PASSED: " + str(__pass)
+out "  FAILED: " + str(__fail)
+out "  TOTAL:  " + str(__pass + __fail)
+out "========================================="
+when __fail > 0 {
+    out "  *** SOME TESTS FAILED ***"
+} other {
+    out "  All tests passed."
+}

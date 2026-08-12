@@ -1,0 +1,249 @@
+# ============================================================================
+# log — test suite
+#
+#   ez log/test_log.ez        (run from C:/ezlib)
+#
+# Uses a temp directory under the current folder and cleans up after itself.
+# ============================================================================
+use "log"
+
+passed = 0
+failed = 0
+
+task check(label, cond) {
+    when cond {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label
+    }
+}
+
+task checkEq(label, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+        out "  [PASS] " + label
+    } other {
+        failed = failed + 1
+        out "  [FAIL] " + label + " -- got " + str(actual) + ", expected " + str(expected)
+    }
+}
+
+# Plain files in the working directory rather than a subdirectory: File() does
+# not create directories, so a subdirectory would need an mkdir the package
+# deliberately does not depend on.
+PREFIX = "_logtest_"
+task pathFor(name) { give PREFIX + name }
+
+task readAll(path) {
+    when not File.exists(path) { give nil }
+    f = File(path, "r")
+    c = f.readAll()
+    f.close()
+    give c
+}
+
+task countLines(text) {
+    when text == nil { give 0 }
+    when text == "" { give 0 }
+    parts = split(trim(text), "\n")
+    give len(parts)
+}
+
+task cleanup() {
+    names = ["a.log", "a.log.1", "a.log.2", "a.log.3", "b.log", "c.log", "d.log", "j.log"]
+    get n in names {
+        p = pathFor(n)
+        when File.exists(p) { File.remove(p) }
+    }
+}
+
+out "== Setup =="
+try {
+    probe = File(pathFor("a.log"), "a")
+    probe.close()
+    File.remove(pathFor("a.log"))
+    out "  writing test logs as " + PREFIX + "*"
+} catch (e) {
+    out "  [FAIL] cannot create files in the working directory"
+    out "  " + str(e)
+    exit(1)
+}
+cleanup()
+
+out ""
+out "== Levels =="
+checkEq("levelName(INFO)", levelName(INFO), "INFO")
+checkEq("levelName(FATAL)", levelName(FATAL), "FATAL")
+checkEq("unknown level is still readable", levelName(35), "LVL35")
+checkEq("levelFromName is case-insensitive", levelFromName("warn"), WARN)
+checkEq("levelFromName accepts WARNING", levelFromName("WARNING"), WARN)
+checkEq("levelFromName rejects nonsense", levelFromName("wibble"), nil)
+check("levels are ordered", TRACE < DEBUG and DEBUG < INFO and INFO < WARN and WARN < ERROR and ERROR < FATAL)
+
+out ""
+out "== File sink =="
+l = Logger("t")
+l.toConsole(false)
+l.toFile(pathFor("a.log"))
+l.info("first")
+l.info("second")
+l.flush()
+body = readAll(pathFor("a.log"))
+check("log file was created", body != nil)
+checkEq("both lines written", countLines(body), 2)
+check("message text present", contains(body, "first") and contains(body, "second"))
+check("level name present", contains(body, "[INFO]"))
+check("logger name present", contains(body, "[t]"))
+check("timestamp has a date", contains(body, "-"))
+l.close()
+
+out ""
+out "== Level filtering =="
+l2 = Logger("t2")
+l2.toConsole(false)
+l2.toFile(pathFor("b.log"))
+l2.setLevel(WARN)
+l2.debug("suppressed")
+l2.info("suppressed")
+l2.warn("kept")
+l2.error("kept")
+l2.flush()
+body2 = readAll(pathFor("b.log"))
+checkEq("only WARN and above written", countLines(body2), 2)
+check("suppressed text is absent", not contains(body2, "suppressed"))
+checkEq("isEnabled(DEBUG) is false", l2.isEnabled(DEBUG), false)
+checkEq("isEnabled(ERROR) is true", l2.isEnabled(ERROR), true)
+l2.setLevel("debug")
+checkEq("setLevel accepts a name", l2.getLevel(), DEBUG)
+l2.close()
+
+out ""
+out "== Fields =="
+l3 = Logger("t3")
+l3.toConsole(false)
+l3.toFile(pathFor("c.log"))
+l3.info("query", {"ms": 812, "table": "users"})
+l3.flush()
+body3 = readAll(pathFor("c.log"))
+check("fields are rendered", contains(body3, "ms=812"))
+check("fields are sorted", contains(body3, "ms=812 table=users"))
+l3.info("spaced", {"note": "has spaces"})
+l3.flush()
+body3 = readAll(pathFor("c.log"))
+check("values with spaces are quoted", contains(body3, "note=\"has spaces\""))
+l3.close()
+
+out ""
+out "== JSON format =="
+l4 = Logger("api")
+l4.toConsole(false)
+l4.toFile(pathFor("j.log"))
+l4.setFormat("json")
+l4.warn("slow", {"ms": 90})
+l4.flush()
+raw = trim(readAll(pathFor("j.log")))
+rec = parse_json(raw)
+checkEq("json level", rec["level"], "WARN")
+checkEq("json msg", rec["msg"], "slow")
+checkEq("json logger", rec["logger"], "api")
+checkEq("json field survives", rec["ms"], 90)
+check("json has a time", has_key(rec, "time"))
+l4.close()
+
+out ""
+out "== Context and child loggers =="
+base = Logger("svc")
+base.toConsole(false)
+base.toFile(pathFor("d.log"))
+base.addContext("version", "2.0")
+req = base.with({"req": "abc"})
+req.info("handled")
+req.flush()
+bodyd = readAll(pathFor("d.log"))
+check("parent context is inherited", contains(bodyd, "version=2.0"))
+check("child context is added", contains(bodyd, "req=abc"))
+kid = base.child("auth")
+checkEq("child name is namespaced", kid.name, "svc.auth")
+# Closing the child must not close the parent's file.
+kid.close()
+base.info("still open")
+base.flush()
+bodyd = readAll(pathFor("d.log"))
+check("parent still writes after child close", contains(bodyd, "still open"))
+base.close()
+
+out ""
+out "== exception() =="
+l5 = Logger("t5")
+l5.toConsole(false)
+l5.toFile(pathFor("c.log"))
+try {
+    throw "boom"
+} catch (e) {
+    l5.exception("task failed", e)
+}
+l5.flush()
+body5 = readAll(pathFor("c.log"))
+check("exception records the error", contains(body5, "error=") and contains(body5, "boom"))
+check("exception logs at ERROR", contains(body5, "[ERROR]"))
+l5.close()
+
+out ""
+out "== Rotation =="
+r = Logger("rot")
+r.toConsole(false)
+# Small cap so a handful of lines trips it; keep 2 old generations.
+r.toFile(pathFor("a.log"), 200, 2)
+i = 0
+while i < 40 {
+    r.info("line " + str(i) + " padding padding padding")
+    i = i + 1
+}
+r.flush()
+check("current log exists", File.exists(pathFor("a.log")))
+check("first backup exists", File.exists(pathFor("a.log.1")))
+check("second backup exists", File.exists(pathFor("a.log.2")))
+check("retention respected: no third backup", not File.exists(pathFor("a.log.3")))
+check("current file is under the cap", File.size(pathFor("a.log")) <= 200 + 120)
+last = readAll(pathFor("a.log"))
+check("newest lines are in the current file", contains(last, "line 39"))
+r.close()
+
+out ""
+out "== Failures never throw =="
+bad = Logger("bad")
+bad.toConsole(false)
+threw = false
+try {
+    bad.toFile("no_such_dir_here/deep/x.log")
+    bad.info("into the void")
+    bad.warn("still fine")
+} catch (e) {
+    threw = true
+}
+checkEq("a broken file sink does not throw", threw, false)
+check("the failure is recorded", bad.lastError != "")
+
+out ""
+out "== getLogger registry =="
+g1 = getLogger("shared")
+g2 = getLogger("shared")
+check("same name returns the same logger", g1 == g2)
+checkEq("logger keeps its name", g1.name, "shared")
+
+out ""
+out "== Module-level shortcuts =="
+setLevel(ERROR)
+checkEq("default logger level changed", log.getLevel(), ERROR)
+setLevel(INFO)
+check("module shortcuts exist", typeOf(info) == "function" and typeOf(warn) == "function")
+
+cleanup()
+
+out ""
+out "========================================"
+out " passed: " + str(passed) + "   failed: " + str(failed)
+out "========================================"
+when failed > 0 { exit(1) }

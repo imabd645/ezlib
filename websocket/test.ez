@@ -1,0 +1,159 @@
+# ============================================================================
+# websocket — test suite
+#   ez test.ez
+#
+# Framing and the handshake are tested without a server: both are pure
+# functions over bytes, and the RFC publishes a worked example to check
+# against.
+# ============================================================================
+
+use "websocket"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+
+out "websocket tests"
+
+# ── byte helpers ────────────────────────────────────────────────────────────
+# EZ strings are UTF-8, so this is the property everything else depends on:
+# a byte over 127 must survive as one byte.
+s = bytesToStr([0, 255, 128, 65])
+check("byte-exact length", len(s), 4)
+checkVal("byte-exact round trip", strToBytes(s), [0, 255, 128, 65])
+checkVal("empty bytes", strToBytes(bytesToStr([])), [])
+
+checkVal("big-endian 2 byte", intToBytes(300, 2), [1, 44])
+checkVal("big-endian max", intToBytes(65535, 2), [255, 255])
+checkVal("big-endian 8 byte", intToBytes(1, 8), [0, 0, 0, 0, 0, 0, 0, 1])
+check("bytes to int", bytesToInt([1, 44], 0, 2), 300)
+check("bytes to int offset", bytesToInt([9, 1, 44], 1, 2), 300)
+
+check("xor identity", xorByte(0, 0), 0)
+check("xor self is zero", xorByte(200, 200), 0)
+check("xor known", xorByte(255, 170), 85)
+check("bitAnd", bitAnd(255, 15), 15)
+check("bitAnd zero", bitAnd(0, 255), 0)
+check("bitOr", bitOr(128, 1), 129)
+
+# XOR is its own inverse, which is why one routine both masks and unmasks.
+masked = applyMask([72, 105, 33], [1, 2, 3, 4])
+checkVal("mask round trip", applyMask(masked, [1, 2, 3, 4]), [72, 105, 33])
+
+# ── handshake ───────────────────────────────────────────────────────────────
+# The worked example from RFC 6455 section 1.3.
+check("accept matches the RFC example",
+      wsAcceptFor("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+check("nonce is 16 bytes base64", len(wsNonce()), 24)
+check("nonce differs each time", wsNonce() != wsNonce(), true)
+check("mask key length", len(wsMaskKey()), 4)
+
+# ── URL parsing ─────────────────────────────────────────────────────────────
+u = wsParseUrl("ws://example.com:8080/chat")
+check("host", u["host"], "example.com")
+check("port", u["port"], 8080)
+check("path", u["path"], "/chat")
+check("not secure", u["secure"], false)
+check("default port", wsParseUrl("ws://a.co/x")["port"], 80)
+check("default path", wsParseUrl("ws://a.co")["path"], "/")
+check("wss default port", wsParseUrl("wss://a.co")["port"], 443)
+check("wss flagged", wsParseUrl("wss://a.co")["secure"], true)
+check("bare host", wsParseUrl("a.co:9/p")["host"], "a.co")
+
+# ── framing ─────────────────────────────────────────────────────────────────
+# 0x81 = FIN + text opcode; then length, then payload.
+unmasked = encodeFrame(OP_TEXT, strToBytes("Hi"), nil)
+checkVal("server text frame", strToBytes(unmasked), [129, 2, 72, 105])
+check("frame decodes", decodeFrame(unmasked, 0)[0]["text"], "Hi")
+check("frame consumed", decodeFrame(unmasked, 0)[1], 4)
+check("fin set", decodeFrame(unmasked, 0)[0]["fin"], true)
+check("opcode text", decodeFrame(unmasked, 0)[0]["opcode"], OP_TEXT)
+
+# A masked frame is 4 bytes longer and must decode back to the same text.
+clientFrame = encodeFrame(OP_TEXT, strToBytes("Hi"), [1, 2, 3, 4])
+check("masked frame is longer", len(clientFrame), 8)
+check("mask bit set", bitAnd(strToBytes(clientFrame)[1], 128), 128)
+check("masked decodes", decodeFrame(clientFrame, 0)[0]["text"], "Hi")
+
+check("empty payload", decodeFrame(encodeFrame(OP_TEXT, [], nil), 0)[0]["text"], "")
+check("binary opcode", decodeFrame(encodeFrame(OP_BINARY, [1, 2], nil), 0)[0]["opcode"], OP_BINARY)
+checkVal("binary payload preserved",
+         decodeFrame(encodeFrame(OP_BINARY, [0, 255, 128], nil), 0)[0]["payload"], [0, 255, 128])
+
+# Length encoding switches form at 126 and again at 65536.
+task payloadOf(size) {
+    body = []
+    repeat i = 1 to size { push(body, 65) }
+    give body
+}
+short = encodeFrame(OP_TEXT, payloadOf(125), nil)
+check("125 uses short form", strToBytes(short)[1], 125)
+check("125 round trip", len(decodeFrame(short, 0)[0]["payload"]), 125)
+
+medium = encodeFrame(OP_TEXT, payloadOf(126), nil)
+check("126 switches to 2-byte form", strToBytes(medium)[1], 126)
+check("126 round trip", len(decodeFrame(medium, 0)[0]["payload"]), 126)
+
+large = encodeFrame(OP_TEXT, payloadOf(70000), nil)
+check("70000 switches to 8-byte form", strToBytes(large)[1], 127)
+check("70000 round trip", len(decodeFrame(large, 0)[0]["payload"]), 70000)
+
+# ── short reads ─────────────────────────────────────────────────────────────
+# TCP delivers frames in arbitrary pieces; the decoder must ask for more
+# rather than guess.
+check("empty buffer", decodeFrame("", 0), nil)
+check("one byte", decodeFrame(substr(unmasked, 0, 1), 0), nil)
+check("header only", decodeFrame(substr(unmasked, 0, 2), 0), nil)
+check("partial payload", decodeFrame(substr(unmasked, 0, 3), 0), nil)
+check("partial extended length", decodeFrame(substr(medium, 0, 3), 0), nil)
+check("partial mask key", decodeFrame(substr(clientFrame, 0, 4), 0), nil)
+
+# Two frames in one buffer: decode the first, report its length, then the next.
+both = unmasked + unmasked
+check("first of two", decodeFrame(both, 0)[0]["text"], "Hi")
+check("second at offset", decodeFrame(both, 4)[0]["text"], "Hi")
+
+# ── control frames ──────────────────────────────────────────────────────────
+check("close is a control opcode", isControlOpcode(OP_CLOSE), true)
+check("ping is a control opcode", isControlOpcode(OP_PING), true)
+check("text is not", isControlOpcode(OP_TEXT), false)
+
+closePayload = encodeClosePayload(1000, "bye")
+info = decodeClosePayload(closePayload)
+check("close code", info["code"], 1000)
+check("close reason", info["reason"], "bye")
+check("close with no reason", decodeClosePayload(encodeClosePayload(1001, ""))["reason"], "")
+# An empty close payload means "no status given" -- 1005 per the RFC.
+check("empty close payload", decodeClosePayload([])["code"], 1005)
+
+# ── client state ────────────────────────────────────────────────────────────
+ws = WebSocket("ws://127.0.0.1:1/none")
+check("starts closed", ws.isOpen(), false)
+check("timeout chainable", ws.timeout(50).timeoutMs, 50)
+check("header chainable", ws.header("Origin", "http://a.co").headers["Origin"], "http://a.co")
+
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("send before connect", || ws.send("x"))
+# wss:// is refused with an explanation rather than failing obscurely later.
+throws("wss refused", || WebSocket("wss://a.co").connect())
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

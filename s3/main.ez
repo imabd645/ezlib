@@ -1,0 +1,520 @@
+# ============================================================================
+# s3 — object storage for EZ
+#
+#   use "s3"
+#
+#   store = S3(ACCESS_KEY, SECRET_KEY, "eu-west-1").bucket("my-uploads")
+#
+#   store.put("avatars/1.png", imageBytes, { "contentType": "image/png" })
+#   store.getToFile("avatars/1.png", "local.png")
+#   store.presignGet("avatars/1.png", 3600)     # a link anyone can use for an hour
+#
+# S3's protocol is the one every object store speaks, so this also talks to
+# Cloudflare R2, Backblaze B2, DigitalOcean Spaces, MinIO and anything else
+# S3-compatible -- point it at their endpoint.
+#
+# Files are the gap that stopped an EZ web app being finishable: `orm` holds the
+# row, and this holds the thing the row points at.
+# ============================================================================
+
+use "httpx"
+use "crypto"
+use "s3/sign.ez"
+use "s3/xml.ez"
+
+export DEFAULT_REGION = "us-east-1"
+SERVICE = "s3"
+
+export model S3 {
+
+    init(accessKey, secretKey, region = nil) {
+        when accessKey == nil or accessKey == "" {
+            throw Exception("s3: an access key is required")
+        }
+        when secretKey == nil or secretKey == "" {
+            throw Exception("s3: a secret key is required")
+        }
+        self.credentials = {
+            "accessKey": accessKey,
+            "secretKey": secretKey,
+            "sessionToken": nil
+        }
+        self.region = region
+        when region == nil { self.region = DEFAULT_REGION }
+        self.bucketName = nil
+        self.endpoint = nil
+        self.usePathStyle = false
+        self.explicitStyle = false
+        self.timeoutMs = 120000
+        self.http = Http().withTimeout(120000)
+    }
+
+    # ── configuration ───────────────────────────────────────────────────────
+
+    task bucket(name) {
+        self.bucketName = name
+        give self
+    }
+
+    # For R2, B2, Spaces, MinIO. Give the host, with or without a scheme.
+    #
+    # A custom endpoint switches to path-style addressing unless you say
+    # otherwise: a self-hosted MinIO has no wildcard DNS, so
+    # bucket.localhost:9000 does not resolve.
+    task withEndpoint(endpoint) {
+        host = str(endpoint)
+        when contains(host, "://") { host = split(host, "://")[1] }
+        when endsWith(host, "/") { host = substr(host, 0, len(host) - 1) }
+        self.endpoint = host
+        when self.explicitStyle == false { self.usePathStyle = true }
+        give self
+    }
+
+    task pathStyle() {
+        self.usePathStyle = true
+        self.explicitStyle = true
+        give self
+    }
+
+    task virtualHosted() {
+        self.usePathStyle = false
+        self.explicitStyle = true
+        give self
+    }
+
+    # Temporary credentials from STS or an instance role.
+    task withSessionToken(token) {
+        self.credentials["sessionToken"] = token
+        give self
+    }
+
+    task withTimeout(milliseconds) {
+        self.timeoutMs = milliseconds
+        self.http = Http().withTimeout(milliseconds)
+        give self
+    }
+
+    # ── addressing ──────────────────────────────────────────────────────────
+
+    task requireBucket() {
+        when self.bucketName == nil {
+            throw Exception("s3: no bucket chosen -- call .bucket(\"name\") first")
+        }
+        give self.bucketName
+    }
+
+    task hostFor(bucketName) {
+        base = self.endpoint
+        when base == nil {
+            # us-east-1 is the one region whose endpoint has no region in it.
+            when self.region == "us-east-1" { base = "s3.amazonaws.com" }
+            other { base = `s3.{self.region}.amazonaws.com` }
+        }
+        when self.usePathStyle { give base }
+        give bucketName + "." + base
+    }
+
+    # The path S3 sees, which is also what gets signed. Path-style puts the
+    # bucket in front; virtual-hosted has it in the host already.
+    task pathFor(bucketName, key) {
+        objectPath = "/" + trimSlashes(str(key))
+        when self.usePathStyle { give "/" + bucketName + objectPath }
+        give objectPath
+    }
+
+    task urlFor(key, params = nil) {
+        bucketName = self.requireBucket()
+        base = "https://" + self.hostFor(bucketName) + encodePath(self.pathFor(bucketName, key))
+        query = canonicalQuery(params)
+        when query == "" { give base }
+        give base + "?" + query
+    }
+
+    # ── objects ─────────────────────────────────────────────────────────────
+
+    # `body` is a string; binary is fine, because nothing here converts it.
+    # Options: contentType, acl, storageClass, cacheControl, metadata.
+    task put(key, body, options = nil) {
+        opts = options
+        when opts == nil { opts = {} }
+        payload = str(body)
+
+        headers = {}
+        when opts["contentType"] != nil { headers["content-type"] = opts["contentType"] }
+        other { headers["content-type"] = guessContentType(key) }
+        when opts["acl"] != nil { headers["x-amz-acl"] = opts["acl"] }
+        when opts["storageClass"] != nil { headers["x-amz-storage-class"] = opts["storageClass"] }
+        when opts["cacheControl"] != nil { headers["cache-control"] = opts["cacheControl"] }
+        when opts["metadata"] != nil {
+            get name in keys(opts["metadata"]) {
+                headers["x-amz-meta-" + lower(str(name))] = opts["metadata"][name]
+            }
+        }
+
+        response = self.request("PUT", key, nil, headers, payload)
+        self.raiseOnError(response, "PUT", key)
+        give {
+            "key": key,
+            "etag": stripQuotes(response.header("etag")),
+            "size": len(payload),
+            "url": self.urlFor(key)
+        }
+    }
+
+    task putFile(key, path, options = nil) {
+        give self.put(key, readFile(path), options)
+    }
+
+    # The object's contents, or nil when it is not there. A missing object is
+    # an ordinary answer; anything else throws.
+    task get(key) {
+        response = self.request("GET", key, nil, {}, "")
+        when response.status == 404 { give nil }
+        self.raiseOnError(response, "GET", key)
+        give response.body
+    }
+
+    task getToFile(key, path) {
+        body = self.get(key)
+        when body == nil { give false }
+        writeFile(path, body)
+        give true
+    }
+
+    # Metadata without the body, or nil. A HEAD has no body to explain itself,
+    # so a failure here is reported from the status alone.
+    task head(key) {
+        response = self.request("HEAD", key, nil, {}, "")
+        when response.status == 404 { give nil }
+        when response.status == 403 {
+            throw Exception(`s3: access denied for HEAD {key} -- the key may exist but not be readable`)
+        }
+        when response.ok == false {
+            throw Exception(`s3: HEAD {key} returned {response.status}`)
+        }
+        meta = {}
+        get name in keys(response.headers) {
+            when startsWith(name, "x-amz-meta-") {
+                meta[substr(name, 11, len(name) - 11)] = response.headers[name]
+            }
+        }
+        give {
+            "key": key,
+            "size": num(orElse(response.header("content-length"), "0")),
+            "contentType": response.header("content-type"),
+            "etag": stripQuotes(response.header("etag")),
+            "lastModified": response.header("last-modified"),
+            "metadata": meta
+        }
+    }
+
+    task exists(key) { give self.head(key) != nil }
+
+    # S3 answers 204 whether or not the key was there, so this cannot report
+    # whether anything was actually removed -- and saying otherwise would be a
+    # lie. It returns true when the delete was accepted.
+    task delete(key) {
+        response = self.request("DELETE", key, nil, {}, "")
+        when response.status == 404 { give true }
+        self.raiseOnError(response, "DELETE", key)
+        give true
+    }
+
+    task copy(sourceKey, targetKey, options = nil) {
+        bucketName = self.requireBucket()
+        headers = { "x-amz-copy-source": "/" + bucketName + "/" + trimSlashes(str(sourceKey)) }
+        when options != nil and options["contentType"] != nil {
+            headers["content-type"] = options["contentType"]
+            headers["x-amz-metadata-directive"] = "REPLACE"
+        }
+        response = self.request("PUT", targetKey, nil, headers, "")
+        self.raiseOnError(response, "COPY", targetKey)
+        # A copy can fail with a 200 and an error in the body, which is the
+        # one place in the API where the status alone is not enough.
+        when isErrorDocument(response.body) {
+            throw Exception(`s3: copying {sourceKey} failed: {errorText(response.body)}`)
+        }
+        give { "key": targetKey, "etag": stripQuotes(firstTag(response.body, "ETag")) }
+    }
+
+    task move(sourceKey, targetKey) {
+        result = self.copy(sourceKey, targetKey)
+        self.delete(sourceKey)
+        give result
+    }
+
+    # ── listing ─────────────────────────────────────────────────────────────
+
+    # One page. Returns { objects, prefixes, truncated, nextToken }.
+    # `options`: maxKeys, token, delimiter.
+    task list(prefix = nil, options = nil) {
+        opts = options
+        when opts == nil { opts = {} }
+        params = { "list-type": "2" }
+        when prefix != nil and prefix != "" { params["prefix"] = prefix }
+        when opts["maxKeys"] != nil { params["max-keys"] = str(opts["maxKeys"]) }
+        when opts["token"] != nil { params["continuation-token"] = opts["token"] }
+        when opts["delimiter"] != nil { params["delimiter"] = opts["delimiter"] }
+
+        response = self.request("GET", "", params, {}, "")
+        self.raiseOnError(response, "LIST", str(prefix))
+
+        objects = []
+        get entry in blocks(response.body, "Contents") {
+            push(objects, {
+                "key": firstTag(entry, "Key"),
+                "size": num(orElse(firstTag(entry, "Size"), "0")),
+                "etag": stripQuotes(firstTag(entry, "ETag")),
+                "lastModified": firstTag(entry, "LastModified"),
+                "storageClass": firstTag(entry, "StorageClass")
+            })
+        }
+        folders = []
+        get entry in blocks(response.body, "CommonPrefixes") {
+            push(folders, firstTag(entry, "Prefix"))
+        }
+        give {
+            "objects": objects,
+            "prefixes": folders,
+            "truncated": firstTag(response.body, "IsTruncated") == "true",
+            "nextToken": firstTag(response.body, "NextContinuationToken")
+        }
+    }
+
+    # Every object under a prefix, following the pagination. A bucket with a
+    # million objects will happily return a million, so use `list` when that
+    # is a possibility.
+    task listAll(prefix = nil) {
+        collected = []
+        token = nil
+        pages = 0
+        while true {
+            page = self.list(prefix, { "token": token })
+            get item in page["objects"] { push(collected, item) }
+            pages = pages + 1
+            when page["truncated"] == false { give collected }
+            token = page["nextToken"]
+            # Without a token the next request would return the first page
+            # again, forever.
+            when token == nil { give collected }
+        }
+        give collected
+    }
+
+    task keys(prefix = nil) {
+        names = []
+        get item in self.listAll(prefix) { push(names, item["key"]) }
+        give names
+    }
+
+    # Folder-like listing: the immediate children of a prefix.
+    task folder(prefix) {
+        body = str(prefix)
+        when body != "" and endsWith(body, "/") == false { body = body + "/" }
+        give self.list(body, { "delimiter": "/" })
+    }
+
+    # ── presigned URLs ──────────────────────────────────────────────────────
+
+    # A link that works without credentials until it expires. This is how a
+    # browser uploads or downloads directly, without the file passing through
+    # your server at all.
+    task presignGet(key, expiresSeconds = 3600) { give self.presignFor("GET", key, expiresSeconds) }
+    task presignPut(key, expiresSeconds = 3600) { give self.presignFor("PUT", key, expiresSeconds) }
+
+    task presignFor(method, key, expiresSeconds) {
+        bucketName = self.requireBucket()
+        host = self.hostFor(bucketName)
+        path = self.pathFor(bucketName, key)
+        query = presign(self.credentials, self.region, SERVICE, method, host, path,
+                        nil, expiresSeconds, nowTimestamp())
+        give "https://" + host + encodePath(path) + "?" + query
+    }
+
+    # ── the signed request ──────────────────────────────────────────────────
+
+    task request(method, key, params, extraHeaders, payload) {
+        bucketName = self.requireBucket()
+        host = self.hostFor(bucketName)
+        path = self.pathFor(bucketName, key)
+        timestamp = nowTimestamp()
+
+        body = str(payload)
+        # S3 requires the payload hash in a header, and it is signed, so it
+        # cannot be added or changed afterwards.
+        payloadHash = EMPTY_SHA256
+        when len(body) > 0 { payloadHash = sha256Hex(body) }
+
+        headers = {
+            "host": host,
+            "x-amz-content-sha256": payloadHash,
+            "x-amz-date": timestamp
+        }
+        when self.credentials["sessionToken"] != nil {
+            headers["x-amz-security-token"] = self.credentials["sessionToken"]
+        }
+        when extraHeaders != nil {
+            get name in keys(extraHeaders) {
+                when extraHeaders[name] != nil { headers[lower(str(name))] = extraHeaders[name] }
+            }
+        }
+
+        headers["Authorization"] = authorize(self.credentials, self.region, SERVICE, method,
+                                             path, params, headers, payloadHash, timestamp)
+
+        url = "https://" + host + encodePath(path)
+        query = canonicalQuery(params)
+        when query != "" { url = url + "?" + query }
+
+        options = { "headers": headers }
+        when len(body) > 0 { options["body"] = body }
+        # A transport failure otherwise arrives as a bare httpx message with no
+        # indication of which operation or which host was involved.
+        try { give self.http.send(method, url, options) }
+        catch (e) {
+            throw Exception(`s3: {method} {key} could not reach {host} -- {e.message}`)
+        }
+    }
+
+    # S3 explains itself in XML, and the explanation is far more useful than
+    # the status: "SignatureDoesNotMatch" and "NoSuchBucket" are both 403-ish
+    # and mean entirely different things.
+    task raiseOnError(response, what, key) {
+        when response.ok { give response }
+        detail = errorText(response.body)
+        hint = signatureHint(response.body)
+        throw Exception(`s3: {what} {key} failed with {response.status}: {detail}{hint}`)
+    }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+task errorText(body) {
+    code = firstTag(body, "Code")
+    message = firstTag(body, "Message")
+    when code == nil and message == nil {
+        when body == nil or trim(str(body)) == "" { give "(no explanation from the server)" }
+        give trim(substr(str(body), 0, 200))
+    }
+    when message == nil { give code }
+    when code == nil { give message }
+    give `{code} -- {message}`
+}
+
+# The two failures that account for most first-run problems, and neither
+# message says what to actually check.
+task signatureHint(body) {
+    code = firstTag(body, "Code")
+    when code == "SignatureDoesNotMatch" {
+        give " (check the secret key, the region, and that the machine clock is within 15 minutes of real time)"
+    }
+    when code == "AccessDenied" {
+        give " (the credentials are valid but not permitted to do this)"
+    }
+    when code == "PermanentRedirect" or code == "AuthorizationHeaderMalformed" {
+        give " (the bucket is in a different region than the one configured)"
+    }
+    give ""
+}
+
+task trimSlashes(key) {
+    body = key
+    while startsWith(body, "/") { body = substr(body, 1, len(body) - 1) }
+    give body
+}
+
+task stripQuotes(value) {
+    when value == nil { give nil }
+    body = str(value)
+    when startsWith(body, "\"") and endsWith(body, "\"") {
+        give substr(body, 1, len(body) - 2)
+    }
+    give body
+}
+
+task orElse(value, fallback) {
+    when value == nil { give fallback }
+    give value
+}
+
+CONTENT_TYPES = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "webp": "image/webp", "svg": "image/svg+xml", "ico": "image/x-icon",
+    "pdf": "application/pdf", "zip": "application/zip", "gz": "application/gzip",
+    "tgz": "application/gzip", "tar": "application/x-tar",
+    "json": "application/json", "xml": "application/xml", "csv": "text/csv",
+    "txt": "text/plain", "html": "text/html", "css": "text/css", "js": "text/javascript",
+    "mp4": "video/mp4", "mp3": "audio/mpeg", "wav": "audio/wav",
+    "woff": "font/woff", "woff2": "font/woff2", "ez": "text/plain"
+}
+
+# A wrong content type is what makes a browser download an image instead of
+# showing it, and it cannot be changed later without rewriting the object.
+export task guessContentType(key) {
+    body = lower(str(key))
+    when contains(body, ".") == false { give "application/octet-stream" }
+    pieces = split(body, ".")
+    extension = pieces[len(pieces) - 1]
+    when has_key(CONTENT_TYPES, extension) { give CONTENT_TYPES[extension] }
+    give "application/octet-stream"
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+# Credentials from the environment, the way every AWS tool reads them.
+export task fromEnv(region = nil) {
+    accessKey = env("AWS_ACCESS_KEY_ID")
+    secretKey = env("AWS_SECRET_ACCESS_KEY")
+    when accessKey == nil or secretKey == nil {
+        throw Exception("s3: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are not set")
+    }
+    chosen = region
+    when chosen == nil { chosen = env("AWS_REGION") }
+    when chosen == nil { chosen = env("AWS_DEFAULT_REGION") }
+    client = S3(accessKey, secretKey, chosen)
+    token = env("AWS_SESSION_TOKEN")
+    when token != nil { client.withSessionToken(token) }
+    give client
+}
+
+# EZ has no environment-variable builtin, and pulling in the `os` package for
+# one call would be a dependency for nothing.
+task env(name) {
+    try {
+        lib = os_load_lib("kernel32.dll")
+        when lib == nil or lib == 0 { give nil }
+        fn = os_get_func(lib, "GetEnvironmentVariableA")
+        when fn == nil or fn == 0 { give nil }
+        nameBuf = os_alloc(len(name) + 1)
+        os_write_string(nameBuf, 0, name)
+        size = 4096
+        buf = os_alloc(size)
+        written = os_call(fn, "u32", nameBuf, buf, size)
+        value = nil
+        # 0 means unset; anything >= size means the value was truncated, which
+        # is worse than not reading it at all.
+        when written > 0 and written < size {
+            value = buf_to_str(os_buffer_from_ptr(buf, written))
+        }
+        os_free(nameBuf)
+        os_free(buf)
+        when value == "" { give nil }
+        give value
+    }
+    catch (e) { give nil }
+}
+
+# Cloudflare R2: one account, virtual-hosted buckets on their endpoint.
+export task r2(accountId, accessKey, secretKey) {
+    give S3(accessKey, secretKey, "auto").withEndpoint(`{accountId}.r2.cloudflarestorage.com`)
+}
+
+# MinIO and anything else self-hosted: path-style, because there is no
+# wildcard DNS in front of it.
+export task minio(endpoint, accessKey, secretKey, region = nil) {
+    give S3(accessKey, secretKey, region).withEndpoint(endpoint).pathStyle()
+}
+
+export task spaces(regionName, accessKey, secretKey) {
+    give S3(accessKey, secretKey, regionName).withEndpoint(`{regionName}.digitaloceanspaces.com`)
+}

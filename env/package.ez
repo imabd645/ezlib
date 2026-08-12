@@ -1,0 +1,8 @@
+{
+    "name": "env",
+    "version": "1.0.0",
+    "description": "Load .env files into your EZ scripts. Parsing, validation, required-key checks, type coercion.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {}
+}

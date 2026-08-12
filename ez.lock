@@ -1,0 +1,350 @@
+{
+  "registry": "https://packages.ez-lang.site",
+  "packages": {
+    "ai": {
+      "version": "1.0.0",
+      "sha256": "0170702cfbbdd9acf1aba101c171c5265ca259bc1b0d3b3b3bdfda4b8cba51c1",
+      "direct": true
+    },
+    "args": {
+      "version": "1.0.0",
+      "sha256": "cb88d60c5bfb80465fad2af6b78b4911cc935afdf465e35569956bc9844d2186",
+      "direct": true
+    },
+    "audio": {
+      "version": "1.0.0",
+      "sha256": "fca24ee88eb8196713ab9c45648432cb37a20105153a9995d8442e0e7181bd60",
+      "direct": true
+    },
+    "auth": {
+      "version": "1.0.0",
+      "sha256": "6b1722987c3d1435ff6c4f0c20a68216e2209eac054764995f3a5a75ae5a2366",
+      "direct": true
+    },
+    "auto": {
+      "version": "1.0.0",
+      "sha256": "1b612be655dd767af578dc660a3a761b2c2b01624ee763170dc3f8d5af2a341a",
+      "direct": true
+    },
+    "cache": {
+      "version": "1.0.0",
+      "sha256": "9ca33f863243a6f4dd8101326c3025a692baf5f4018b2b2f6efe314e68c14e04",
+      "direct": true
+    },
+    "calendar": {
+      "version": "1.0.0",
+      "sha256": "c17f8d2fed14ab574810bc143c8fd51dcd16683597f0f8ac18f4d4c9e5a59b2a",
+      "direct": true
+    },
+    "clipboard": {
+      "version": "1.0.0",
+      "sha256": "f9b647fe1ba4d7acd5e2f6c51254a0ced367602c18b3f9016185add937284570",
+      "direct": true
+    },
+    "collections": {
+      "version": "1.0.0",
+      "sha256": "dfd04f4d3da1344b944b10c664c4bd875574a4e3eb156ab915174a25b479abb2",
+      "direct": true
+    },
+    "color": {
+      "version": "1.0.0",
+      "sha256": "29c61b29db9ed050d61dfbffdf2090c8b13950e565d7c7f75e95a3862c2a6be4",
+      "direct": true
+    },
+    "cron": {
+      "version": "1.0.0",
+      "sha256": "1e12f1c3903b92a93bc84fca8415570f7b17023318dd71a5c968db4e62cda546",
+      "direct": true
+    },
+    "crypto": {
+      "version": "1.0.1",
+      "sha256": "7d4fb2236f7f7e7cfd98afea1f2cc1e610b12c78fc653be6583b4ef7e8ca3f3c",
+      "direct": true
+    },
+    "csv": {
+      "version": "1.0.0",
+      "sha256": "c5980cb9c686ba20ccacbc9239403a042402c3851bc365efa81124271df2c9dd",
+      "direct": true
+    },
+    "datetime": {
+      "version": "1.1.0",
+      "sha256": "65097a046aad3a1c20d54fe915f6749dcb6b10e4b2aa2503ccdc720835dbffbe",
+      "direct": true
+    },
+    "db": {
+      "version": "1.0.0",
+      "sha256": "07263a0ff7b49b0f6466996ba2a5b23a2c5a02daca6e7086eb764acca2789ada",
+      "direct": true
+    },
+    "decimal": {
+      "version": "1.0.0",
+      "sha256": "24bbe35e6590c3e3b51b08a0af27038e7acded53fc9e1460ad6cd49d665d81c4",
+      "direct": true
+    },
+    "diff": {
+      "version": "1.0.0",
+      "sha256": "b435c05e7d41ad008d0b2cd3e953461e133de305768de4db19f74e4e310155f6",
+      "direct": true
+    },
+    "email": {
+      "version": "1.0.0",
+      "sha256": "a39366d618657a3f572259e28badd973ceb2140c2024fd1a1c37d31a79bdff36",
+      "direct": true
+    },
+    "env": {
+      "version": "1.0.0",
+      "sha256": "338e30a9afff127e442d85a03be779fbacee116020d3b5e525ed0dcf284b1d73",
+      "direct": true
+    },
+    "ffi": {
+      "version": "1.0.0",
+      "sha256": "cef6303c371b89f91f8857abf8d26e4d57a93afb7f1326865a04827dbfbb21b6",
+      "direct": true
+    },
+    "fs": {
+      "version": "1.0.0",
+      "sha256": "6425acd770ab3e94cd6cdb41aa2d4a89251b3ecd4b3927f1a453afc178312ec2",
+      "direct": true
+    },
+    "game": {
+      "version": "1.0.0",
+      "sha256": "d7fe4e8edc50e197eefbf4502ff5fde960715085704619b7d7d7fce063b2a66c",
+      "direct": true
+    },
+    "gui": {
+      "version": "1.0.0",
+      "sha256": "3a878de997297c424da8a87b06971ca123428eac905f1cd1c0d04101b90c1749",
+      "direct": true
+    },
+    "http": {
+      "version": "1.0.0",
+      "sha256": "444618400e040734c27b9e487132a12460041d39b4ced50b7a59182975416849",
+      "direct": true
+    },
+    "httpx": {
+      "version": "1.0.0",
+      "sha256": "b13e95b734e7a69fe68ed6bbd2a6982eea5b6d9515d5b7bd8e14882d8c54f243",
+      "direct": true
+    },
+    "i18n": {
+      "version": "1.0.0",
+      "sha256": "49c9df3720ffc9a8bb702d7aa80174d48f05766cfd1c326a75dbda5dd4611c40",
+      "direct": true
+    },
+    "ini": {
+      "version": "1.0.0",
+      "sha256": "65c0b6eae9ba37092eb3f487e27b63a1d0f50eff87bda16142532197339c9742",
+      "direct": true
+    },
+    "json": {
+      "version": "1.0.0",
+      "sha256": "98a9f311ee946ea52af5caf5a152ccc0232499bc9133d7200fbb663a33aa8831",
+      "direct": true
+    },
+    "jwt": {
+      "version": "1.0.0",
+      "sha256": "dfde366e9f67b876ae552e738283e57e1e33ea6b0fee6f2b6f056705c330f95f",
+      "direct": true
+    },
+    "log": {
+      "version": "1.0.0",
+      "sha256": "216068ddeee4df056273c33cd8e3850b48dc76fe3f1fb5883008e3306b7d3768",
+      "direct": true
+    },
+    "mailer": {
+      "version": "1.0.0",
+      "sha256": "58034c9003bb8272e18563bb533cf9f73cbb0af769b6b9662b4c67e2fc674206",
+      "direct": true
+    },
+    "markdown": {
+      "version": "1.0.0",
+      "sha256": "6155ed45ee869f0c64b7278b9cec5a31c1fbc4167b3c91d83499fb8e4cf1bf44",
+      "direct": true
+    },
+    "math": {
+      "version": "1.0.0",
+      "sha256": "f3fa128ff8898efc842d4a973659923d3b5a42eb47e2921a54c1a6094554cf93",
+      "direct": true
+    },
+    "migrate": {
+      "version": "1.0.0",
+      "sha256": "467c827c41d7ad2066c498abc9b44bc9dcc260167fcd26da00365c45a48100fd",
+      "direct": true
+    },
+    "notify": {
+      "version": "1.0.0",
+      "sha256": "e5bbf628a8d1763dc86ee650aae203a6ad4057cf5756a4e88b7ba83dc4ca9be9",
+      "direct": true
+    },
+    "oauth": {
+      "version": "1.0.0",
+      "sha256": "47b44119b1be128c24d9db8cbab2fc5acc86197fd21ee8e85bbdb4938426ee50",
+      "direct": true
+    },
+    "orm": {
+      "version": "1.1.0",
+      "sha256": "bb283cfb3e1840c8f1999f0fa331374cb467a2733a6f6c78e36955a22450cd27",
+      "direct": true
+    },
+    "os": {
+      "version": "1.0.0",
+      "sha256": "7be80f7fcfc79c80132f6dfff3a03fe91869bcf73b602104bd260cf3210c2c04",
+      "direct": true
+    },
+    "password": {
+      "version": "1.0.0",
+      "sha256": "3eb502465aec3b27d44b303c6122dd43fc7da68595a27e191e9b2fc588092762",
+      "direct": true
+    },
+    "pdf": {
+      "version": "1.0.0",
+      "sha256": "af11baf676eac4410d84a1556a872b19e9e50e548560fedc20bdb0c1f95ca3a7",
+      "direct": true
+    },
+    "postgres": {
+      "version": "1.0.0",
+      "sha256": "b446783c48d95cf7e791dd2c3ced9e3d17963ab2798ca2625438b1adc52f8a02",
+      "direct": true
+    },
+    "progress": {
+      "version": "1.0.0",
+      "sha256": "15dd30b3c757f8797891c14ed2df26e2dfbb13955dd2d1a7b5649c3c73dacbcd",
+      "direct": true
+    },
+    "qr": {
+      "version": "1.0.0",
+      "sha256": "7f0bab7ebc6d6ac8427c74457c6c8548f858662169f8b15317fe66725bfa0804",
+      "direct": true
+    },
+    "queue": {
+      "version": "1.0.0",
+      "sha256": "a78852f20b0dba7c43ccbde4051a2994de31a0c4d86f106182d16b727617f428",
+      "direct": true
+    },
+    "ratelimit": {
+      "version": "1.0.0",
+      "sha256": "16f472b8d4d13f843ceb521bfad8a144cd5343ff7be6df4b31cdaebb8296a1cb",
+      "direct": true
+    },
+    "redis": {
+      "version": "1.0.0",
+      "sha256": "1b38af31e4481daaf03467feb2062cfe4c18e3abf11e24695d47b1242b5b64fe",
+      "direct": true
+    },
+    "regex": {
+      "version": "1.0.0",
+      "sha256": "e9fca6b92c686e0a99364c969a0a0faa3c008d48c3f279fa80a692b980f59a86",
+      "direct": true
+    },
+    "retry": {
+      "version": "1.0.0",
+      "sha256": "c2acf895e145e2a1e5557f0a4b35d9735ea3cb40b82040633dc7b9e00bbb0638",
+      "direct": true
+    },
+    "s3": {
+      "version": "1.0.0",
+      "sha256": "e05ea9d96044d42f211cd256286c950ff6b094b2d9059033f26c28ba1af1aaa9",
+      "direct": true
+    },
+    "semver": {
+      "version": "1.0.0",
+      "sha256": "f527a539268cf450692a095d21666ea39d8cedeedbff553929dbcccd03b96c71",
+      "direct": true
+    },
+    "serve": {
+      "version": "1.0.0",
+      "sha256": "183a5a033c3adcb87c66877d8e762d9b1e924426161ce99420a0b030c287e4b6",
+      "direct": true
+    },
+    "socket": {
+      "version": "1.0.0",
+      "sha256": "472dc761a15148f7332d06dfe9d080a654e30fd9b2c4b7476537b6606f02573c",
+      "direct": true
+    },
+    "sqlite": {
+      "version": "1.0.0",
+      "sha256": "5ed9e8f20558ee89bd83fabee6d03e666f99586cca587a93d0bcb37543f5dadc",
+      "direct": true
+    },
+    "table": {
+      "version": "1.0.0",
+      "sha256": "38aabaf4362f04fd901aa6129e0146337e328d4f354e78a83fa2dcda0cf002ca",
+      "direct": true
+    },
+    "taskschd": {
+      "version": "1.0.0",
+      "sha256": "5fb40a13c720f839cf49ea63d20cb54de95a28caf582b5bf0ac6d229f4792496",
+      "direct": true
+    },
+    "template": {
+      "version": "1.0.0",
+      "sha256": "1008ffc7187b5fb91915e2f7a9cf99ca6b756ee408038a394c8c21b717b4cb49",
+      "direct": true
+    },
+    "testing": {
+      "version": "1.0.0",
+      "sha256": "e8ab5a74746c495e6944b210a2597643191eabc06549f270e5cbfde5f6cbdae4",
+      "direct": true
+    },
+    "text": {
+      "version": "1.0.0",
+      "sha256": "f197cf677634aaf809676a21b2e5ee27820437cc2ddfe62ad891de1e69ecabb1",
+      "direct": true
+    },
+    "thread": {
+      "version": "1.0.0",
+      "sha256": "e372bb45e4cb2d498e530940fc7afbf132909ab6c5916b5cc7d4b979607219c9",
+      "direct": true
+    },
+    "toml": {
+      "version": "1.0.0",
+      "sha256": "ed80734138480e5902e79e5a131b078bb0fc2789816bff5b7cb8554e9b8d248a",
+      "direct": true
+    },
+    "totp": {
+      "version": "1.0.0",
+      "sha256": "9141dc3a34a805a040e1fd3dd39b8a4394bacc3ce3a86c0a33255ce4cee7e079",
+      "direct": true
+    },
+    "ulid": {
+      "version": "1.0.0",
+      "sha256": "fb60958a2b8e9ecb691f5d56e5c25369b3b22abc4487164c7b6444989c980a85",
+      "direct": true
+    },
+    "validate": {
+      "version": "1.0.0",
+      "sha256": "7e52db543f7bdd7a953416d7a508b1428634cf2104abe373aa28102963198e71",
+      "direct": true
+    },
+    "web": {
+      "version": "1.0.0",
+      "sha256": "8a04187f5dd7d455e250e04fb5446b6a414b9015796a0274561e272e8e7cfe92",
+      "direct": true
+    },
+    "webcam": {
+      "version": "1.0.0",
+      "sha256": "ef5573d1e452e03042d3a1db5518aaa5b58a6fabd6fdf160fa47b68376641f2a",
+      "direct": true
+    },
+    "websocket": {
+      "version": "1.0.0",
+      "sha256": "5477c09a60987d125b75485d70a2a28071722e18884dda05f2d7f22a3f177923",
+      "direct": true
+    },
+    "whatsapp": {
+      "version": "1.0.0",
+      "sha256": "45eb2491d7cd0e7b4428b578848ee3c922abe9efe7288936185d8448ef953549",
+      "direct": true
+    },
+    "xml": {
+      "version": "1.0.0",
+      "sha256": "bee3e4369b8169ccd4ae42364843800bdfc5eef659a0edbffa5217fcee660d68",
+      "direct": true
+    },
+    "yaml": {
+      "version": "1.0.0",
+      "sha256": "c3f6b769982708d0c0d2bb947b8457607103bdab6672887c40fbd2d469c29168",
+      "direct": true
+    }
+  }
+}

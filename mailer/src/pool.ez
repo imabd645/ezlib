@@ -1,0 +1,110 @@
+// ============================================================================
+// mailer / pool.ez -- SMTP Connection Pool
+//
+// Maintains a pool of pre-configured SmtpClient instances so that repeated
+// sends in a tight loop (e.g. sending 1000 newsletter emails) do not pay
+// the cost of re-initialising curl for every message.
+//
+// The pool does NOT pre-open TCP sockets (libcurl handles that internally
+// with CURLOPT_MAXCONNECTS). What it does is:
+//   1. Keep N SmtpClient objects allocated and ready.
+//   2. Mark each slot as "in use" while a send is in flight.
+//   3. Return the slot to the pool when the send finishes (or throws).
+//
+// Usage:
+//   pool = ConnectionPool("smtp.gmail.com", 587, "me@gmail.com", "pass", 5)
+//   pool.send(msg)     // checks out a client, sends, checks back in
+//   pool.sendAll(msgs) // sends a list of messages, reusing connections
+//
+// Thread safety: EZ's spawn() model gives each thread its own VM, so pool
+// instances should NOT be shared across threads. Create one pool per thread.
+// ============================================================================
+use "email"
+use "errors.ez"
+
+export model ConnectionPool {
+    // server, port, username, password — same as SmtpClient
+    // maxSize — maximum number of concurrent connections (default: 5)
+    init(server, port, username, password, maxSize = 5) {
+        self.server   = server
+        self.port     = port
+        self.username = username
+        self.password = password
+        self.maxSize  = maxSize
+
+        // Pre-allocate the client pool
+        self._clients = []
+        self._inUse   = []
+        repeat i = 0 to maxSize - 1 {
+            push(self._clients, connect(server, port, username, password))
+            push(self._inUse,   false)
+        }
+    }
+
+    // Checks out the first available client. Returns its index.
+    // Throws PoolExhaustedError if no client is free.
+    task _checkout() {
+        repeat i = 0 to self.maxSize - 1 {
+            when not self._inUse[i] {
+                self._inUse[i] = true
+                give i
+            }
+        }
+        throw PoolExhaustedError(self.maxSize)
+    }
+
+    // Returns a client to the pool by index.
+    task _checkin(idx) {
+        self._inUse[idx] = false
+    }
+
+    // Sends a single Message, borrowing a client from the pool.
+    task send(msg) {
+        idx = self._checkout()
+        client = self._clients[idx]
+        err = nil
+        ok = false
+        try {
+            ok = client.send(msg)
+        } catch (e) {
+            err = e
+        }
+        self._checkin(idx)
+        when typeOf(err) != "nil" { throw err }
+        give ok
+    }
+
+    // Sends an array of Message objects, reusing pool connections.
+    // Returns the number of messages sent successfully.
+    // Failed sends are collected and re-thrown as an array after all messages
+    // are attempted, so a single failure does not stop the batch.
+    task sendAll(msgs) {
+        sent   = 0
+        errors = []
+        get msg in msgs {
+            try {
+                self.send(msg)
+                sent = sent + 1
+            } catch (e) {
+                push(errors, e)
+            }
+        }
+        when len(errors) > 0 {
+            throw MailerError(str(len(errors)) + " message(s) failed in sendAll.")
+        }
+        give sent
+    }
+
+    // Returns current pool status as a dictionary.
+    task status() {
+        inUseCount = 0
+        repeat i = 0 to self.maxSize - 1 {
+            when self._inUse[i] { inUseCount = inUseCount + 1 }
+        }
+        give {
+            "total":     self.maxSize,
+            "in_use":    inUseCount,
+            "available": self.maxSize - inUseCount
+        }
+    }
+}

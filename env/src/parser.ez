@@ -1,0 +1,228 @@
+// ============================================================================
+// ezenv / parser.ez -- the .env file parser.
+//
+// This is the only file that reads the raw file contents and turns them into a
+// flat dictionary of string keys and string values. Every other file in the
+// package works with that dictionary.
+//
+// Supported syntax (a superset of what dotenv implementations in every language
+// agree on):
+//
+//   KEY=value
+//   KEY = value                   spaces around = are stripped
+//   KEY="value with spaces"       double-quoted: \n \t \\ \" are unescaped
+//   KEY='literal value'           single-quoted: taken verbatim, no escaping
+//   KEY=`backtick value`          backtick-quoted: taken verbatim
+//   export KEY=value              optional `export` prefix (for bash compat)
+//   # comment                     lines starting with # (after optional space)
+//   KEY=value # inline comment    inline comments after unquoted values
+//                                 (not after quoted values -- # inside quotes
+//                                 is a literal character)
+//
+// Lines that are blank or contain only whitespace are skipped.
+// A key with no = sign is skipped (not an error), matching docker-compose.
+// Duplicate keys: last value wins, matching every major dotenv implementation.
+// ============================================================================
+
+use "errors.ez"
+
+// ── Internal helpers ────────────────────────────────────────────────────────
+
+// Strip leading and trailing whitespace from a string.
+task _trim(s) {
+    start = 0
+    l = len(s)
+    found = false
+    while start < l and not found {
+        c = substring(s, start, 1)
+        when c != " " and c != "\t" and c != "\r" and c != "\n" {
+            found = true
+        } other {
+            start = start + 1
+        }
+    }
+
+    end = l - 1
+    found = false
+    while end >= start and not found {
+        c = substring(s, end, 1)
+        when c != " " and c != "\t" and c != "\r" and c != "\n" {
+            found = true
+        } other {
+            end = end - 1
+        }
+    }
+
+    when start > end { give "" }
+    give substring(s, start, end - start + 1)
+}
+
+// Check if a string starts with a prefix.
+task _startsWith(s, prefix) {
+    when len(s) < len(prefix) { give false }
+    give substring(s, 0, len(prefix)) == prefix
+}
+
+// Find the first occurrence of `needle` in `haystack` starting from `from`.
+// Returns -1 if not found.
+task _indexOf(haystack, needle, from = 0) {
+    hl = len(haystack)
+    nl = len(needle)
+    when nl == 0 { give from }
+    when hl == 0 { give -1 }
+    limit = hl - nl
+    foundPos = -1
+    i = from
+    while i <= limit and foundPos == -1 {
+        when substring(haystack, i, nl) == needle { 
+            foundPos = i 
+        } other {
+            i = i + 1
+        }
+    }
+    give foundPos
+}
+
+// Process escape sequences inside a double-quoted value.
+task _unescape(s) {
+    result = ""
+    i = 0
+    l = len(s)
+    while i < l {
+        c = substring(s, i, 1)
+        when c == "\\" and i + 1 < l {
+            next = substring(s, i + 1, 1)
+            when next == "n" { result = result + "\n"  i = i + 2 } other
+            when next == "t" { result = result + "\t"  i = i + 2 } other
+            when next == "r" { result = result + "\r"  i = i + 2 } other
+            when next == "\\" { result = result + "\\"  i = i + 2 } other
+            when next == "\"" { result = result + "\""  i = i + 2 } other
+            when next == "'" { result = result + "'"  i = i + 2 } other {
+                // Unknown escape: keep literal backslash + char
+                result = result + c + next
+                i = i + 2
+            }
+        } other {
+            result = result + c
+            i = i + 1
+        }
+    }
+    give result
+}
+
+// ── Public parser ───────────────────────────────────────────────────────────
+
+// Parse raw .env file content (a string) into a flat { key: value } dictionary.
+// `filename` is carried into error messages for diagnostics only.
+export task parse(content, filename = ".env") {
+    result = {}
+    lines = split(content, "\n")
+    lineNum = 0
+
+    get rawLine in lines {
+        lineNum = lineNum + 1
+        line = _trim(rawLine)
+
+        // Skip empty lines and comments.
+        when len(line) == 0 { skip }
+        when _startsWith(line, "#") { skip }
+
+        // Strip optional `export ` prefix (bash compatibility).
+        when _startsWith(line, "export ") {
+            line = _trim(substring(line, 7, len(line) - 7))
+        } other when _startsWith(line, "export\t") {
+            line = _trim(substring(line, 7, len(line) - 7))
+        }
+
+        // Find the = sign. Lines without one are silently skipped (docker-compose compat).
+        eqPos = _indexOf(line, "=")
+        when eqPos < 0 { skip }
+        when eqPos == 0 {
+            raise_parse_error("key cannot be empty", lineNum, filename)
+        }
+
+        key = _trim(substring(line, 0, eqPos))
+        rawVal = ""
+        when eqPos + 1 < len(line) {
+            rawVal = _trim(substring(line, eqPos + 1, len(line) - eqPos - 1))
+        }
+
+        // Validate key: only letters, digits, underscore, dot. First char must
+        // not be a digit.
+        repeat ki = 0 to len(key) - 1 {
+            kc = substring(key, ki, 1)
+            isValid = (kc >= "A" and kc <= "Z") or (kc >= "a" and kc <= "z") or kc == "_" or kc == "."
+            when ki > 0 { isValid = isValid or (kc >= "0" and kc <= "9") }
+            when not isValid {
+                raise_parse_error("invalid character '" + kc + "' in key '" + key + "'", lineNum, filename)
+            }
+        }
+
+        // Parse the value based on quoting.
+        value = ""
+        when len(rawVal) == 0 {
+            value = ""
+        } other when _startsWith(rawVal, "\"") {
+            // Double-quoted: find the closing quote, unescape.
+            closePos = -1
+            i = 1
+            while i < len(rawVal) and closePos == -1 {
+                c = substring(rawVal, i, 1)
+                when c == "\\" { 
+                    i = i + 2  
+                } other when c == "\"" { 
+                    closePos = i  
+                } other {
+                    i = i + 1
+                }
+            }
+            when closePos < 0 {
+                raise_parse_error("unterminated double-quoted value for '" + key + "'", lineNum, filename)
+            }
+            value = _unescape(substring(rawVal, 1, closePos - 1))
+        } other when _startsWith(rawVal, "'") {
+            // Single-quoted: literal, no escaping.
+            closePos = _indexOf(rawVal, "'", 1)
+            when closePos < 0 {
+                raise_parse_error("unterminated single-quoted value for '" + key + "'", lineNum, filename)
+            }
+            value = substring(rawVal, 1, closePos - 1)
+        } other when _startsWith(rawVal, "`") {
+            // Backtick-quoted: literal, no escaping.
+            closePos = _indexOf(rawVal, "`", 1)
+            when closePos < 0 {
+                raise_parse_error("unterminated backtick-quoted value for '" + key + "'", lineNum, filename)
+            }
+            value = substring(rawVal, 1, closePos - 1)
+        } other {
+            // Unquoted: strip inline comments (` # ...` but not `#...`).
+            commentPos = _indexOf(rawVal, " #")
+            when commentPos >= 0 {
+                value = _trim(substring(rawVal, 0, commentPos))
+            } other {
+                tabComment = _indexOf(rawVal, "\t#")
+                when tabComment >= 0 {
+                    value = _trim(substring(rawVal, 0, tabComment))
+                } other {
+                    value = rawVal
+                }
+            }
+        }
+
+        // Last value wins for duplicate keys.
+        result[key] = value
+    }
+
+    give result
+}
+
+// Parse a .env file from disk. Returns a flat { key: value } dictionary.
+export task parse_file(path) {
+    content = ""
+    try {
+        content = readFile(path)
+    } catch e {
+        raise_parse_error("cannot read file: " + str(e), nil, path)
+    }
+    give parse(content, path)
+}

@@ -1,0 +1,11 @@
+{
+  "name": "progress",
+  "version": "1.0.0",
+  "description": "Progress bars and spinners for EZ. In-place terminal animation, percentages, ETA, rates and byte formatting.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["progress", "progressbar", "spinner", "cli", "terminal", "eta"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "color": "^1.0.0" }
+}

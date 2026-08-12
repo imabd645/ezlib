@@ -1,0 +1,498 @@
+# ============================================================================
+# JSON Standard Library for EZ
+#
+# Parsing and serialisation are native (parse_json / to_json). Everything on top
+# of them -- safe parsing, dotted-path access, deep merge/clone/equality and
+# minification -- lives here.
+#
+#   data = parse(text)                     # throws on bad input
+#   data = safeParse(text, {})             # never throws
+#   name = getPath(data, "users.0.name", "?")   # dotted path + default
+#   setPath(data, "users.0.name", "Sam")
+#   out compact(data)                      # minified, for the wire
+#
+# NOTE: the accessors are getPath/setPath/hasPath, not get/set/has -- `get` is an
+# EZ keyword (the for-each loop), so a task named `get` can never be called.
+# ============================================================================
+
+# ── Errors ───────────────────────────────────────────────────────────────────
+export JSON_PARSE_ERROR = "json/parse: "
+export JSON_IO_ERROR    = "json/io: "
+export JSON_PATH_ERROR  = "json/path: "
+
+# ── Syntax validation ────────────────────────────────────────────────────────
+#
+# parse_json() is permissive: it accepts plenty of text that is not JSON and
+# returns something rather than failing. `parse_json("{oops")` hands back
+# {"": "oops"} with no error at all, so a caller cannot tell a real document from
+# garbage. Everything below is a strict RFC 8259 scanner used to reject bad input
+# BEFORE it reaches the native parser.
+
+task _jsonSkipWs(s, i) {
+    n = len(s)
+    while i < n {
+        # Compared by code point (space, tab, LF, CR) so this source file
+        # carries no raw control characters of its own.
+        o = ord(substr(s, i, 1))
+        when o == 32 or o == 9 or o == 10 or o == 13 { i = i + 1 }
+        other { give i }
+    }
+    give i
+}
+
+task _jsonIsHex(c) {
+    when c >= "0" and c <= "9" { give true }
+    when c >= "a" and c <= "f" { give true }
+    when c >= "A" and c <= "F" { give true }
+    give false
+}
+
+# Each scanner returns the index just past the value it consumed, or -1.
+
+task _jsonScanString(s, i) {
+    when substr(s, i, 1) != "\"" { give -1 }
+    i = i + 1
+    n = len(s)
+    while i < n {
+        c = substr(s, i, 1)
+        when c == "\"" { give i + 1 }
+        when c == "\\" {
+            when i + 1 >= n { give -1 }
+            e = substr(s, i + 1, 1)
+            when e == "u" {
+                when i + 5 >= n { give -1 }
+                repeat k = 2 to 5 {
+                    when not _jsonIsHex(substr(s, i + k, 1)) { give -1 }
+                }
+                i = i + 6
+            } other when e == "\"" or e == "\\" or e == "/" or e == "b" or e == "f" or e == "n" or e == "r" or e == "t" {
+                i = i + 2
+            } other {
+                give -1
+            }
+        } other when ord(c) < 32 {
+            # A raw control character inside a string is not legal JSON.
+            give -1
+        } other {
+            i = i + 1
+        }
+    }
+    give -1
+}
+
+task _jsonScanNumber(s, i) {
+    n = len(s)
+    start = i
+    when i < n and substr(s, i, 1) == "-" { i = i + 1 }
+    digits = 0
+    while i < n and substr(s, i, 1) >= "0" and substr(s, i, 1) <= "9" {
+        i = i + 1
+        digits = digits + 1
+    }
+    when digits == 0 { give -1 }
+    when i < n and substr(s, i, 1) == "." {
+        i = i + 1
+        frac = 0
+        while i < n and substr(s, i, 1) >= "0" and substr(s, i, 1) <= "9" {
+            i = i + 1
+            frac = frac + 1
+        }
+        when frac == 0 { give -1 }
+    }
+    when i < n and (substr(s, i, 1) == "e" or substr(s, i, 1) == "E") {
+        i = i + 1
+        when i < n and (substr(s, i, 1) == "+" or substr(s, i, 1) == "-") { i = i + 1 }
+        expd = 0
+        while i < n and substr(s, i, 1) >= "0" and substr(s, i, 1) <= "9" {
+            i = i + 1
+            expd = expd + 1
+        }
+        when expd == 0 { give -1 }
+    }
+    when i == start { give -1 }
+    give i
+}
+
+task _jsonScanLiteral(s, i, word) {
+    when i + len(word) > len(s) { give -1 }
+    when substr(s, i, len(word)) != word { give -1 }
+    give i + len(word)
+}
+
+task _jsonScanValue(s, i, depth) {
+    # Bound the nesting so a pathological document cannot recurse without end.
+    when depth > 200 { give -1 }
+    i = _jsonSkipWs(s, i)
+    when i >= len(s) { give -1 }
+    c = substr(s, i, 1)
+
+    when c == "\"" { give _jsonScanString(s, i) }
+    when c == "t" { give _jsonScanLiteral(s, i, "true") }
+    when c == "f" { give _jsonScanLiteral(s, i, "false") }
+    when c == "n" { give _jsonScanLiteral(s, i, "null") }
+    when c == "-" or (c >= "0" and c <= "9") { give _jsonScanNumber(s, i) }
+
+    when c == "[" {
+        i = _jsonSkipWs(s, i + 1)
+        when i < len(s) and substr(s, i, 1) == "]" { give i + 1 }
+        while true {
+            i = _jsonScanValue(s, i, depth + 1)
+            when i < 0 { give -1 }
+            i = _jsonSkipWs(s, i)
+            when i >= len(s) { give -1 }
+            ch = substr(s, i, 1)
+            when ch == "," { i = i + 1 }
+            other when ch == "]" { give i + 1 }
+            other { give -1 }
+        }
+    }
+
+    when c == "{" {
+        i = _jsonSkipWs(s, i + 1)
+        when i < len(s) and substr(s, i, 1) == "}" { give i + 1 }
+        while true {
+            i = _jsonSkipWs(s, i)
+            i = _jsonScanString(s, i)
+            when i < 0 { give -1 }
+            i = _jsonSkipWs(s, i)
+            when i >= len(s) or substr(s, i, 1) != ":" { give -1 }
+            i = _jsonScanValue(s, i + 1, depth + 1)
+            when i < 0 { give -1 }
+            i = _jsonSkipWs(s, i)
+            when i >= len(s) { give -1 }
+            ch = substr(s, i, 1)
+            when ch == "," { i = i + 1 }
+            other when ch == "}" { give i + 1 }
+            other { give -1 }
+        }
+    }
+
+    give -1
+}
+
+# True when `text` is a complete, well-formed JSON document.
+task _jsonWellFormed(text) {
+    end = _jsonScanValue(text, 0, 0)
+    when end < 0 { give false }
+    # Trailing junk after the top-level value makes the document invalid.
+    give _jsonSkipWs(text, end) >= len(text)
+}
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+
+# Parse a JSON string. Throws JSON_PARSE_ERROR when the text is not valid JSON.
+export task parse(jsonString) {
+    when typeOf(jsonString) != "string" {
+        throw JSON_PARSE_ERROR + "expected a string, got " + typeOf(jsonString)
+    }
+    when not _jsonWellFormed(jsonString) {
+        throw JSON_PARSE_ERROR + "invalid JSON"
+    }
+    # The failure is recorded and thrown AFTER the try, never from inside the
+    # catch. A `throw` in a catch block is currently fatal when the call happens
+    # inside a request handler (see Test/test_rethrow_in_handler.ez): the process
+    # dies with an access violation instead of the error being caught.
+    failed = false
+    detail = ""
+    result = nil
+    try {
+        result = parse_json(jsonString)
+    } catch (e) {
+        failed = true
+        detail = str(e)
+    }
+    when failed { throw JSON_PARSE_ERROR + detail }
+    give result
+}
+
+# Parse, or return `fallback` if the text is not valid JSON.
+#
+# Anything arriving from a network, a file or a user is untrusted, and a bad byte
+# should not take a request down. Use this at every boundary and keep parse() for
+# data you generated yourself.
+export task safeParse(jsonString, fallback = nil) {
+    try { give parse(jsonString) } catch (e) { give fallback }
+}
+
+# True when the text parses as JSON.
+export task isValid(jsonString) {
+    try { parse(jsonString)  give true } catch (e) { give false }
+}
+
+# Serialise to indented JSON (to_json's native format).
+export task stringify(val) {
+    give to_json(val)
+}
+
+# Serialise to the smallest valid JSON: no newlines, no indentation.
+#
+# to_json always pretty-prints, which is what you want in a log and exactly what
+# you do not want in an HTTP body -- the padding is often a third of the bytes.
+export task compact(val) {
+    give minify(to_json(val))
+}
+
+# Strip insignificant whitespace from an existing JSON string.
+#
+# Whitespace INSIDE a string literal is content and is preserved; only the
+# padding between tokens is removed. Escapes are tracked so a `\"` does not
+# look like the end of the string.
+export task minify(jsonString) {
+    s = str(jsonString)
+    out_ = ""
+    inString = false
+    escaped = false
+    i = 0
+    n = len(s)
+    while i < n {
+        ch = substr(s, i, 1)
+        when inString {
+            out_ = out_ + ch
+            when escaped { escaped = false }
+            other when ch == "\\" { escaped = true }
+            other when ch == "\"" { inString = false }
+        } other {
+            when ch == "\"" { inString = true  out_ = out_ + ch }
+            other when ch == " " or ch == "\n" or ch == "\r" or ch == "\t" { }
+            other { out_ = out_ + ch }
+        }
+        i = i + 1
+    }
+    give out_
+}
+
+# ── Files ────────────────────────────────────────────────────────────────────
+
+# Read and parse a JSON file. Throws if the file is missing or malformed.
+#
+# The old version returned nil for a missing file, which is indistinguishable
+# from a file that legitimately contains `null`.
+export task read(filePath) {
+    when not File.exists(filePath) {
+        throw JSON_IO_ERROR + "no such file: " + str(filePath)
+    }
+    f = File(filePath, "r")
+    when not f.isOpen() {
+        throw JSON_IO_ERROR + "cannot open: " + str(filePath)
+    }
+    content = f.readAll()
+    f.close()
+    try {
+        give parse(content)
+    } catch (e) {
+        throw JSON_PARSE_ERROR + str(filePath) + ": " + str(e)
+    }
+}
+
+# Read a JSON file, or return `fallback` when it is missing or malformed.
+export task safeRead(filePath, fallback = nil) {
+    try { give read(filePath) } catch (e) { give fallback }
+}
+
+# Write a value as JSON. `pretty` false produces the compact form.
+export task write(filePath, val, pretty = true) {
+    f = File(filePath, "w")
+    when not f.isOpen() {
+        throw JSON_IO_ERROR + "cannot write: " + str(filePath)
+    }
+    text = pretty ? stringify(val) : compact(val)
+    f.write(text)
+    f.close()
+    give true
+}
+
+# ── Dotted-path access ───────────────────────────────────────────────────────
+
+# Split "users.0.name" into ["users", "0", "name"].
+task _pathParts(path) {
+    when typeOf(path) == "array" { give path }
+    p = str(path)
+    when len(p) == 0 { give [] }
+    give split(p, ".")
+}
+
+# A segment addressing an array element must be a whole number.
+task _asIndex(seg) {
+    s = str(seg)
+    when len(s) == 0 { give -1 }
+    repeat i = 0 to len(s) - 1 {
+        c = substr(s, i, 1)
+        when c < "0" or c > "9" { give -1 }
+    }
+    give num(s)
+}
+
+# Read a nested value. Returns `fallback` if any step of the path is missing,
+# so a deep read never throws on shape you did not expect.
+export task getPath(obj, path, fallback = nil) {
+    cur = obj
+    get seg in _pathParts(path) {
+        t = typeOf(cur)
+        when t == "dictionary" {
+            when not has_key(cur, seg) { give fallback }
+            cur = cur[seg]
+        } other when t == "array" {
+            idx = _asIndex(seg)
+            when idx < 0 or idx >= len(cur) { give fallback }
+            cur = cur[idx]
+        } other {
+            give fallback
+        }
+    }
+    give cur
+}
+
+# True when the full path resolves. Distinguishes "absent" from "present and nil"
+# in a way getPath() cannot.
+export task hasPath(obj, path) {
+    cur = obj
+    get seg in _pathParts(path) {
+        t = typeOf(cur)
+        when t == "dictionary" {
+            when not has_key(cur, seg) { give false }
+            cur = cur[seg]
+        } other when t == "array" {
+            idx = _asIndex(seg)
+            when idx < 0 or idx >= len(cur) { give false }
+            cur = cur[idx]
+        } other {
+            give false
+        }
+    }
+    give true
+}
+
+# Write a nested value, creating intermediate dictionaries as needed.
+# Mutates `obj` and returns it. Existing arrays are indexed, not replaced.
+export task setPath(obj, path, value) {
+    parts = _pathParts(path)
+    when len(parts) == 0 { throw JSON_PATH_ERROR + "empty path" }
+    when typeOf(obj) != "dictionary" and typeOf(obj) != "array" {
+        throw JSON_PATH_ERROR + "cannot set a path on " + typeOf(obj)
+    }
+
+    cur = obj
+    repeat i = 0 to len(parts) - 2 {
+        seg = parts[i]
+        t = typeOf(cur)
+        when t == "array" {
+            idx = _asIndex(seg)
+            when idx < 0 or idx >= len(cur) {
+                throw JSON_PATH_ERROR + "array index '" + str(seg) + "' out of range"
+            }
+            when typeOf(cur[idx]) != "dictionary" and typeOf(cur[idx]) != "array" {
+                cur[idx] = {}
+            }
+            cur = cur[idx]
+        } other {
+            when not has_key(cur, seg) { cur[seg] = {} }
+            other when typeOf(cur[seg]) != "dictionary" and typeOf(cur[seg]) != "array" {
+                cur[seg] = {}
+            }
+            cur = cur[seg]
+        }
+    }
+
+    last = parts[len(parts) - 1]
+    when typeOf(cur) == "array" {
+        idx = _asIndex(last)
+        when idx < 0 or idx >= len(cur) {
+            throw JSON_PATH_ERROR + "array index '" + str(last) + "' out of range"
+        }
+        cur[idx] = value
+    } other {
+        cur[last] = value
+    }
+    give obj
+}
+
+# ── Structural helpers ───────────────────────────────────────────────────────
+
+# Deep copy. Dictionaries and arrays are references in EZ, so handing one to a
+# caller that mutates it changes yours too -- clone first when in doubt.
+export task clone(val) {
+    t = typeOf(val)
+    when t == "dictionary" {
+        outD = {}
+        get k in keys(val) { outD[k] = clone(val[k]) }
+        give outD
+    }
+    when t == "array" {
+        outA = []
+        get v in val { push(outA, clone(v)) }
+        give outA
+    }
+    give val
+}
+
+# Shallow merge: keys of `b` win. Neither input is modified.
+export task merge(a, b) {
+    result = clone(a)
+    when typeOf(b) != "dictionary" { give result }
+    get k in keys(b) { result[k] = clone(b[k]) }
+    give result
+}
+
+# Recursive merge: nested dictionaries are merged rather than replaced, so
+# overlaying a partial config keeps the untouched branches of the default.
+export task deepMerge(a, b) {
+    when typeOf(a) != "dictionary" or typeOf(b) != "dictionary" { give clone(b) }
+    result = clone(a)
+    get k in keys(b) {
+        when has_key(result, k) and typeOf(result[k]) == "dictionary" and typeOf(b[k]) == "dictionary" {
+            result[k] = deepMerge(result[k], b[k])
+        } other {
+            result[k] = clone(b[k])
+        }
+    }
+    give result
+}
+
+# Structural equality. `==` on two dictionaries compares identity, so two
+# separately-parsed copies of the same document are not equal without this.
+export task equals(a, b) {
+    ta = typeOf(a)
+    tb = typeOf(b)
+    when ta == "dictionary" and tb == "dictionary" {
+        ka = keys(a)
+        kb = keys(b)
+        when len(ka) != len(kb) { give false }
+        get k in ka {
+            when not has_key(b, k) { give false }
+            when not equals(a[k], b[k]) { give false }
+        }
+        give true
+    }
+    when ta == "array" and tb == "array" {
+        when len(a) != len(b) { give false }
+        repeat i = 0 to len(a) - 1 {
+            when not equals(a[i], b[i]) { give false }
+        }
+        give true
+    }
+    give a == b
+}
+
+# A new dictionary holding only `wanted` keys that are present.
+export task pick(obj, wanted) {
+    result = {}
+    when typeOf(obj) != "dictionary" { give result }
+    get k in wanted {
+        when has_key(obj, k) { result[k] = clone(obj[k]) }
+    }
+    give result
+}
+
+# A copy of `obj` without `unwanted` keys -- for dropping secrets before logging.
+export task omit(obj, unwanted) {
+    result = {}
+    when typeOf(obj) != "dictionary" { give result }
+    get k in keys(obj) {
+        drop = false
+        get u in unwanted {
+            when u == k { drop = true }
+        }
+        when not drop { result[k] = clone(obj[k]) }
+    }
+    give result
+}

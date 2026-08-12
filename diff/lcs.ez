@@ -1,0 +1,89 @@
+# ============================================================================
+# diff/lcs.ez — longest common subsequence
+#
+# The core of any useful diff. Comparing line by line in order reports a
+# single inserted line at the top as "every line changed"; finding the longest
+# common subsequence first identifies what genuinely stayed, so only the real
+# edits are reported.
+#
+# The table is O(n*m) in both time and memory, which is fine for source files
+# and wrong for very large inputs -- see the note on `maxSize`.
+# ============================================================================
+
+# Refuses inputs whose table would be enormous. Better to say so than to
+# allocate for minutes and then run out of memory.
+export MAX_CELLS = 4000000
+
+export task lcsTable(a, b) {
+    rows = len(a)
+    cols = len(b)
+    when rows * cols > MAX_CELLS {
+        throw Exception(`diff: input too large ({rows} x {cols}); compare smaller pieces`)
+    }
+
+    table = []
+    repeat i = 0 to rows {
+        row = []
+        repeat j = 0 to cols { push(row, 0) }
+        push(table, row)
+    }
+
+    # Built from the end backwards, so table[i][j] is the LCS length of the
+    # remainders. Walking forward from there yields the edit script directly.
+    i = rows - 1
+    while i >= 0 {
+        j = cols - 1
+        while j >= 0 {
+            when a[i] == b[j] { table[i][j] = table[i + 1][j + 1] + 1 }
+            other {
+                left = table[i + 1][j]
+                right = table[i][j + 1]
+                when left >= right { table[i][j] = left }
+                other { table[i][j] = right }
+            }
+            j = j - 1
+        }
+        i = i - 1
+    }
+    give table
+}
+
+# Edit script as a list of { op, value } where op is "keep", "add" or "remove".
+export task diffSequences(a, b) {
+    table = lcsTable(a, b)
+    ops = []
+    i = 0
+    j = 0
+    rows = len(a)
+    cols = len(b)
+
+    while i < rows and j < cols {
+        when a[i] == b[j] {
+            push(ops, { "op": "keep", "value": a[i] })
+            i = i + 1
+            j = j + 1
+        }
+        other {
+            # Follow whichever direction keeps the longer common run. Ties go
+            # to "remove" first so a replaced line reads as removal then
+            # addition, which is the conventional order.
+            when table[i + 1][j] >= table[i][j + 1] {
+                push(ops, { "op": "remove", "value": a[i] })
+                i = i + 1
+            }
+            other {
+                push(ops, { "op": "add", "value": b[j] })
+                j = j + 1
+            }
+        }
+    }
+    while i < rows {
+        push(ops, { "op": "remove", "value": a[i] })
+        i = i + 1
+    }
+    while j < cols {
+        push(ops, { "op": "add", "value": b[j] })
+        j = j + 1
+    }
+    give ops
+}

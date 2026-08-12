@@ -1,0 +1,63 @@
+use "taskschd"
+
+out "--- Testing eztaskschd (Production Ready) ---"
+
+ts = connect()
+
+taskName = "EZ_Test_Task_Production"
+taskPath = "cmd.exe /c echo hello"
+
+// 1. Test creation with advanced options
+out "1. Creating task with highest privileges..."
+try {
+    ts.create(taskName, taskPath, {"type": "ONCE", "starttime": "23:59"}, {"runLevel": "highest"})
+    out "Task created successfully (as Admin)."
+} catch (e) {
+    errMsg = ""
+    when typeOf(e) == "instance" { errMsg = e.toString() } other { errMsg = str(e) }
+    
+    when len(split(errMsg, "AccessDeniedError")) > 1 {
+        out "Access denied for HIGHEST privilege task. Retrying with limited privileges..."
+        ts.create(taskName, taskPath, {"type": "ONCE", "starttime": "23:59"})
+        out "Task created successfully with limited privileges."
+    } other {
+        out "Create failed: " + errMsg
+    }
+}
+
+// 2. Test querying the task and receiving a ScheduledTask model
+out "2. Querying task..."
+try {
+    tsk = ts.query(taskName)
+    out "Task name: " + tsk.name
+    out "Task status: " + tsk.status
+    out "Next Run: " + tsk.nextRunTime
+    
+    // 3. Test running the task via the model method
+    out "3. Running task via model..."
+    tsk.run()
+    out "Run triggered."
+    
+    // 4. Test deleting the task via the model method
+    out "4. Deleting task via model..."
+    tsk.delete()
+    out "Task deleted."
+} catch (e) {
+    errMsg = ""
+    when typeOf(e) == "instance" { errMsg = e.toString() } other { errMsg = str(e) }
+    out "Query/Run/Delete failed: " + errMsg
+}
+
+// 5. Test structured exception: Querying a deleted task should throw TaskNotFoundError
+out "5. Verifying TaskNotFoundError..."
+try {
+    ts.query(taskName)
+    out "ERROR: Query succeeded on a deleted task!"
+} catch (e) {
+    // We expect a TaskNotFoundError
+    errMsg = ""
+    when typeOf(e) == "instance" { errMsg = e.toString() } other { errMsg = str(e) }
+    out "Caught expected error: " + errMsg
+}
+
+out "--- Tests complete ---"

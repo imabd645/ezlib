@@ -1,0 +1,11 @@
+{
+  "name": "postgres",
+  "version": "1.0.0",
+  "description": "PostgreSQL for EZ over libpq. Parameterised queries, connection pooling, transactions with savepoints and retry, full type mapping and SQLSTATE-aware errors.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["postgres", "postgresql", "database", "sql", "libpq", "pool", "transaction"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

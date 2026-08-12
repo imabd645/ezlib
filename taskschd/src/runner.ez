@@ -1,0 +1,58 @@
+// ============================================================================
+// eztaskschd / runner.ez -- Process Runner with Error Parsing
+// ============================================================================
+use "os"
+use "types.ez"
+
+export model Runner {
+    // Executes schtasks.exe with the specified arguments.
+    // Handles error codes and throws structured exceptions.
+    static task run(args) {
+        cmd = "schtasks"
+        get arg in args {
+            cmd = cmd + " " + arg
+        }
+        
+        // Append 2>&1 to redirect stderr to stdout so we can capture error messages.
+        cmd = cmd + " 2>&1"
+        
+        p = OSProcess()
+        output = p.exec(cmd)
+        
+        // Parse error conditions
+        when len(split(output, "ERROR:")) > 1 {
+            // Task not found
+            when len(split(output, "cannot find the file specified")) > 1 or len(split(output, "system cannot find the file")) > 1 or len(split(output, "system cannot find the path specified")) > 1 {
+                // Extract task name if possible from command
+                tn_parts = split(cmd, "/TN ")
+                tn = "Unknown"
+                when len(tn_parts) > 1 {
+                    part = tn_parts[1]
+                    when substr(part, 0, 1) == "\"" {
+                        end_quote = split(substr(part, 1, len(part) - 1), "\"")
+                        when len(end_quote) > 0 {
+                            tn = end_quote[0]
+                        }
+                    } other {
+                        tn = split(part, " ")[0]
+                    }
+                }
+                throw TaskNotFoundError(tn)
+            }
+            
+            // Access denied
+            when len(split(output, "Access is denied")) > 1 {
+                throw AccessDeniedError("Access denied. Try running the interpreter as Administrator.")
+            }
+            
+            throw TaskschdError(output)
+        }
+        
+        give output
+    }
+    
+    // Escapes command line arguments securely
+    static task escape(val) {
+        give "\"" + str(val) + "\""
+    }
+}

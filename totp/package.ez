@@ -1,0 +1,11 @@
+{
+  "name": "totp",
+  "version": "1.0.0",
+  "description": "Time-based one-time passwords for EZ (RFC 6238/4226). Two-factor codes, secret generation, base32 and otpauth QR URIs.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["totp", "hotp", "2fa", "mfa", "otp", "authenticator"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "crypto": "^1.0.0" }
+}

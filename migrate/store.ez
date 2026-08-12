@@ -1,0 +1,74 @@
+# ============================================================================
+# migrate/store.ez — the ledger of what has been applied
+#
+# A migration tool is only trustworthy if it can answer "what state is this
+# database in?" without guessing. That answer lives in a table alongside the
+# data, so it travels with the database rather than with the code.
+#
+# The checksum column is what catches the most damaging mistake: editing a
+# migration that has already run. The edit applies cleanly on a fresh database
+# and silently does nothing on an existing one, so two environments diverge
+# with no error anywhere.
+# ============================================================================
+
+export LEDGER_TABLE = "schema_migrations"
+
+# Deliberately plain SQL with no ORM model: the ledger has to exist before
+# anything else does, including whatever tables the ORM would need.
+export task ensureLedger(driver) {
+    driver.execute("CREATE TABLE IF NOT EXISTS " + LEDGER_TABLE + " ("
+        + "id TEXT PRIMARY KEY, "
+        + "checksum TEXT, "
+        + "applied_at TEXT"
+        + ")", [])
+    give nil
+}
+
+export task appliedRows(driver) {
+    ensureLedger(driver)
+    give driver.query("SELECT id, checksum, applied_at FROM " + LEDGER_TABLE + " ORDER BY id", [])
+}
+
+export task appliedIds(driver) {
+    ids = []
+    get row in appliedRows(driver) { push(ids, row["id"]) }
+    give ids
+}
+
+export task isApplied(driver, id) {
+    rows = driver.query("SELECT id FROM " + LEDGER_TABLE + " WHERE id = ?", [id])
+    give len(rows) > 0
+}
+
+export task recordApplied(driver, id, checksum, when1) {
+    driver.execute("INSERT INTO " + LEDGER_TABLE + " (id, checksum, applied_at) VALUES (?, ?, ?)",
+                   [id, checksum, when1])
+    give nil
+}
+
+export task recordReverted(driver, id) {
+    driver.execute("DELETE FROM " + LEDGER_TABLE + " WHERE id = ?", [id])
+    give nil
+}
+
+export task checksumOf(driver, id) {
+    rows = driver.query("SELECT checksum FROM " + LEDGER_TABLE + " WHERE id = ?", [id])
+    when len(rows) == 0 { give nil }
+    give rows[0]["checksum"]
+}
+
+# A cheap content fingerprint. Not cryptographic -- it only has to notice that
+# a migration's text changed since it ran, and it must not need `crypto` as a
+# dependency for something this small.
+export task fingerprint(text) {
+    body = str(text)
+    h1 = 7
+    h2 = 131
+    total = len(body)
+    repeat i = 0 to total - 1 {
+        c = ord(substr(body, i, 1))
+        h1 = (h1 * 31 + c) % 1000000007
+        h2 = (h2 * 37 + c) % 998244353
+    }
+    give str(h1) + "-" + str(h2) + "-" + str(total)
+}

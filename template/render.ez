@@ -1,0 +1,113 @@
+# ============================================================================
+# template/render.ez — node tree to output text
+#
+# Output is escaped by default. That is the single most important decision in
+# this library: a template that interpolates user data into HTML without
+# escaping is an XSS hole, and making safety opt-out (`| raw`) rather than
+# opt-in means forgetting produces an ugly page, not a vulnerability.
+# ============================================================================
+
+use "template/expr.ez"
+use "template/filters.ez"
+
+task renderText(value) {
+    when value == nil { give "" }
+    t = typeOf(value)
+    when t == "bool" { when value { give "true" }  give "false" }
+    when t == "dictionary" or t == "array" or t == "list" { give to_json(value) }
+    give str(value)
+}
+
+# A child scope that still reads through to the parent. Loop variables live
+# here so they disappear when the loop ends instead of leaking into the rest
+# of the template.
+task childScope(parent, extra) {
+    scope = {}
+    get k in keys(parent) { scope[k] = parent[k] }
+    get k in keys(extra) { scope[k] = extra[k] }
+    give scope
+}
+
+task iterableOf(value) {
+    when value == nil { give [] }
+    t = typeOf(value)
+    when t == "array" or t == "list" { give value }
+    when t == "dictionary" {
+        # Iterating a mapping yields its keys, matching how `for k in dict`
+        # reads to anyone who has used another template language.
+        give keys(value)
+    }
+    when t == "string" {
+        chars = []
+        limit = len(value)
+        repeat i = 0 to limit - 1 { push(chars, substr(value, i, 1)) }
+        give chars
+    }
+    give [value]
+}
+
+task renderNodes(nodes, context, escapeOutput, sink) {
+    get node in nodes {
+        kind = node["kind"]
+
+        when kind == "text" {
+            push(sink, node["value"])
+            skip
+        }
+        when kind == "output" {
+            pair = tplEvalOutput(context, node["expr"])
+            text = renderText(pair[0])
+            when escapeOutput and pair[1] { text = tplEscapeHtml(text) }
+            push(sink, text)
+            skip
+        }
+        when kind == "if" {
+            matched = false
+            get branch in node["branches"] {
+                when tplCondition(context, branch["cond"]) {
+                    renderNodes(branch["body"], context, escapeOutput, sink)
+                    matched = true
+                    escape
+                }
+            }
+            when matched == false and node["otherwise"] != nil {
+                renderNodes(node["otherwise"], context, escapeOutput, sink)
+            }
+            skip
+        }
+        when kind == "for" {
+            items = iterableOf(tplAtom(context, node["sourceExpr"]))
+            total = len(items)
+            when total == 0 {
+                when node["otherwise"] != nil {
+                    renderNodes(node["otherwise"], context, escapeOutput, sink)
+                }
+                skip
+            }
+            index = 0
+            get item in items {
+                loopInfo = {
+                    "index": index + 1,
+                    "index0": index,
+                    "first": index == 0,
+                    "last": index == total - 1,
+                    "length": total
+                }
+                scope = childScope(context, { node["varName"]: item, "loop": loopInfo })
+                renderNodes(node["body"], scope, escapeOutput, sink)
+                index = index + 1
+            }
+            skip
+        }
+    }
+    give nil
+}
+
+export task tplRenderNodes(nodes, context, escapeOutput) {
+    # NOT `buffer`: builtin name, and a bare assignment would replace it.
+    sink = []
+    ctx = context
+    when ctx == nil { ctx = {} }
+    renderNodes(nodes, ctx, escapeOutput, sink)
+    give join(sink, "")
+}

@@ -1,0 +1,10 @@
+use "socket"
+
+out "Connecting to 127.0.0.1:8080..."
+// 5s timeout, so a dead server fails fast instead of hanging.
+c = tcp_connect("127.0.0.1", 8080, 5000)
+out "Connected."
+
+c.sendAll("Hello from EZ Sockets!")
+out "Server replied: " + c.recv(1024)
+c.close()

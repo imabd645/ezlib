@@ -1,0 +1,288 @@
+# ============================================================================
+# EZ Audio Library — MP3 / WAV / MIDI playback via Win32 MCI (Winmm.dll)
+#
+#   play("song.mp3")                  # start, return immediately
+#   play("song.mp3", true)            # block until it finishes
+#   play("bg.mp3", false, "music")    # a named track, alongside others
+#   pause()  resume()  stop()
+#   seek(30000)                       # jump to 30s
+#   out status()                      # "playing" | "paused" | "stopped" | ...
+#
+# Every call takes an optional track name, so several sounds can play at once.
+# Without one they act on the default track.
+# ============================================================================
+
+__winmm = os_load_lib("Winmm.dll")
+when __winmm == 0 { throw "ezaudio: Winmm.dll not found" }
+
+export model AudioFFI {
+    static mciSendString    = os_get_func(__winmm, "mciSendStringA")
+    static mciGetErrorString = os_get_func(__winmm, "mciGetErrorStringA")
+    static playSound        = os_get_func(__winmm, "PlaySoundA")
+}
+
+export AUDIO_ERROR = "audio/error: "
+
+# Default track name used when the caller does not pass one.
+_AUDIO_DEFAULT = "ez_audio_track"
+
+# Every alias this library has opened, so stopAll() can close them and status()
+# can tell "never opened" from "opened and stopped".
+_audioOpen = {}
+
+_audioLastError = ""
+
+# ── MCI plumbing ─────────────────────────────────────────────────────────────
+
+# MCI returns 0 on success; anything else is an error code whose text has to be
+# fetched separately.
+task _mciErrorText(code) {
+    buf = os_alloc(256)
+    ok = os_call(AudioFFI.mciGetErrorString, "int", code, buf, 255)
+    text = ""
+    when ok != 0 { text = os_read_string_ptr(buf) }
+    os_free(buf)
+    when len(text) == 0 { text = "MCI error " + str(code) }
+    give text
+}
+
+# Send a command and capture its reply (MCI writes into the return buffer).
+task _mciSend(command, wantReply) {
+    buf = 0
+    bufLen = 0
+    when wantReply {
+        bufLen = 256
+        buf = os_alloc(bufLen)
+    }
+    rc = os_call(AudioFFI.mciSendString, "int", str(command), buf, bufLen, 0)
+    reply = ""
+    when wantReply and rc == 0 { reply = os_read_string_ptr(buf) }
+    when wantReply { os_free(buf) }
+    when rc != 0 { _audioLastError = _mciErrorText(rc) }
+    other { _audioLastError = "" }
+    give { "ok": rc == 0, "code": rc, "reply": reply }
+}
+
+task _mciCmd(command) {
+    give _mciSend(command, false)["ok"]
+}
+
+task _mciQuery(command) {
+    give _mciSend(command, true)["reply"]
+}
+
+# A path containing a space MUST be quoted or MCI reads the first word as the
+# filename and the rest as command flags -- which is why this used to fail on
+# anything under "C:\Program Files" or a Desktop folder with a space in it.
+task _mciPath(p) {
+    give "\"" + str(p) + "\""
+}
+
+# An alias may not contain spaces or quotes; it is a bare token in the command.
+task _mciAlias(name) {
+    s = str(name)
+    clean = ""
+    repeat i = 0 to len(s) - 1 {
+        c = substr(s, i, 1)
+        when (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_" {
+            clean = clean + c
+        } other {
+            clean = clean + "_"
+        }
+    }
+    when len(clean) == 0 { clean = _AUDIO_DEFAULT }
+    give clean
+}
+
+# ── Playback ─────────────────────────────────────────────────────────────────
+
+# Open and start a file. `wait` blocks until playback finishes.
+# Returns true on success; the reason for a failure is in lastError().
+export task play(filepath, wait_for_finish = false, track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+
+    # Report a missing file directly instead of leaving MCI to produce
+    # "cannot find the specified file", which does not say which one.
+    when not File.exists(filepath) {
+        _audioLastError = "no such file: " + str(filepath)
+        give false
+    }
+
+    # Close any previous holder of this alias, or `open` fails with
+    # "device name is already in use".
+    _mciCmd("close " + alias)
+
+    res = _mciSend("open " + _mciPath(filepath) + " alias " + alias, false)
+    when not res["ok"] { give false }
+    _audioOpen[alias] = str(filepath)
+
+    when wait_for_finish { give _mciCmd("play " + alias + " wait") }
+    give _mciCmd("play " + alias)
+}
+
+# Play a WAV without the MCI machinery -- lower latency, good for UI blips.
+# WAV only; PlaySound cannot decode MP3.
+#
+# The parameter is `nonBlocking`, not `async`: `async` is an EZ keyword and
+# cannot be used as a parameter name.
+export task playSound(filepath, nonBlocking = true) {
+    when not File.exists(filepath) {
+        _audioLastError = "no such file: " + str(filepath)
+        give false
+    }
+    # SND_FILENAME 0x00020000 | SND_ASYNC 0x0001 | SND_SYNC 0x0000
+    flags = 0x00020000
+    when nonBlocking { flags = flags + 1 }
+    rc = os_call(AudioFFI.playSound, "int", str(filepath), 0, flags)
+    give rc != 0
+}
+
+export task stop(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    ok = _mciCmd("stop " + alias)
+    _mciCmd("close " + alias)
+    when has_key(_audioOpen, alias) { _audioOpen[alias] = nil }
+    give ok
+}
+
+export task pause(track = nil) {
+    give _mciCmd("pause " + _mciAlias(track == nil ? _AUDIO_DEFAULT : track))
+}
+
+export task resume(track = nil) {
+    give _mciCmd("resume " + _mciAlias(track == nil ? _AUDIO_DEFAULT : track))
+}
+
+# Restart from the beginning.
+export task restart(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    _mciCmd("seek " + alias + " to start")
+    give _mciCmd("play " + alias)
+}
+
+# Stop and close every track this library opened.
+export task stopAll() {
+    n = 0
+    get alias in keys(_audioOpen) {
+        when typeOf(_audioOpen[alias]) != "nil" {
+            _mciCmd("stop " + alias)
+            _mciCmd("close " + alias)
+            _audioOpen[alias] = nil
+            n = n + 1
+        }
+    }
+    give n
+}
+
+# ── State ────────────────────────────────────────────────────────────────────
+
+# "playing" | "paused" | "stopped" | "not open"
+export task status(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    when not has_key(_audioOpen, alias) or typeOf(_audioOpen[alias]) == "nil" { give "not open" }
+    mode = _mciQuery("status " + alias + " mode")
+    when len(mode) == 0 { give "not open" }
+    give mode
+}
+
+export task isPlaying(track = nil) {
+    give status(track) == "playing"
+}
+
+export task isPaused(track = nil) {
+    give status(track) == "paused"
+}
+
+# Current playback position in milliseconds, or -1 when nothing is loaded.
+export task position(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    _mciCmd("set " + alias + " time format milliseconds")
+    r = _mciQuery("status " + alias + " position")
+    when len(r) == 0 { give -1 }
+    try { give num(r) } catch (e) { give -1 }
+}
+
+# Total length in milliseconds, or -1 when nothing is loaded.
+export task length(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    _mciCmd("set " + alias + " time format milliseconds")
+    r = _mciQuery("status " + alias + " length")
+    when len(r) == 0 { give -1 }
+    try { give num(r) } catch (e) { give -1 }
+}
+
+# Jump to a position in milliseconds. Playback continues if it was playing.
+export task seek(ms, track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    wasPlaying = status(track) == "playing"
+    _mciCmd("set " + alias + " time format milliseconds")
+    ok = _mciCmd("seek " + alias + " to " + str(ms))
+    # `seek` always stops playback, so resume it if the caller was mid-play.
+    when ok and wasPlaying { _mciCmd("play " + alias) }
+    give ok
+}
+
+# The file currently loaded on a track, or nil.
+export task current(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    when not has_key(_audioOpen, alias) { give nil }
+    give _audioOpen[alias]
+}
+
+# Names of every track this library currently has open.
+export task tracks() {
+    result = []
+    get alias in keys(_audioOpen) {
+        when typeOf(_audioOpen[alias]) != "nil" { push(result, alias) }
+    }
+    give result
+}
+
+# ── Volume ───────────────────────────────────────────────────────────────────
+
+# Set volume, 0-1000. Values outside the range are clamped rather than passed
+# through to MCI, which rejects them and leaves the volume unchanged.
+export task volume(level, track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    v = level
+    when typeOf(v) != "integer" and typeOf(v) != "float" { v = 0 }
+    when v < 0 { v = 0 }
+    when v > 1000 { v = 1000 }
+    give _mciCmd("setaudio " + alias + " volume to " + str(floor(v)))
+}
+
+# Current volume 0-1000, or -1 if it cannot be read.
+export task getVolume(track = nil) {
+    alias = _mciAlias(track == nil ? _AUDIO_DEFAULT : track)
+    r = _mciQuery("status " + alias + " volume")
+    when len(r) == 0 { give -1 }
+    try { give num(r) } catch (e) { give -1 }
+}
+
+export task mute(track = nil) {
+    give _mciCmd("setaudio " + _mciAlias(track == nil ? _AUDIO_DEFAULT : track) + " off")
+}
+
+export task unmute(track = nil) {
+    give _mciCmd("setaudio " + _mciAlias(track == nil ? _AUDIO_DEFAULT : track) + " on")
+}
+
+# ── Diagnostics ──────────────────────────────────────────────────────────────
+
+# Text of the last MCI failure. Empty when the last call succeeded.
+export task lastError() {
+    give _audioLastError
+}
+
+# Play and block until the track finishes or `timeoutMs` elapses.
+# Returns true if it played to the end.
+export task playFor(filepath, timeoutMs, track = nil) {
+    when not play(filepath, false, track) { give false }
+    waited = 0
+    while waited < timeoutMs {
+        when not isPlaying(track) { give true }
+        wait(50)
+        waited = waited + 50
+    }
+    give false
+}

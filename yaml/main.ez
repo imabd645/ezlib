@@ -1,0 +1,81 @@
+# ============================================================================
+# yaml — YAML parsing and serialisation for EZ
+#
+# Public surface. The implementation is split across scanner/scalar/parser/
+# emitter; this module is the only thing consumers need to import.
+#
+#   use "yaml"
+#   config = YAML.parse(readFile("config.yaml"))
+#   writeFile("config.yaml", YAML.stringify(config))
+# ============================================================================
+
+use "yaml/scanner.ez"
+use "yaml/scalar.ez"
+use "yaml/parser.ez"
+use "yaml/emitter.ez"
+
+export model YAML {
+
+    # Parse a YAML document into EZ values.
+    #
+    # Mappings become dictionaries, sequences become arrays, and scalars are
+    # typed by their spelling: `8080` is a number, `"8080"` a string, `true`
+    # a bool, `null`/`~`/empty a nil.
+    #
+    # Throws Exception with the line number when the document is malformed.
+    static task parse(source) {
+        when source == nil { give nil }
+        st = { "lines": yamlScan(str(source)), "pos": 0 }
+        value = yamlParseBlock(st, 0)
+
+        # Anything left unconsumed means a line could not be attached to the
+        # structure -- usually a bad dedent. Silently ignoring it would drop
+        # the user's data without a word.
+        rec = yamlSkipRemaining(st)
+        when rec != nil {
+            throw Exception(`YAML parse error (line {rec["line"]}): unexpected content '{rec["text"]}'`)
+        }
+        give value
+    }
+
+    # Parse, but return `fallback` instead of throwing on malformed input.
+    static task parseOr(source, fallback) {
+        try { give YAML.parse(source) }
+        catch (e) { give fallback }
+    }
+
+    # Serialise EZ values to YAML text. Round-trips: parse(stringify(v)) == v.
+    static task stringify(value) {
+        give yamlEmit(value)
+    }
+
+    # Read and parse a file in one step.
+    static task load(path) {
+        give YAML.parse(readFile(path))
+    }
+
+    # Serialise and write a file in one step.
+    static task save(path, value) {
+        writeFile(path, yamlEmit(value))
+        give true
+    }
+
+    # True when the source parses.
+    static task isValid(source) {
+        try {
+            YAML.parse(source)
+            give true
+        }
+        catch (e) { give false }
+    }
+}
+
+# Used by parse() to detect trailing content the parser could not attach.
+export task yamlSkipRemaining(st) {
+    while st["pos"] < len(st["lines"]) {
+        rec = st["lines"][st["pos"]]
+        when rec["blank"] == false { give rec }
+        st["pos"] = st["pos"] + 1
+    }
+    give nil
+}

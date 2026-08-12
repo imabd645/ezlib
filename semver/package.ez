@@ -1,0 +1,11 @@
+{
+  "name": "semver",
+  "version": "1.0.0",
+  "description": "Semantic version parsing, comparison and range matching for EZ. Caret, tilde, wildcard, interval and comparator ranges.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["semver", "version", "range", "compare", "sort", "dependency"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

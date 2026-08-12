@@ -1,0 +1,182 @@
+# ============================================================================
+# cache — test suite
+#   ez test.ez
+# ============================================================================
+
+use "cache"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+# Busy-wait: expiry is measured against clock(), so the test has to let real
+# time pass. Kept to a few hundredths of a second.
+task pause(seconds) {
+    until = clock() + seconds
+    while clock() < until { }
+    give nil
+}
+
+out "cache tests"
+
+# ── basics ──────────────────────────────────────────────────────────────────
+c = Cache(0)
+c.set("a", 1)
+check("get stored", c.get("a"), 1)
+check("get missing", c.get("zz"), nil)
+check("has stored", c.has("a"), true)
+check("has missing", c.has("zz"), false)
+check("getOr fallback", c.getOr("zz", "def"), "def")
+check("getOr present", c.getOr("a", "def"), 1)
+check("set returns value", c.set("b", 2), 2)
+check("overwrite", c.set("a", 9), 9)
+check("overwritten value", c.get("a"), 9)
+check("size", c.size(), 2)
+check("remove present", c.remove("a"), true)
+check("remove absent", c.remove("a"), false)
+check("size after remove", c.size(), 1)
+c.clear()
+check("clear empties", c.size(), 0)
+
+# Non-string keys are coerced, so 1 and "1" are the same entry.
+c.set(1, "num")
+check("numeric key", c.get("1"), "num")
+
+# nil is storable; has() distinguishes it from absence.
+c.set("nilkey", nil)
+check("stored nil reads as nil", c.get("nilkey"), nil)
+check("stored nil is present", c.has("nilkey"), true)
+
+# ── values of every type ────────────────────────────────────────────────────
+c.clear()
+c.set("list", [1, 2])
+c.set("dict", { "k": "v" })
+c.set("bool", true)
+check("list value", to_json(c.get("list")), to_json([1, 2]))
+check("dict value", c.get("dict")["k"], "v")
+check("bool value", c.get("bool"), true)
+
+# ── expiry ──────────────────────────────────────────────────────────────────
+t = Cache(0.05)
+t.set("soon", "here")
+check("present before expiry", t.get("soon"), "here")
+pause(0.08)
+check("gone after expiry", t.get("soon"), nil)
+check("has false after expiry", t.has("soon"), false)
+check("expired entry dropped", t.size(), 0)
+
+# ttl 0 means no expiry.
+n = Cache(0)
+n.set("forever", 1)
+pause(0.05)
+check("no expiry with ttl 0", n.get("forever"), 1)
+
+# Per-entry TTL overrides the default.
+p = Cache(0)
+p.setFor("brief", "x", 0.03)
+p.set("lasting", "y")
+pause(0.06)
+check("per-entry expiry", p.get("brief"), nil)
+check("default still alive", p.get("lasting"), "y")
+
+# prune drops expired entries without needing a read of each.
+q = Cache(0.02)
+q.set("a", 1)
+q.set("b", 2)
+pause(0.05)
+check("prune count", q.prune(), 2)
+check("prune emptied", q.size(), 0)
+
+# ── fetch ───────────────────────────────────────────────────────────────────
+CALLS = 0
+task build() { CALLS = CALLS + 1  give "made" }
+
+f = Cache(0)
+check("fetch computes", f.fetch("k", || build()), "made")
+check("fetch cached", f.fetch("k", || build()), "made")
+check("producer ran once", CALLS, 1)
+
+# fetch has no cached-nil ambiguity: a stored nil is a hit.
+g = Cache(0)
+NIL_CALLS = 0
+task buildNil() { NIL_CALLS = NIL_CALLS + 1  give nil }
+g.fetch("n", || buildNil())
+g.fetch("n", || buildNil())
+check("nil producer ran once", NIL_CALLS, 1)
+
+# fetchFor recomputes after its own TTL.
+h = Cache(0)
+FCALLS = 0
+task buildF() { FCALLS = FCALLS + 1  give FCALLS }
+h.fetchFor("k", 0.03, || buildF())
+pause(0.06)
+h.fetchFor("k", 0.03, || buildF())
+check("fetchFor recomputes after ttl", FCALLS, 2)
+
+# ── LRU ─────────────────────────────────────────────────────────────────────
+l = lruCache(2)
+l.set("x", 1)
+l.set("y", 2)
+l.set("z", 3)
+check("lru size held", l.size(), 2)
+check("lru dropped oldest", l.has("x"), false)
+check("lru kept newest", l.has("z"), true)
+
+# Reading an entry makes it recently used, so it survives the next eviction.
+m = lruCache(2)
+m.set("a", 1)
+m.set("b", 2)
+m.get("a")
+m.set("c", 3)
+check("read protects from eviction", m.has("a"), true)
+check("unread evicted", m.has("b"), false)
+
+# limit() applies to an existing cache immediately.
+k = Cache(0)
+k.set("1", 1)  k.set("2", 2)  k.set("3", 3)
+k.limit(1)
+check("limit trims now", k.size(), 1)
+
+task lruCacheEvictions() {
+    e = lruCache(1)
+    e.set("a", 1)
+    e.set("b", 2)
+    give e.stats()["evictions"]
+}
+
+# ── stats ───────────────────────────────────────────────────────────────────
+s = Cache(0)
+s.set("a", 1)
+s.get("a")
+s.get("a")
+s.get("miss")
+st = s.stats()
+check("hits counted", st["hits"], 2)
+check("misses counted", st["misses"], 1)
+check("hit rate", st["hitRate"] > 0.6, true)
+check("evictions counted", lruCacheEvictions(), 1)
+s.resetStats()
+check("stats reset", s.stats()["hits"], 0)
+
+# ── memoize ─────────────────────────────────────────────────────────────────
+MCALLS = 0
+task slowDouble(x) { MCALLS = MCALLS + 1  give x * 2 }
+fast = memoize(|x| slowDouble(x), 0)
+check("memoize computes", fast(4), 8)
+check("memoize cached", fast(4), 8)
+check("memoize ran once", MCALLS, 1)
+check("memoize distinct args", fast(5), 10)
+check("memoize ran twice", MCALLS, 2)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

@@ -1,0 +1,60 @@
+// ============================================================================
+// regex — Extractors
+//
+// Pull every occurrence of something out of a body of text. All return an array
+// of strings, empty when there is nothing to find.
+// ============================================================================
+use "patterns.ez"
+
+task allText(text, pattern, flags="") {
+    when text == nil { give [] }
+    when typeOf(text) != "string" { give [] }
+    out_ = []
+    get m in re_find_all(text, pattern, flags, 0) {
+        push(out_, m["text"])
+    }
+    give out_
+}
+
+// Text of one capture group from every match -- for patterns where the useful
+// part is inside the match, like the target of a markdown link.
+task allGroup(text, pattern, groupIndex, flags="") {
+    when text == nil { give [] }
+    out_ = []
+    get m in re_find_all(text, pattern, flags, 0) {
+        g = m["groups"]
+        when groupIndex - 1 < len(g) {
+            v = g[groupIndex - 1]
+            when v != nil { push(out_, v) }
+        }
+    }
+    give out_
+}
+
+export task extractEmails(text)   { give allText(text, PATTERNS["EMAIL"]) }
+export task extractUrls(text)     { give allText(text, PATTERNS["URL"]) }
+export task extractPhones(text)   { give allText(text, PATTERNS["PHONE_US"]) }
+export task extractIpv4(text)     { give allText(text, PATTERNS["IPV4"]) }
+export task extractHashtags(text) { give allText(text, PATTERNS["HASHTAG"]) }
+export task extractMentions(text) { give allText(text, PATTERNS["MENTION"]) }
+export task extractNumbers(text)  { give allText(text, PATTERNS["NUMBER"]) }
+export task extractDates(text)    { give allText(text, PATTERNS["DATE_ISO"]) }
+export task extractUuids(text)    { give allText(text, PATTERNS["UUID"]) }
+export task extractHtmlTags(text) { give allText(text, PATTERNS["HTML_TAG"]) }
+
+// Markdown links: the text and the target, as two parallel arrays.
+export task extractLinkTexts(text)   { give allGroup(text, PATTERNS["MARKDOWN_LINK"], 1) }
+export task extractLinkTargets(text) { give allGroup(text, PATTERNS["MARKDOWN_LINK"], 2) }
+
+// Words, in the identifier sense: letters, digits and underscore, not starting
+// with a digit.
+export task extractWords(text) { give allText(text, PATTERNS["WORD"]) }
+
+// Removes HTML tags and comments, leaving the text between them.
+// This is for display and logging, NOT for sanitising untrusted markup -- it
+// does not decode entities and makes no attempt to be a parser.
+export task stripHtml(text) {
+    when text == nil { give "" }
+    without = re_replace(text, PATTERNS["HTML_COMMENT"], "", "", 0)
+    give re_replace(without, PATTERNS["HTML_TAG"], "", "", 0)
+}

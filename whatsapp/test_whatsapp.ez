@@ -1,0 +1,62 @@
+// ============================================================================
+// test_whatsapp.ez — WhatsApp Web client demo
+//
+// This connects to WhatsApp Web using the Noise Protocol (like Baileys),
+// shows a QR code to scan, then echoes all received messages back.
+//
+// Run:  ez test_whatsapp.ez
+// ============================================================================
+
+use "whatsapp"
+
+out "==================================================="
+out "  EZ WhatsApp Client (Baileys-style Noise Protocol)"
+out "==================================================="
+out ""
+
+// Create the WhatsApp client
+wa = WAClient()
+
+// ── Register event handlers ───────────────────────────────────────────────────
+
+wa.on("ready", |info| {
+    out ""
+    out "✅ WhatsApp connected!"
+    out "📱 Linked phone: " + info["phone"]
+    out ""
+    out "Now listening for messages. Send a message to your number to test!"
+    out ""
+})
+
+wa.on("message", |msg| {
+    from = msg["from"]
+    text = msg["text"]
+
+    out "[MSG] From: " + from
+    out "[MSG] Text: " + text
+
+    // Echo the message back with a prefix
+    when text != "" {
+        wa.sendTyping(from)
+        wa.sendText(from, "Echo: " + text)
+        out "[MSG] Echoed back ✓"
+    }
+})
+
+wa.on("presence", |p| {
+    out "[PRESENCE] " + p["from"] + " is " + p["type"]
+})
+
+// ── Connect and authenticate ──────────────────────────────────────────────────
+
+out "Connecting to WhatsApp Web..."
+wa.connect()
+
+// This will print a QR code and wait for you to scan it with your phone.
+// If you've already scanned before and wa_session.json exists, it will
+// resume the session automatically.
+wa.waitForQR()
+
+// ── Keep-alive message loop ───────────────────────────────────────────────────
+// Blocks forever, processing incoming messages and firing event handlers.
+wa.loop()

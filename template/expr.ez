@@ -1,0 +1,222 @@
+# ============================================================================
+# template/expr.ez — expression evaluation
+#
+# Templates get a deliberately small expression language: path lookup,
+# literals, comparisons and filters. Anything more belongs in EZ code, where
+# it can be tested. Keeping templates non-Turing-complete also means an
+# untrusted template cannot loop forever or reach outside its context.
+# ============================================================================
+
+use "template/filters.ez"
+
+task exprFail(msg) {
+    throw Exception(`Template expression error: {msg}`)
+}
+
+# Splits on a separator that appears outside quotes and outside brackets, so
+# `a | default("x | y")` yields two parts rather than three.
+export task tplSplitTop(s, sep) {
+    parts = []
+    depth = 0
+    quote = ""
+    current = ""
+    total = len(s)
+    sepLen = len(sep)
+    i = 0
+    while i < total {
+        c = substr(s, i, 1)
+        when quote != "" {
+            current = current + c
+            when c == quote { quote = "" }
+            i = i + 1
+            skip
+        }
+        when c == `"` or c == "'" { quote = c  current = current + c  i = i + 1  skip }
+        when c == "(" or c == "[" { depth = depth + 1 }
+        when c == ")" or c == "]" { depth = depth - 1 }
+        when depth == 0 and i + sepLen <= total and substr(s, i, sepLen) == sep {
+            push(parts, trim(current))
+            current = ""
+            i = i + sepLen
+            skip
+        }
+        current = current + c
+        i = i + 1
+    }
+    push(parts, trim(current))
+    give parts
+}
+
+# Resolves `a.b.0.c` against the context. A missing link yields nil rather
+# than throwing: templates render around absent data all the time, and a hard
+# failure on an optional field would make them unusable.
+export task tplLookup(context, path) {
+    current = context
+    get part in split(path, ".") {
+        when current == nil { give nil }
+        seg = trim(part)
+        when seg == "" { skip }
+        t = typeOf(current)
+        when t == "dictionary" {
+            when has_key(current, seg) { current = current[seg] }
+            other { give nil }
+        }
+        other {
+            when t == "array" or t == "list" {
+                when tplIsDigits(seg) {
+                    idx = num(seg)
+                    when idx < 0 or idx >= len(current) { give nil }
+                    current = current[idx]
+                }
+                other {
+                    when seg == "length" or seg == "count" { current = len(current) }
+                    other { give nil }
+                }
+            }
+            other {
+                when t == "string" and (seg == "length" or seg == "count") {
+                    current = len(current)
+                }
+                other {
+                    # Model instances expose fields through getattr.
+                    when hasattr(current, seg) { current = getattr(current, seg) }
+                    other { give nil }
+                }
+            }
+        }
+    }
+    give current
+}
+
+export task tplIsDigits(s) {
+    when len(s) == 0 { give false }
+    limit = len(s)
+    repeat i = 0 to limit - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+task tplIsNumeric(s) {
+    when len(s) == 0 { give false }
+    body = s
+    when startsWith(s, "-") { body = substr(s, 1, len(s) - 1) }
+    dots = 0
+    limit = len(body)
+    when limit == 0 { give false }
+    repeat i = 0 to limit - 1 {
+        c = substr(body, i, 1)
+        when c == "." { dots = dots + 1 }
+        other {
+            code = ord(c)
+            when code < 48 or code > 57 { give false }
+        }
+    }
+    give dots <= 1
+}
+
+# A single operand: quoted literal, number, boolean, nil, or a context path.
+export task tplAtom(context, text) {
+    s = trim(text)
+    when s == "" { give nil }
+    first = substr(s, 0, 1)
+    last = substr(s, len(s) - 1, 1)
+    when len(s) >= 2 and first == `"` and last == `"` { give substr(s, 1, len(s) - 2) }
+    when len(s) >= 2 and first == "'" and last == "'" { give substr(s, 1, len(s) - 2) }
+    when s == "true" { give true }
+    when s == "false" { give false }
+    when s == "nil" or s == "null" { give nil }
+    when tplIsNumeric(s) { give num(s) }
+    give tplLookup(context, s)
+}
+
+# Truthiness: nil, false, 0, "" and empty containers are falsy. Matching the
+# usual template-language convention means `{% if items %}` does the obvious
+# thing for an empty list.
+export task tplTruthy(value) {
+    when value == nil { give false }
+    t = typeOf(value)
+    when t == "bool" { give value }
+    when t == "integer" or t == "float" { give value != 0 }
+    when t == "string" { give len(value) > 0 }
+    when t == "array" or t == "list" { give len(value) > 0 }
+    when t == "dictionary" { give len(keys(value)) > 0 }
+    give true
+}
+
+task tplCompare(context, s, op) {
+    sides = tplSplitTop(s, op)
+    when len(sides) != 2 { give nil }
+    left = tplAtom(context, sides[0])
+    right = tplAtom(context, sides[1])
+    when op == " == " { give left == right }
+    when op == " != " { give left != right }
+    when op == " >= " { give left >= right }
+    when op == " <= " { give left <= right }
+    when op == " > " { give left > right }
+    when op == " < " { give left < right }
+    give nil
+}
+
+# Evaluates a condition: and/or/not, comparisons, then a bare value.
+export task tplCondition(context, text) {
+    s = trim(text)
+    when s == "" { give false }
+
+    orParts = tplSplitTop(s, " or ")
+    when len(orParts) > 1 {
+        get part in orParts {
+            when tplCondition(context, part) { give true }
+        }
+        give false
+    }
+    andParts = tplSplitTop(s, " and ")
+    when len(andParts) > 1 {
+        get part in andParts {
+            when tplCondition(context, part) == false { give false }
+        }
+        give true
+    }
+    when startsWith(s, "not ") {
+        give tplCondition(context, substr(s, 4, len(s) - 4)) == false
+    }
+
+    get op in [" == ", " != ", " >= ", " <= ", " > ", " < "] {
+        when contains(s, op) {
+            result = tplCompare(context, s, op)
+            when result != nil { give result }
+        }
+    }
+    give tplTruthy(tplAtom(context, s))
+}
+
+# Full output expression: an atom followed by any number of filters.
+# Returns [value, escapeIt] -- the `raw` filter clears the escape flag, which
+# is the only way to opt out of autoescaping.
+export task tplEvalOutput(context, text) {
+    stages = tplSplitTop(text, "|")
+    value = tplAtom(context, stages[0])
+    escapeIt = true
+    repeat i = 1 to len(stages) - 1 {
+        spec = trim(stages[i])
+        when spec == "" { skip }
+        name = spec
+        args = []
+        paren = indexOf(spec, "(")
+        when paren >= 0 {
+            when endsWith(spec, ")") == false { exprFail(`filter '{spec}' is missing its ')'`) }
+            name = trim(substr(spec, 0, paren))
+            inner = substr(spec, paren + 1, len(spec) - paren - 2)
+            when trim(inner) != "" {
+                get a in tplSplitTop(inner, ",") { push(args, tplAtom(context, a)) }
+            }
+        }
+        when name == "raw" or name == "safe" {
+            escapeIt = false
+            skip
+        }
+        value = tplApplyFilter(name, value, args)
+    }
+    give [value, escapeIt]
+}

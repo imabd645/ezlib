@@ -1,0 +1,429 @@
+# ============================================================================
+# oauth — OAuth 2.0 client for EZ
+#
+#   use "oauth"
+#
+#   client = OAuth2.provider("github", CLIENT_ID, CLIENT_SECRET,
+#                            "https://example.com/callback")
+#
+#   # 1. send the user away
+#   start = client.begin()
+#   session["oauth"] = start["session"]        # keep the state and verifier
+#   redirect(start["url"])
+#
+#   # 2. they come back
+#   token = client.complete(query, session["oauth"])
+#   user = client.userInfo(token)
+#
+# The authorization code flow with PKCE, the client credentials flow for
+# machine-to-machine calls, and refresh. Signing in with a provider is the
+# common case, so `begin` / `complete` do the whole dance including the two
+# checks people leave out: `state` against CSRF and PKCE against a stolen code.
+# ============================================================================
+
+use "crypto"
+use "oauth/pkce.ez"
+use "oauth/token.ez"
+use "oauth/providers.ez"
+
+export model OAuth2 {
+
+    init(clientId, clientSecret, redirectUri) {
+        when clientId == nil or clientId == "" {
+            throw Exception("oauth: a client id is required")
+        }
+        self.clientId = clientId
+        self.clientSecret = clientSecret
+        self.redirectUri = redirectUri
+        self.providerName = nil
+        self.authorizeUrl = nil
+        self.tokenUrl = nil
+        self.userInfoUrl = nil
+        self.revokeUrl = nil
+        self.scopes = []
+        self.authorizeParams = {}
+        self.tokenHeaders = {}
+        self.userInfoHeaders = {}
+        self.tokenAuth = "post"
+        self.usePkce = true
+        self.pkceMethod = S256
+        self.preset = {}
+        self.transport = nil
+        self.getTransport = nil
+    }
+
+    # ── construction ────────────────────────────────────────────────────────
+
+    # A client pre-loaded with a known provider's endpoints and quirks.
+    static task provider(name, clientId, clientSecret, redirectUri) {
+        preset = providerFor(name)
+        client = OAuth2(clientId, clientSecret, redirectUri)
+        client.applyPreset(preset)
+        client.providerName = lower(str(name))
+        give client
+    }
+
+    task applyPreset(preset) {
+        self.preset = preset
+        self.authorizeUrl = preset["authorizeUrl"]
+        self.tokenUrl = preset["tokenUrl"]
+        self.userInfoUrl = preset["userInfoUrl"]
+        self.revokeUrl = preset["revokeUrl"]
+        when preset["scopes"] != nil { self.scopes = preset["scopes"] }
+        when preset["authorizeParams"] != nil { self.authorizeParams = preset["authorizeParams"] }
+        when preset["tokenHeaders"] != nil { self.tokenHeaders = preset["tokenHeaders"] }
+        when preset["userInfoHeaders"] != nil { self.userInfoHeaders = preset["userInfoHeaders"] }
+        when preset["tokenAuth"] != nil { self.tokenAuth = preset["tokenAuth"] }
+        give self
+    }
+
+    task endpoints(authorizeUrl, tokenUrl) {
+        self.authorizeUrl = authorizeUrl
+        self.tokenUrl = tokenUrl
+        give self
+    }
+
+    task withScopes(scopes) {
+        self.scopes = scopes
+        give self
+    }
+
+    task withUserInfo(url) {
+        self.userInfoUrl = url
+        give self
+    }
+
+    # PKCE is on by default. Turning it off is only correct against a server
+    # that rejects the extra parameters outright.
+    task withoutPkce() {
+        self.usePkce = false
+        give self
+    }
+
+    # Send the client secret as HTTP Basic rather than in the body. Some
+    # providers accept only one or the other.
+    task useBasicAuth() {
+        self.tokenAuth = "basic"
+        give self
+    }
+
+    # Swap the HTTP layer, for tests or for a client with retries and timeouts.
+    # `poster(url, body, headers)` and `getter(url, headers)` return the body.
+    task useTransport(poster, getter) {
+        self.transport = poster
+        self.getTransport = getter
+        give self
+    }
+
+    # ── step 1: send the user to the provider ───────────────────────────────
+
+    # Returns { url, session } where `session` holds the state and PKCE
+    # verifier. Store it somewhere tied to this browser and hand it back to
+    # `complete` -- without it neither check can be made.
+    task begin() { give self.beginWith(nil) }
+
+    task beginWith(extraParams) {
+        state = createState()
+        session = { "state": state, "createdAt": clock() / 1000 }
+        params = { "state": state }
+        when extraParams != nil {
+            get name in keys(extraParams) { params[name] = extraParams[name] }
+        }
+        when self.usePkce {
+            pair = createPair()
+            session["verifier"] = pair["verifier"]
+            params["code_challenge"] = pair["challenge"]
+            params["code_challenge_method"] = pair["method"]
+        }
+        give { "url": self.authorizationUrl(params), "session": session, "state": state }
+    }
+
+    # The URL to send the browser to. The client secret is deliberately not a
+    # parameter here: this URL is visible to the user and anything logging it.
+    task authorizationUrl(params) {
+        when self.authorizeUrl == nil {
+            throw Exception("oauth: no authorize endpoint configured")
+        }
+        query = {
+            "response_type": "code",
+            "client_id": self.clientId
+        }
+        when self.redirectUri != nil { query["redirect_uri"] = self.redirectUri }
+        when len(self.scopes) > 0 { query["scope"] = join(self.scopes, " ") }
+        get name in keys(self.authorizeParams) { query[name] = self.authorizeParams[name] }
+        when params != nil {
+            get name in keys(params) { query[name] = params[name] }
+        }
+        joiner = "?"
+        when contains(self.authorizeUrl, "?") { joiner = "&" }
+        give self.authorizeUrl + joiner + encodeForm(query)
+    }
+
+    # ── step 2: the user comes back ─────────────────────────────────────────
+
+    # `query` is the callback's query parameters, `session` is what `begin`
+    # gave you. Checks the provider's error, then `state`, then exchanges the
+    # code with the PKCE verifier.
+    task complete(query, session) {
+        when query == nil { throw Exception("oauth: no callback parameters given") }
+
+        # The provider reports failure in the redirect, not the token call.
+        when query["error"] != nil {
+            description = query["error_description"]
+            when description == nil { description = "" }
+            other { description = ": " + description }
+            throw Exception(`oauth: authorization failed ({query["error"]}){description}`)
+        }
+
+        when session == nil or session["state"] == nil {
+            throw Exception("oauth: no stored state -- the session that began this login is missing")
+        }
+        # Without this check an attacker can hand a victim their own code and
+        # end up with the victim's session linked to the attacker's account.
+        when statesMatch(session["state"], query["state"]) == false {
+            throw Exception("oauth: state mismatch -- this callback did not come from the login that started here")
+        }
+        when query["code"] == nil {
+            throw Exception("oauth: the callback contained no authorization code")
+        }
+        give self.exchange(query["code"], session["verifier"])
+    }
+
+    # Redeem an authorization code. `verifier` is required whenever the
+    # authorization request carried a challenge.
+    task exchange(code, verifier) {
+        body = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": self.clientId
+        }
+        when self.redirectUri != nil { body["redirect_uri"] = self.redirectUri }
+        when verifier != nil { body["code_verifier"] = verifier }
+        give Token.fromResponse(self.postToken(body))
+    }
+
+    # ── refresh ─────────────────────────────────────────────────────────────
+
+    # Returns a new token. The old refresh token is carried over when the
+    # provider does not return one, which most do not.
+    task refresh(token) {
+        refreshToken = token
+        when type(token) != "string" {
+            when token == nil { throw Exception("oauth: nothing to refresh") }
+            refreshToken = token.refreshToken
+        }
+        when refreshToken == nil {
+            throw Exception("oauth: this token has no refresh token -- the user must sign in again")
+        }
+        body = {
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken,
+            "client_id": self.clientId
+        }
+        fresh = Token.fromResponse(self.postToken(body))
+        when type(token) != "string" { give token.mergedWith(fresh) }
+        give fresh
+    }
+
+    # Refresh only if it is about to expire. This is the call to make before
+    # using a stored token.
+    task ensureFresh(token) {
+        when token == nil { give nil }
+        when token.isExpired() == false { give token }
+        when token.canRefresh() == false { give token }
+        give self.refresh(token)
+    }
+
+    # ── machine-to-machine ──────────────────────────────────────────────────
+
+    # No user, no browser: the client authenticates as itself. There is no
+    # refresh token in this flow -- ask for another when it expires.
+    task clientCredentials(scopes) {
+        when self.clientSecret == nil {
+            throw Exception("oauth: the client credentials flow needs a client secret")
+        }
+        body = { "grant_type": "client_credentials", "client_id": self.clientId }
+        useScopes = scopes
+        when useScopes == nil { useScopes = self.scopes }
+        when useScopes != nil and len(useScopes) > 0 { body["scope"] = join(useScopes, " ") }
+        give Token.fromResponse(self.postToken(body))
+    }
+
+    # ── using the token ─────────────────────────────────────────────────────
+
+    task userInfo(token) {
+        when self.userInfoUrl == nil {
+            throw Exception("oauth: no user info endpoint configured for this provider")
+        }
+        headers = { "Authorization": token.header() }
+        get name in keys(self.userInfoHeaders) { headers[name] = self.userInfoHeaders[name] }
+        raw = self.httpGet(self.userInfoUrl, headers)
+        parsed = parseBody(raw)
+        when type(parsed) != "dictionary" {
+            throw Exception("oauth: the user info endpoint did not return an object")
+        }
+        when parsed["error"] != nil { throw Exception(errorMessage(parsed)) }
+        give parsed
+    }
+
+    # The same three fields under every provider's own spelling, so a login
+    # does not have to special-case each one.
+    task profile(token) {
+        raw = self.userInfo(token)
+        # Twitch wraps the user in a data array.
+        when type(raw["data"]) == "array" and len(raw["data"]) > 0 { raw = raw["data"][0] }
+        give {
+            "id": str(pick(raw, self.preset["idField"], "id")),
+            "email": pick(raw, self.preset["emailField"], "email"),
+            "name": pick(raw, self.preset["nameField"], "name"),
+            "raw": raw
+        }
+    }
+
+    # Revocation is optional in the spec and absent from several providers, so
+    # this reports whether it was possible rather than throwing.
+    task revoke(token) {
+        when self.revokeUrl == nil { give false }
+        accessToken = token
+        when type(token) != "string" { accessToken = token.accessToken }
+        body = { "token": accessToken, "client_id": self.clientId }
+        when self.clientSecret != nil { body["client_secret"] = self.clientSecret }
+        try {
+            self.httpPost(self.revokeUrl, encodeForm(body), self.formHeaders({}))
+            give true
+        }
+        catch (e) { give false }
+    }
+
+    # ── the token endpoint ──────────────────────────────────────────────────
+
+    task postToken(body) {
+        when self.tokenUrl == nil { throw Exception("oauth: no token endpoint configured") }
+        headers = {}
+        get name in keys(self.tokenHeaders) { headers[name] = self.tokenHeaders[name] }
+
+        when self.tokenAuth == "basic" {
+            # RFC 6749 says the credentials are form-urlencoded before being
+            # base64'd, which matters for any secret containing + or =.
+            pair = url_encode(str(self.clientId)) + ":" + url_encode(str(self.clientSecret))
+            headers["Authorization"] = "Basic " + Base64.encode(pair)
+        }
+        other when self.clientSecret != nil { body["client_secret"] = self.clientSecret }
+
+        raw = self.httpPost(self.tokenUrl, encodeForm(body), self.formHeaders(headers))
+        parsed = parseBody(raw)
+        when type(parsed) != "dictionary" {
+            throw Exception(`oauth: the token endpoint returned something unreadable: {truncate(raw, 200)}`)
+        }
+        # HTTP status is not visible from here, so failure is recognised by the
+        # error field the spec requires (RFC 6749 §5.2).
+        when parsed["error"] != nil { throw Exception(errorMessage(parsed)) }
+        # And a body that is neither is reported as itself. parse_json is
+        # lenient enough to turn a gateway's HTML error page into an object,
+        # so the shape is checked rather than the parse trusted.
+        when parsed["access_token"] == nil {
+            throw Exception(`oauth: the token endpoint returned something unreadable: {truncate(raw, 200)}`)
+        }
+        give parsed
+    }
+
+    task formHeaders(headers) {
+        merged = { "Content-Type": "application/x-www-form-urlencoded" }
+        get name in keys(headers) { merged[name] = headers[name] }
+        give merged
+    }
+
+    task httpPost(url, body, headers) {
+        when self.transport != nil { give self.transport(url, body, headers) }
+        give http_post(url, body, headers)
+    }
+
+    task httpGet(url, headers) {
+        when self.getTransport != nil { give self.getTransport(url, headers) }
+        give http_get(url, headers)
+    }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+# Form encoding, not JSON: the token endpoint is specified as
+# application/x-www-form-urlencoded and several providers accept nothing else.
+export task encodeForm(params) {
+    parts = []
+    get name in keys(params) {
+        value = params[name]
+        when value != nil {
+            push(parts, url_encode(str(name)) + "=" + url_encode(str(value)))
+        }
+    }
+    give join(parts, "&")
+}
+
+export task decodeForm(text) {
+    result = {}
+    when text == nil or text == "" { give result }
+    body = text
+    when contains(body, "?") { body = split(body, "?")[1] }
+    get pair in split(body, "&") {
+        when pair != "" {
+            eq = indexOf(pair, "=")
+            when eq < 0 { result[url_decode(pair)] = "" }
+            other {
+                name = url_decode(substr(pair, 0, eq))
+                result[name] = url_decode(substr(pair, eq + 1, len(pair) - eq - 1))
+            }
+        }
+    }
+    give result
+}
+
+# GitHub answers the token endpoint with form encoding unless asked otherwise,
+# and a misconfigured gateway can answer with anything, so both are accepted.
+export task parseBody(raw) {
+    when raw == nil { give nil }
+    body = trim(raw)
+    when body == "" { give nil }
+    when startsWith(body, "{") or startsWith(body, "[") {
+        try { give parse_json(body) }
+        catch (e) { give nil }
+    }
+    when contains(body, "=") { give decodeForm(body) }
+    give nil
+}
+
+task errorMessage(parsed) {
+    code = str(parsed["error"])
+    # Slack and a few others put the human-readable part under other names.
+    description = parsed["error_description"]
+    when description == nil { description = parsed["error_message"] }
+    when description == nil { description = parsed["message"] }
+    hint = ""
+    when code == "invalid_grant" {
+        hint = " (the code or refresh token was already used, has expired, or the redirect_uri does not match)"
+    }
+    other when code == "redirect_uri_mismatch" {
+        hint = " (the redirect_uri must match the one registered with the provider exactly)"
+    }
+    other when code == "invalid_client" {
+        hint = " (check the client id and secret, and whether this provider wants them in the body or as HTTP Basic)"
+    }
+    when description == nil { give `oauth: {code}{hint}` }
+    give `oauth: {code}{hint} -- {description}`
+}
+
+task pick(source, preferred, fallback) {
+    when preferred != nil and source[preferred] != nil { give source[preferred] }
+    give source[fallback]
+}
+
+task truncate(text, limit) {
+    body = str(text)
+    when len(body) <= limit { give body }
+    give substr(body, 0, limit) + "…"
+}
+
+# ── shorthand ───────────────────────────────────────────────────────────────
+
+export task client(providerName, clientId, clientSecret, redirectUri) {
+    give OAuth2.provider(providerName, clientId, clientSecret, redirectUri)
+}

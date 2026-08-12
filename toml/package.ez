@@ -1,0 +1,11 @@
+{
+  "name": "toml",
+  "version": "1.0.0",
+  "description": "TOML configuration for EZ. Nested tables, arrays of tables, inline tables, typed values and round-trip serialisation.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["toml", "config", "settings", "parser", "conf"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

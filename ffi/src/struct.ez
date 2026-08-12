@@ -1,0 +1,87 @@
+// ============================================================================
+// src/struct.ez — Named C struct definitions with pack/unpack support.
+//
+// Models Python's ctypes.Structure concept using EZ's type system.
+//
+// Usage:
+//   POINT = ffi.Structure("POINT", [["x", ffi.c_int32], ["y", ffi.c_int32]])
+//
+//   pt = POINT.new()
+//   pt["x"] = 100
+//   pt["y"] = 200
+//   buf = POINT.pack(pt)             // → Buffer (C-layout bytes)
+//   pt2 = POINT.unpack(buf)          // → dict with named fields
+//   pt3 = POINT.unpack(rawPtrAddr)   // → unpack from raw pointer
+//
+// The struct layout follows standard C alignment rules:
+//   - i8/u8    → size 1, align 1
+//   - i16/u16  → size 2, align 2
+//   - i32/u32/f32 → size 4, align 4
+//   - i64/u64/f64/ptr → size 8, align 8
+// Tail padding is added so the total size is a multiple of the max alignment.
+// ============================================================================
+
+use "types.ez"
+
+// Create a named C struct type.
+//
+//   fields: array of ["fieldName", typeDescriptor] pairs
+//
+// Returns a dict that acts as the struct "class":
+//   .new()         → fresh instance dict with all fields zeroed
+//   .pack(inst)    → Buffer of C-layout bytes
+//   .unpack(b)     → instance dict decoded from Buffer or raw pointer address
+//   ._layout       → array of raw type strings (for os_struct_pack/unpack)
+//   ._fields       → array of field names in order
+
+export task Structure(name, fields) {
+    // Build the parallel arrays that os_struct_pack/unpack expect
+    fieldNames = []
+    layout     = []
+
+    get f in fields {
+        push(fieldNames, f[0])
+        push(layout,     typeStr(f[1]))
+    }
+
+    give {
+        "_name":   name,
+        "_layout": layout,
+        "_fields": fieldNames,
+
+        // Create a zeroed instance
+        "new": |_self| {
+            inst = {}
+            get fname in _self["_fields"] {
+                inst[fname] = 0
+            }
+            give inst
+        },
+
+        // Pack an instance into a Buffer (C memory layout)
+        "pack": |_self, inst| {
+            vals = []
+            get fname in _self["_fields"] {
+                push(vals, inst[fname])
+            }
+            give os_struct_pack(_self["_layout"], vals)
+        },
+
+        // Unpack a Buffer or raw pointer address into a named instance
+        "unpack": |_self, bufOrPtr| {
+            vals = os_struct_unpack(_self["_layout"], bufOrPtr)
+            inst = {}
+            i    = 0
+            get fname in _self["_fields"] {
+                inst[fname] = vals[i]
+                i = i + 1
+            }
+            give inst
+        },
+
+        // Allocate a zeroed Buffer sized exactly for this struct
+        "alloc": |_self| {
+            give os_struct_alloc(_self["_layout"])
+        }
+    }
+}

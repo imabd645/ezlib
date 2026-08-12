@@ -1,0 +1,261 @@
+# ============================================================================
+# s3/sign.ez — AWS Signature Version 4
+#
+# Every S3 request is signed. SigV4 is unforgiving: one wrong byte anywhere in
+# the canonical request produces a signature that differs completely, and the
+# server's only reply is SignatureDoesNotMatch with no indication of which part
+# was wrong. So this module builds each stage separately and exposes them, and
+# the test suite checks each stage against AWS's own published examples.
+#
+# The shape, for anyone debugging a mismatch:
+#
+#   canonicalRequest  method \n uri \n query \n headers \n signedHeaders \n hash
+#   stringToSign      algorithm \n timestamp \n scope \n hash(canonicalRequest)
+#   signingKey        HMAC chain over date, region, service, "aws4_request"
+#   signature         HMAC(signingKey, stringToSign)
+#
+# The secret key never touches the wire; it only ever seeds that HMAC chain.
+# ============================================================================
+
+use "crypto"
+
+export ALGORITHM = "AWS4-HMAC-SHA256"
+export UNSIGNED_PAYLOAD = "UNSIGNED-PAYLOAD"
+# SHA-256 of the empty string, which every GET and DELETE carries.
+export EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+CALG_SHA_256 = 32780                           # 0x800C
+HASH_LEN = 32
+BLOCK_LEN = 64
+
+# ── bytes and hex ───────────────────────────────────────────────────────────
+
+export task toBytes(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+export task toHex(octets) {
+    digits = "0123456789abcdef"
+    result = ""
+    get b in octets {
+        result = result + substr(digits, floor(b / 16), 1) + substr(digits, b % 16, 1)
+    }
+    give result
+}
+
+export task sha256Hex(text) { give Hash.sha256(text) }
+
+# Chained HMAC over byte arrays. Round-tripping a digest through a string would
+# corrupt every byte above 127, so nothing here becomes text until the end.
+task hmacBytes(keyBytes, message) {
+    give HMAC.raw(keyBytes, toBytes(message), CALG_SHA_256, HASH_LEN, BLOCK_LEN)
+}
+
+# ── URI encoding ────────────────────────────────────────────────────────────
+
+# SigV4 requires RFC 3986: everything except A-Z a-z 0-9 - _ . ~ is percent
+# encoded, with upper-case hex digits. `url_encode` is curl's escape, which
+# matches, so this only fixes the one place it must not apply -- the slashes in
+# a path, which stay literal.
+export task encodePath(path) {
+    body = str(path)
+    when body == "" { give "/" }
+    pieces = []
+    get segment in split(body, "/") { push(pieces, url_encode(segment)) }
+    give join(pieces, "/")
+}
+
+export task encodeValue(text) { give url_encode(str(text)) }
+
+# ── canonical request ───────────────────────────────────────────────────────
+
+# Parameters sorted by name, then by value. The sort is on the ENCODED name,
+# which is what the specification says and is not the same order as sorting the
+# raw names whenever one of them contains a character that escapes.
+export task canonicalQuery(params) {
+    when params == nil { give "" }
+    pairs = []
+    get name in keys(params) {
+        value = params[name]
+        when value != nil {
+            push(pairs, encodeValue(name) + "=" + encodeValue(value))
+        }
+    }
+    give join(sort(pairs), "&")
+}
+
+# Header names lower-cased, values trimmed, sorted by name, one per line, with
+# a trailing newline. Only the headers being signed appear.
+export task canonicalHeaders(headers) {
+    lines = []
+    get name in sortedHeaderNames(headers) {
+        push(lines, name + ":" + collapseSpaces(str(headers[originalName(headers, name)])) + "\n")
+    }
+    give join(lines, "")
+}
+
+export task signedHeaders(headers) { give join(sortedHeaderNames(headers), ";") }
+
+task sortedHeaderNames(headers) {
+    names = []
+    get name in keys(headers) {
+        when headers[name] != nil { push(names, lower(trim(str(name)))) }
+    }
+    give sort(names)
+}
+
+task originalName(headers, lowered) {
+    get name in keys(headers) {
+        when lower(trim(str(name))) == lowered { give name }
+    }
+    give lowered
+}
+
+# Runs of whitespace inside a header value collapse to one space, and the ends
+# are trimmed. A server that reformats the header must still see the same
+# canonical form.
+task collapseSpaces(value) {
+    result = ""
+    lastWasSpace = false
+    get ch in split(trim(value), "") {
+        when ch == " " or ch == "\t" {
+            when lastWasSpace == false { result = result + " " }
+            lastWasSpace = true
+        }
+        other {
+            result = result + ch
+            lastWasSpace = false
+        }
+    }
+    give result
+}
+
+export task canonicalRequest(method, path, params, headers, payloadHash) {
+    give join([
+        upper(str(method)),
+        encodePath(path),
+        canonicalQuery(params),
+        canonicalHeaders(headers),
+        signedHeaders(headers),
+        payloadHash
+    ], "\n")
+}
+
+# ── string to sign ──────────────────────────────────────────────────────────
+
+export task credentialScope(dateStamp, region, service) {
+    give `{dateStamp}/{region}/{service}/aws4_request`
+}
+
+export task stringToSign(timestamp, dateStamp, region, service, canonical) {
+    give join([
+        ALGORITHM,
+        timestamp,
+        credentialScope(dateStamp, region, service),
+        sha256Hex(canonical)
+    ], "\n")
+}
+
+# ── the signing key ─────────────────────────────────────────────────────────
+
+# Derived per day, per region, per service. That is why a leaked signature is
+# bounded: it authorises one request, and the key behind it stops working
+# tomorrow.
+export task signingKey(secret, dateStamp, region, service) {
+    kDate = hmacBytes(toBytes("AWS4" + str(secret)), dateStamp)
+    kRegion = hmacBytes(kDate, region)
+    kService = hmacBytes(kRegion, service)
+    give hmacBytes(kService, "aws4_request")
+}
+
+export task sign(secret, dateStamp, region, service, toSign) {
+    give toHex(hmacBytes(signingKey(secret, dateStamp, region, service), toSign))
+}
+
+# ── the Authorization header ────────────────────────────────────────────────
+
+# Returns the headers to send, including Authorization. `headers` must already
+# contain host, x-amz-date and x-amz-content-sha256; they are part of what is
+# signed, so adding one afterwards invalidates the signature.
+export task authorize(credentials, region, service, method, path, params, headers, payloadHash, timestamp) {
+    dateStamp = substr(timestamp, 0, 8)
+    canonical = canonicalRequest(method, path, params, headers, payloadHash)
+    toSign = stringToSign(timestamp, dateStamp, region, service, canonical)
+    signature = sign(credentials["secretKey"], dateStamp, region, service, toSign)
+    scope = credentialScope(dateStamp, region, service)
+    give `{ALGORITHM} Credential={credentials["accessKey"]}/{scope}, SignedHeaders={signedHeaders(headers)}, Signature={signature}`
+}
+
+# ── presigned URLs ──────────────────────────────────────────────────────────
+
+# A URL anyone can use, for as long as it lasts, without credentials. The
+# signature moves into the query string and the payload is not signed, which is
+# what lets a browser follow it.
+#
+# `expiresSeconds` is capped at seven days by AWS; a longer one is rejected
+# here rather than by the server after you have already handed the link out.
+export task presign(credentials, region, service, method, host, path, extraParams,
+                    expiresSeconds, timestamp) {
+    when expiresSeconds < 1 or expiresSeconds > 604800 {
+        throw Exception("s3: a presigned URL must last between 1 second and 7 days")
+    }
+    dateStamp = substr(timestamp, 0, 8)
+    headers = { "host": host }
+
+    params = {}
+    when extraParams != nil {
+        get name in keys(extraParams) { params[name] = extraParams[name] }
+    }
+    params["X-Amz-Algorithm"] = ALGORITHM
+    params["X-Amz-Credential"] = credentials["accessKey"] + "/" + credentialScope(dateStamp, region, service)
+    params["X-Amz-Date"] = timestamp
+    params["X-Amz-Expires"] = str(floor(expiresSeconds))
+    params["X-Amz-SignedHeaders"] = signedHeaders(headers)
+    # A session token has to be part of the signature, not appended after it.
+    when credentials["sessionToken"] != nil {
+        params["X-Amz-Security-Token"] = credentials["sessionToken"]
+    }
+
+    canonical = canonicalRequest(method, path, params, headers, UNSIGNED_PAYLOAD)
+    toSign = stringToSign(timestamp, dateStamp, region, service, canonical)
+    signature = sign(credentials["secretKey"], dateStamp, region, service, toSign)
+    params["X-Amz-Signature"] = signature
+    give canonicalQuery(params)
+}
+
+# ── timestamps ──────────────────────────────────────────────────────────────
+
+# YYYYMMDDTHHMMSSZ in UTC. A clock more than fifteen minutes out gets every
+# request rejected, which is worth knowing before blaming the signature.
+export task timestampFor(epochSeconds) {
+    whole = floor(epochSeconds)
+    days = floor(whole / 86400)
+    secondOfDay = whole - days * 86400
+    date = civilFromDays(days)
+    give `{date["year"]}{pad2(date["month"])}{pad2(date["day"])}T{pad2(floor(secondOfDay / 3600))}{pad2(floor((secondOfDay % 3600) / 60))}{pad2(secondOfDay % 60)}Z`
+}
+
+export task nowTimestamp() { give timestampFor(clock() / 1000) }
+
+task pad2(value) {
+    when value < 10 { give "0" + str(value) }
+    give str(value)
+}
+
+task civilFromDays(days) {
+    z = days + 719468
+    era = floor(z / 146097)
+    doe = z - era * 146097
+    yoe = floor((doe - floor(doe / 1460) + floor(doe / 36524) - floor(doe / 146096)) / 365)
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + floor(yoe / 4) - floor(yoe / 100))
+    mp = floor((5 * doy + 2) / 153)
+    d = doy - floor((153 * mp + 2) / 5) + 1
+    m = mp + 3
+    when mp >= 10 { m = mp - 9 }
+    when m <= 2 { y = y + 1 }
+    give { "year": y, "month": m, "day": d }
+}

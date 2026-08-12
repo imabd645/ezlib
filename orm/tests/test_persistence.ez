@@ -1,0 +1,181 @@
+// ============================================================================
+// Regression tests for insert-vs-update.
+//
+//   ez test_persistence.ez
+//
+// A brand new object used to be flushed as an UPDATE whenever its primary key
+// already held a value -- which is always true for an application-assigned
+// key such as a username, an email or a UUID. The UPDATE matched no rows,
+// raised nothing, and saved nothing.
+// ============================================================================
+
+use "orm"
+
+PASS = 0
+FAIL = 0
+
+task check(label, condition) {
+    when condition { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out "  FAIL " + label
+    }
+}
+task checkEq(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out "  FAIL " + label + "  expected [" + str(expected) + "] got [" + str(actual) + "]"
+    }
+}
+
+// A key the application assigns, which is the case that used to fail.
+model Account extends Model {
+    init() {
+        self.username = Column("string", primaryKey=true)
+        self.email    = Column("string", unique=true)
+        self.name     = Column("string")
+    }
+}
+
+// A key the database generates, which always worked.
+model Note extends Model {
+    init() {
+        self.id   = Column("integer", primaryKey=true, autoIncrement=true)
+        self.body = Column("string")
+    }
+}
+
+DB = "test_persistence.db"
+try { File.remove(DB) } catch (e) { }
+
+engine = Engine(SQLiteDriver(DB))
+engine.register(Account, {"table": "accounts"})
+engine.register(Note, {"table": "notes"})
+session = Session(engine)
+engine.createAll()
+
+out "persistence tests"
+
+// ── the reported bug ────────────────────────────────────────────────────────
+a = Account()
+a.username = "abd"
+a.email = "a@b.co"
+a.name = "Abdullah"
+session.add(a)
+session.commit()
+checkEq("string primary key inserts", session.query(Account).count(), 1)
+checkEq("column values stored", session.query(Account).first().email, "a@b.co")
+
+// ── database-generated keys still work ──────────────────────────────────────
+n = Note()
+n.body = "hello"
+session.add(n)
+session.commit()
+checkEq("autoIncrement inserts", session.query(Note).count(), 1)
+check("generated id assigned back", session.query(Note).first().id != nil)
+
+// ── a loaded row updates rather than duplicating ────────────────────────────
+loaded = session.query(Account).filter("username", "abd").first()
+loaded.name = "Changed"
+session.commit()
+checkEq("update does not duplicate", session.query(Account).count(), 1)
+// Read through a fresh session: the identity map would otherwise hand back
+// the same in-memory object and prove nothing about what was written.
+fresh = Session(engine)
+checkEq("update reached the database", fresh.query(Account).filter("username", "abd").first().name, "Changed")
+
+// Re-adding a row that came from the database must still update it.
+again = fresh.query(Account).filter("username", "abd").first()
+again.name = "ReAdded"
+fresh.add(again)
+fresh.commit()
+checkEq("re-adding a loaded row updates", fresh.query(Account).count(), 1)
+checkEq("re-add wrote the value", Session(engine).query(Account).first().name, "ReAdded")
+
+// ── changing an object after inserting it ───────────────────────────────────
+// Nothing stages this: add() has already been flushed, and the object is not
+// in the identity map. It has to be tracked as inserted or the change is lost.
+b = Account()
+b.username = "sara"
+b.email = "s@b.co"
+b.name = "First"
+session.add(b)
+session.commit()
+b.name = "Second"
+session.commit()
+checkEq("modify after insert does not duplicate", session.query(Account).count(), 2)
+checkEq("modify after insert is written",
+        Session(engine).query(Account).filter("username", "sara").first().name, "Second")
+
+// ── a genuine duplicate is refused, not silently swallowed ──────────────────
+dup = Account()
+dup.username = "abd"
+dup.email = "other@b.co"
+dup.name = "Clash"
+session.add(dup)
+threw = false
+try { session.commit() } catch (e) { threw = true }
+check("duplicate primary key is rejected", threw)
+
+// ── several rows with explicit keys in one commit ───────────────────────────
+batchSession = Session(engine)
+p = Account()  p.username = "p"  p.email = "p@b.co"  p.name = "P"
+q = Account()  q.username = "q"  q.email = "q@b.co"  q.name = "Q"
+batchSession.add(p)
+batchSession.add(q)
+batchSession.commit()
+checkEq("batch insert with explicit keys", Session(engine).query(Account).count(), 4)
+
+// ── a column the database filled in reads back correctly ────────────────────
+// An inserted object IS placed in the identity map, so a later query returns
+// it rather than hydrating. That means any column omitted from the INSERT so
+// the database could default it must be filled in on the object too, or
+// reading the field back yields a Column definition instead of a value.
+model Flagged extends Model {
+    init() {
+        self.id     = Column("integer", primaryKey=true, autoIncrement=true)
+        self.active = Column("bool", default=true)
+    }
+}
+engine.register(Flagged, {"table": "flagged"})
+engine.createAll()
+f = Flagged()
+session.add(f)
+session.commit()
+checkEq("database default reads back typed", Session(engine).query(Flagged).first().active, true)
+
+
+// ── one row is one object ───────────────────────────────────────────────────
+// An inserted row joins the identity map just as a hydrated one does. Without
+// that, the object you inserted and the object a later query returns are two
+// instances of the same row: change one and the other is silently stale.
+identSession = Session(engine)
+c = Account()
+c.username = "ident"
+c.email = "i@b.co"
+c.name = "Before"
+identSession.add(c)
+identSession.commit()
+
+queried = identSession.query(Account).filter("username", "ident").first()
+check("query returns the inserted object itself", queried == c)
+
+c.name = "After"
+identSession.commit()
+checkEq("no stale read after a change",
+        identSession.query(Account).filter("username", "ident").first().name, "After")
+checkEq("and the database agrees",
+        Session(engine).query(Account).filter("username", "ident").first().name, "After")
+
+// A default the database applied must be readable on the object that was
+// inserted, not just on one hydrated later.
+g = Flagged()
+identSession.add(g)
+identSession.commit()
+checkEq("default readable on the inserted object", g.active, true)
+
+out ""
+out "  passed " + str(PASS) + "   failed " + str(FAIL)
+try { File.remove(DB) } catch (e) { }
+when FAIL > 0 { exit(1) }

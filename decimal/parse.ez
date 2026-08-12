@@ -1,0 +1,106 @@
+# ============================================================================
+# decimal/parse.ez — text to units, and units back to text
+#
+# Parsing goes straight from the digit characters to an integer. A float is
+# never involved, so "0.1" becomes exactly 1 unit at scale 1 rather than the
+# nearest double to a tenth.
+# ============================================================================
+
+use "decimal/arith.ez"
+
+export task decIsDigit(c) {
+    code = ord(c)
+    give code >= 48 and code <= 57
+}
+
+# Returns { units, scale } or nil.
+#
+# Accepts: 12  -12  +12  1.50  .5  1_000.25  1,000.25
+# Underscores and commas are stripped as grouping, so a figure copied from a
+# spreadsheet parses instead of failing.
+export task decParse(text) {
+    when text == nil { give nil }
+    s = trim(str(text))
+    s = replace(s, "_", "")
+    s = replace(s, ",", "")
+    when s == "" { give nil }
+
+    negative = false
+    when startsWith(s, "-") { negative = true  s = substr(s, 1, len(s) - 1) }
+    other { when startsWith(s, "+") { s = substr(s, 1, len(s) - 1) } }
+    when s == "" { give nil }
+
+    intPart = s
+    fracPart = ""
+    dotAt = indexOf(s, ".")
+    when dotAt >= 0 {
+        intPart = substr(s, 0, dotAt)
+        fracPart = substr(s, dotAt + 1, len(s) - dotAt - 1)
+        # A second dot means this is not a number ("1.2.3" is a version).
+        when indexOf(fracPart, ".") >= 0 { give nil }
+    }
+    when intPart == "" and fracPart == "" { give nil }
+
+    digits = intPart + fracPart
+    when len(digits) == 0 { give nil }
+    total = len(digits)
+    repeat i = 0 to total - 1 {
+        when decIsDigit(substr(digits, i, 1)) == false { give nil }
+    }
+    when len(fracPart) > MAX_SCALE {
+        throw Exception(`decimal: '{text}' has more than {MAX_SCALE} decimal places`)
+    }
+
+    units = 0
+    repeat i = 0 to total - 1 {
+        units = units * 10 + (ord(substr(digits, i, 1)) - 48)
+    }
+    when negative { units = -units }
+    give { "units": units, "scale": len(fracPart) }
+}
+
+# Digits of |units|, left-padded so there are at least `scale` + 1 of them.
+task decDigits(units, scale) {
+    body = str(units)
+    when startsWith(body, "-") { body = substr(body, 1, len(body) - 1) }
+    while len(body) < scale + 1 { body = "0" + body }
+    give body
+}
+
+# "1234.50" -- always exactly `scale` decimal places, so money keeps its
+# trailing zero instead of printing as 1234.5.
+export task decToString(units, scale) {
+    digits = decDigits(units, scale)
+    sign = ""
+    when units < 0 { sign = "-" }
+    when scale == 0 { give sign + digits }
+    cut = len(digits) - scale
+    give sign + substr(digits, 0, cut) + "." + substr(digits, cut, scale)
+}
+
+# Groups the integer part: 1234567.5 -> "1,234,567.50"
+export task decGroup(units, scale, separator, decimalPoint) {
+    body = decToString(units, scale)
+    sign = ""
+    when startsWith(body, "-") { sign = "-"  body = substr(body, 1, len(body) - 1) }
+
+    intPart = body
+    fracPart = ""
+    dotAt = indexOf(body, ".")
+    when dotAt >= 0 {
+        intPart = substr(body, 0, dotAt)
+        fracPart = substr(body, dotAt + 1, len(body) - dotAt - 1)
+    }
+
+    grouped = ""
+    count = 0
+    index = len(intPart) - 1
+    while index >= 0 {
+        grouped = substr(intPart, index, 1) + grouped
+        count = count + 1
+        when count % 3 == 0 and index > 0 { grouped = separator + grouped }
+        index = index - 1
+    }
+    when fracPart == "" { give sign + grouped }
+    give sign + grouped + decimalPoint + fracPart
+}

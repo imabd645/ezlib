@@ -1,0 +1,41 @@
+use "main.ez" as ffi
+
+task test_double_free() {
+    out "Testing double free..."
+    ptr = ffi.alloc(16)
+    
+    // First free should succeed
+    ptr.free()
+    
+    // Second free should throw
+    try {
+        ptr.free()
+        out "FAILED: Double free did not throw!"
+    } catch err {
+        out "Caught expected error: " + str(err.message)
+    }
+}
+
+task test_use_after_free() {
+    out "Testing use after free..."
+    ptr = ffi.alloc(16)
+    
+    // Free the pointer
+    ptr.free()
+    
+    // Attempt to write should throw
+    try {
+        ptr.writeInt32(0, 42)
+        out "FAILED: Use after free did not throw!"
+    } catch err {
+        out "Caught expected error: " + str(err.message)
+    }
+}
+
+task main() {
+    test_double_free()
+    out ""
+    test_use_after_free()
+}
+
+main()

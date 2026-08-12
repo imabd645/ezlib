@@ -1,0 +1,61 @@
+// ============================================================================
+// src/utils.ez — Utility helpers for the ezffi library.
+//
+//   string_at(ptr, maxlen)  — safely read a null-terminated C string
+//   cast(ptr)               — borrow a raw address as a Pointer (non-owning)
+//   c_string(text)          — allocate + write a C string, return owned Pointer
+//   offset(ptr, n)          — advance a pointer by n bytes (non-owning)
+//   alloc(size)             — allocate n bytes, return owned Pointer
+// ============================================================================
+
+use "errors.ez"
+use "pointer.ez"
+
+// Read a null-terminated C string from a raw address or Pointer.
+//   maxlen: safety cap on bytes read (default 64 KB).
+export task string_at(ptr, maxlen = 65536) {
+    rawAddr = ptr
+    when typeOf(ptr) != "integer" and typeOf(ptr) != "number" {
+        rawAddr = ptr.ptr   // unwrap a Pointer instance
+    }
+    give os_read_string_ptr_n(rawAddr, maxlen)
+}
+
+// Wrap a raw address or Pointer as a non-owning (borrowed) Pointer.
+// Useful when a DLL returns a pointer that it owns (do NOT free it).
+export task cast(ptr) {
+    when typeOf(ptr) != "integer" and typeOf(ptr) != "number" {
+        give Pointer(ptr.ptr, false)
+    }
+    give Pointer(ptr, false)
+}
+
+// Allocate heap memory of `size` bytes (zero-initialised), return an owned Pointer.
+export task alloc(size) {
+    rawPtr = os_alloc(size)
+    when rawPtr == 0 {
+        throw FFIError("alloc: out of memory")
+    }
+    give Pointer(rawPtr)
+}
+
+// Allocate memory, write `text` as a null-terminated C string, return owned Pointer.
+// Caller must call .free() when done.
+export task c_string(text) {
+    s      = str(text)
+    rawPtr = os_alloc(len(s) + 1)
+    when rawPtr == 0 {
+        throw FFIError("c_string: out of memory")
+    }
+    os_write_string(rawPtr, 0, s)
+    give Pointer(rawPtr)
+}
+
+// Return a new borrowed Pointer advanced by n bytes from ptr.
+// ptr may be a Pointer instance or a raw integer address.
+export task offset(ptr, n) {
+    when typeOf(ptr) != "integer" and typeOf(ptr) != "number" {
+        give Pointer(ptr.ptr + n, false)
+    }
+    give Pointer(ptr + n, false)
+}

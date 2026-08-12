@@ -1,0 +1,113 @@
+// ============================================================================
+// regex — Regular expressions for EZ
+//
+//   use "regex"
+//
+//   when reTest(input, "^[0-9]+$") { ... }
+//
+//   p = Regex("(\\w+)@(\\w+)\\.com", "i")
+//   m = p.find("mail Bob@Example.com now")
+//   m.group(1)      # "Bob"
+//   m.start         # 5
+//
+// Module-level helpers keep the re* prefix so importing this package cannot
+// shadow the interpreter's own split/replace/find builtins -- a package that
+// quietly replaced `split` would break unrelated code in any file that used it.
+// ============================================================================
+
+use "errors.ez"
+use "match.ez"
+use "patterns.ez"
+use "pattern.ez"
+use "validators.ez"
+use "extract.ez"
+
+// ── One-off operations ──────────────────────────────────────────────────────
+// Each compiles the pattern on the spot. For a pattern used in a loop, build a
+// Regex once instead.
+
+// Does the pattern occur anywhere in text?
+export task reTest(text, pattern, flags="") {
+    give re_test(text, pattern, flags)
+}
+
+// Does the pattern match the whole string?
+export task reFullMatch(text, pattern, flags="") {
+    give re_full_match(text, pattern, flags)
+}
+
+// First match as a Match, or nil.
+export task reFind(text, pattern, flags="") {
+    give toMatch(re_find(text, pattern, flags, 0))
+}
+
+// Every match, as Match objects.
+export task reFindAll(text, pattern, flags="", limit=0) {
+    out_ = []
+    get raw in re_find_all(text, pattern, flags, limit) {
+        push(out_, Match(raw))
+    }
+    give out_
+}
+
+// Every match, as plain strings.
+export task reFindAllText(text, pattern, flags="", limit=0) {
+    out_ = []
+    get raw in re_find_all(text, pattern, flags, limit) {
+        push(out_, raw["text"])
+    }
+    give out_
+}
+
+// Replace every match. $1..$9 and $& are available in the replacement.
+export task reReplaceAll(text, pattern, replacement, flags="") {
+    give re_replace(text, pattern, replacement, flags, 0)
+}
+
+export task reReplaceFirst(text, pattern, replacement, flags="") {
+    give re_replace(text, pattern, replacement, flags, 1)
+}
+
+// Split on the pattern. limit > 0 caps the pieces, remainder in the last.
+export task reSplit(text, pattern, flags="", limit=0) {
+    give re_split(text, pattern, flags, limit)
+}
+
+export task reCount(text, pattern, flags="") {
+    give len(re_find_all(text, pattern, flags, 0))
+}
+
+// Text of capture group n from the first match, or nil.
+export task reCapture(text, pattern, n=1, flags="") {
+    m = reFind(text, pattern, flags)
+    when m == nil { give nil }
+    give m.group(n)
+}
+
+// Escapes regex metacharacters so a string can be matched literally.
+export task reEscape(text) {
+    give re_escape(text)
+}
+
+// Would this pattern compile? Use it before accepting a pattern from a user,
+// rather than catching the error from every call site.
+export task reIsValid(pattern) {
+    give re_valid(pattern)
+}
+
+// ── Building patterns ───────────────────────────────────────────────────────
+
+// Alternation of literal strings: reAny(["cat", "dog"]) -> "(cat|dog)".
+// Each is escaped, so punctuation in the alternatives is safe.
+export task reAny(strings) {
+    parts = []
+    get s in strings {
+        push(parts, re_escape(str(s)))
+    }
+    give "(" + join(parts, "|") + ")"
+}
+
+// A whole-word match for a literal.
+export task reWord(text) {
+    give "\\b" + re_escape(str(text)) + "\\b"
+}

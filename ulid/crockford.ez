@@ -1,0 +1,45 @@
+# ============================================================================
+# ulid/crockford.ez — Crockford base32
+#
+# The alphabet omits I, L, O and U: the first three because they are easily
+# confused with 1 and 0 when read aloud or typed, and U to avoid accidental
+# obscenities. Decoding accepts the confusable letters anyway and maps them to
+# the digit they resemble, so an ID copied by hand still works.
+# ============================================================================
+
+export ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+# Encodes `value` as exactly `width` characters, most significant first.
+# Fixed width is what makes ULIDs sort lexicographically: a shorter string
+# would compare as smaller regardless of its value.
+export task encodeBase32(value, width) {
+    body = ""
+    remaining = value
+    repeat i = 1 to width {
+        digit = remaining % 32
+        body = substr(ALPHABET, digit, 1) + body
+        remaining = (remaining - digit) / 32
+    }
+    give body
+}
+
+# Character to value, or -1. Case-insensitive, and tolerant of the letters
+# Crockford excluded.
+export task decodeChar(c) {
+    upper1 = upper(c)
+    when upper1 == "I" or upper1 == "L" { give 1 }
+    when upper1 == "O" { give 0 }
+    at = indexOf(ALPHABET, upper1)
+    give at
+}
+
+export task decodeBase32(text) {
+    total = 0
+    limit = len(text)
+    repeat i = 0 to limit - 1 {
+        value = decodeChar(substr(text, i, 1))
+        when value < 0 { throw Exception(`ulid: '{substr(text, i, 1)}' is not a valid character`) }
+        total = total * 32 + value
+    }
+    give total
+}

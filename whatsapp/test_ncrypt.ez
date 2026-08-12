@@ -1,0 +1,5 @@
+# os_* are builtins -- no import needed
+__wacrypt_ncrypt = os_load_lib("ncrypt.dll")
+_wac_NCryptOpenStorageProvider = os_get_func(__wacrypt_ncrypt, "NCryptOpenStorageProvider")
+out "Loaded ncrypt.dll: " + str(__wacrypt_ncrypt)
+

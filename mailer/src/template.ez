@@ -1,0 +1,59 @@
+// ============================================================================
+// mailer / template.ez -- HTML Template Engine
+//
+// Loads an HTML file from disk and replaces `{{ key }}` placeholders with
+// values from a dictionary. This allows transactional emails to be authored
+// as regular HTML files rather than giant inline strings.
+//
+// Usage:
+//   html = Template.render("emails/welcome.html", {
+//       "name":    "Alice",
+//       "confirm": "https://myapp.com/confirm/abc123"
+//   })
+//
+// Template syntax: {{ key }}
+//   - Spaces inside the braces are optional: {{name}} and {{ name }} both work.
+//   - Keys are case-sensitive.
+//   - Unknown keys are left as-is (not an error).
+//   - HTML is not escaped — callers are responsible for sanitizing user data
+//     before injecting it into templates.
+// ============================================================================
+use "errors.ez"
+
+export model Template {
+    // Renders a template file with the provided variables dictionary.
+    // Throws TemplateError if the file cannot be read.
+    static task render(templatePath, vars) {
+        html = ""
+        try {
+            html = readFile(templatePath)
+        } catch (e) {
+            throw TemplateError(templatePath, "File not found or unreadable.")
+        }
+
+        when len(html) == 0 {
+            throw TemplateError(templatePath, "Template file is empty.")
+        }
+
+        give Template.inject(html, vars)
+    }
+
+    // Renders a raw HTML string (not a file) with the provided variables.
+    // Useful when the template string is already in memory.
+    static task renderString(html, vars) {
+        give Template.inject(html, vars)
+    }
+
+    // Replaces all {{ key }} occurrences in `html` with values from `vars`.
+    static task inject(html, vars) {
+        result = html
+        varKeys = keys(vars)
+        get k in varKeys {
+            val = str(vars[k])
+            // Replace both "{{ key }}" and "{{key}}" forms
+            result = replace(result, "{{ " + k + " }}", val)
+            result = replace(result, "{{" + k + "}}", val)
+        }
+        give result
+    }
+}

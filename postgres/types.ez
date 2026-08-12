@@ -1,0 +1,210 @@
+# ============================================================================
+# postgres/types.ez — turning column text into EZ values
+#
+# Results come back in text format and are decoded here by the column's type
+# OID. Text format rather than binary is a deliberate choice: binary format
+# means implementing a wire decoder per type, and getting one of them subtly
+# wrong is far more likely than the parsing cost mattering.
+#
+# The one thing that must never be lost is the difference between SQL NULL and
+# an empty string. libpq reports that separately from the value, so it is
+# checked before anything here is consulted.
+# ============================================================================
+
+# The OIDs are fixed in the PostgreSQL catalog and have not changed in decades.
+OID_BOOL = 16
+OID_BYTEA = 17
+OID_CHAR = 18
+OID_INT8 = 20
+OID_INT2 = 21
+OID_INT4 = 23
+OID_TEXT = 25
+OID_JSON = 114
+OID_XML = 142
+OID_FLOAT4 = 700
+OID_FLOAT8 = 701
+OID_VARCHAR = 1043
+OID_DATE = 1082
+OID_TIME = 1083
+OID_TIMESTAMP = 1114
+OID_TIMESTAMPTZ = 1184
+OID_NUMERIC = 1700
+OID_UUID = 2950
+OID_JSONB = 3802
+
+# Array OIDs, decoded element by element.
+ARRAY_OIDS = {
+    "1000": 16, "1001": 17, "1005": 21, "1007": 23, "1016": 20,
+    "1009": 25, "1015": 1043, "1021": 700, "1022": 701, "1231": 1700,
+    "1182": 1082, "1115": 1114, "1185": 1184, "2951": 2950, "199": 114, "3807": 3802
+}
+
+export task isArrayOid(oid) { give has_key(ARRAY_OIDS, str(oid)) }
+
+# A column value into an EZ value. `text` is what libpq gave us; NULL is
+# handled by the caller, because only libpq can tell it from "".
+export task decode(text, oid) {
+    when oid == OID_BOOL { give text == "t" }
+    when oid == OID_INT2 or oid == OID_INT4 or oid == OID_INT8 { give num(text) }
+    when oid == OID_FLOAT4 or oid == OID_FLOAT8 { give num(text) }
+    # NUMERIC is left as a string on purpose. It is the type people choose for
+    # money precisely because it is exact, and turning it into a float here
+    # would throw that away silently. Use `decimal` on it, or num() if you
+    # genuinely want a float.
+    when oid == OID_NUMERIC { give text }
+    when oid == OID_JSON or oid == OID_JSONB {
+        try { give parse_json(text) }
+        catch (e) { give text }
+    }
+    when oid == OID_BYTEA { give decodeBytea(text) }
+    when isArrayOid(oid) { give decodeArray(text, ARRAY_OIDS[str(oid)]) }
+    give text
+}
+
+# bytea arrives as "\x00ff10" in text format, which decodes to exact bytes --
+# no encoding in the path to corrupt them.
+export task decodeBytea(text) {
+    body = str(text)
+    when startsWith(body, "\\x") { body = substr(body, 2, len(body) - 2) }
+    octets = []
+    index = 0
+    while index + 1 < len(body) {
+        high = indexOf("0123456789abcdef", lower(substr(body, index, 1)))
+        low = indexOf("0123456789abcdef", lower(substr(body, index + 1, 1)))
+        when high < 0 or low < 0 { give octets }
+        push(octets, high * 16 + low)
+        index = index + 2
+    }
+    give octets
+}
+
+# Bytes back into the literal libpq accepts for a bytea parameter.
+export task encodeBytea(octets) {
+    digits = "0123456789abcdef"
+    body = "\\x"
+    get b in octets {
+        value = floor(b) % 256
+        body = body + substr(digits, floor(value / 16), 1) + substr(digits, value % 16, 1)
+    }
+    give body
+}
+
+# Postgres writes an array as {a,b,c}, quoting any element that contains a
+# comma, a brace, a quote or a backslash -- so this cannot just split on commas.
+export task decodeArray(text, elementOid) {
+    body = trim(str(text))
+    when body == "" or body == "{}" { give [] }
+    when startsWith(body, "{") { body = substr(body, 1, len(body) - 2) }
+
+    items = []
+    quotedFlags = []
+    current = ""
+    quoted = false
+    everQuoted = false
+    escaped = false
+    index = 0
+    depth = 0
+    while index < len(body) {
+        ch = substr(body, index, 1)
+        when escaped {
+            current = current + ch
+            escaped = false
+        }
+        other when ch == "\\" { escaped = true }
+        other when ch == "\"" {
+            quoted = quoted == false
+            everQuoted = true
+        }
+        other when quoted == false and ch == "{" {
+            depth = depth + 1
+            current = current + ch
+        }
+        other when quoted == false and ch == "}" {
+            depth = depth - 1
+            current = current + ch
+        }
+        other when quoted == false and depth == 0 and ch == "," {
+            push(items, current)
+            push(quotedFlags, everQuoted)
+            current = ""
+            everQuoted = false
+        }
+        other { current = current + ch }
+        index = index + 1
+    }
+    push(items, current)
+    push(quotedFlags, everQuoted)
+
+    decoded = []
+    position = 0
+    get item in items {
+        # Only an UNQUOTED NULL is the SQL null. The quoted string "NULL" is a
+        # four-character piece of text, and collapsing the two would silently
+        # turn real data into nothing.
+        when item == "NULL" and quotedFlags[position] == false { push(decoded, nil) }
+        other { push(decoded, decode(item, elementOid)) }
+        position = position + 1
+    }
+    give decoded
+}
+
+# An EZ value into the text libpq will send.
+#
+# Booleans must go as t/f, and a list must go as {…} -- str() on either would
+# produce something Postgres rejects or, worse, misreads.
+export task encode(value) {
+    when value == nil { give nil }
+    kind = type(value)
+    when kind == "bool" {
+        when value { give "t" }
+        give "f"
+    }
+    when kind == "array" { give encodeArray(value) }
+    when kind == "dictionary" { give to_json(value) }
+    give str(value)
+}
+
+export task encodeArray(items) {
+    parts = []
+    get item in items {
+        when item == nil { push(parts, "NULL") }
+        other when type(item) == "array" { push(parts, encodeArray(item)) }
+        other {
+            body = str(encode(item))
+            # Quote anything that would otherwise change the shape of the
+            # literal, and escape what is inside the quotes.
+            needsQuotes = body == "" or contains(body, ",") or contains(body, "{") or
+                          contains(body, "}") or contains(body, "\"") or
+                          contains(body, "\\") or contains(body, " ") or upper(body) == "NULL"
+            when needsQuotes {
+                escapedBody = replace(body, "\\", "\\\\")
+                escapedBody = replace(escapedBody, "\"", "\\\"")
+                push(parts, "\"" + escapedBody + "\"")
+            }
+            other { push(parts, body) }
+        }
+    }
+    give "{" + join(parts, ",") + "}"
+}
+
+export task typeName(oid) {
+    when oid == OID_BOOL { give "bool" }
+    when oid == OID_INT2 { give "smallint" }
+    when oid == OID_INT4 { give "integer" }
+    when oid == OID_INT8 { give "bigint" }
+    when oid == OID_FLOAT4 { give "real" }
+    when oid == OID_FLOAT8 { give "double precision" }
+    when oid == OID_NUMERIC { give "numeric" }
+    when oid == OID_TEXT { give "text" }
+    when oid == OID_VARCHAR { give "varchar" }
+    when oid == OID_BYTEA { give "bytea" }
+    when oid == OID_JSON { give "json" }
+    when oid == OID_JSONB { give "jsonb" }
+    when oid == OID_UUID { give "uuid" }
+    when oid == OID_DATE { give "date" }
+    when oid == OID_TIME { give "time" }
+    when oid == OID_TIMESTAMP { give "timestamp" }
+    when oid == OID_TIMESTAMPTZ { give "timestamptz" }
+    when isArrayOid(oid) { give typeName(ARRAY_OIDS[str(oid)]) + "[]" }
+    give "oid " + str(oid)
+}

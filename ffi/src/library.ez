@@ -1,0 +1,62 @@
+// ============================================================================
+// src/library.ez — DLL handle with function resolution and caching.
+//
+// Library caches resolved Function instances so that argtypes/restype
+// annotations set on a returned Function persist across calls:
+//
+//   lib = ffi.load("User32.dll")
+//   lib.func("MessageBoxA").argtypes = [c_void_p, c_char_p, c_char_p, c_uint32]
+//   lib.func("MessageBoxA").restype  = c_int
+//   lib.func("MessageBoxA")(0, "Hello", "EZ FFI", 0)   // __call__ path
+//
+// The second and third `lib.func("MessageBoxA")` calls return the same instance
+// because it was already cached on the first call.
+// ============================================================================
+
+use "errors.ez"
+use "function.ez"
+
+export model Library {
+    handle: any   // raw HMODULE (integer)
+    _cache: any   // dict: symbol name -> Function instance
+
+    init(handle) {
+        self.handle = handle
+        self._cache = {}
+        give self
+    }
+
+    // Resolve a named export from the DLL.
+    //
+    //   fn = lib.func("MessageBoxA")
+    //   fn = lib.func("sqrt", c_double, [c_double])   // with type hints
+    //
+    // restype  — return type descriptor or bare string (optional)
+    // argtypes — array of type descriptors (optional)
+    task func(name, restype = nil, argtypes = nil) {
+        nameStr = str(name)
+
+        // Return cached instance so type annotations persist between calls
+        when has_key(self._cache, nameStr) {
+            fn = self._cache[nameStr]
+            // Update type hints if the caller provided new ones
+            when restype  { fn.restype  = restype  }
+            when argtypes { fn.argtypes = argtypes }
+            give fn
+        }
+
+        rawPtr = os_get_func(self.handle, nameStr)
+        when rawPtr == 0 {
+            throw FFIError("Symbol '" + nameStr + "' not found in DLL")
+        }
+
+        fn = Function(rawPtr, restype, argtypes, self)
+        self._cache[nameStr] = fn
+        give fn
+    }
+
+    // Shorthand: lib.get("MessageBoxA") === lib.func("MessageBoxA")
+    task get(name) {
+        give self.func(name)
+    }
+}

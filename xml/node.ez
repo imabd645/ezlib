@@ -1,0 +1,240 @@
+# ============================================================================
+# xml/node.ez — the element tree
+#
+# Children keep document order, and text is stored as a node rather than a
+# field on the parent. That costs a little convenience but keeps mixed content
+# ("<p>a <b>b</b> c</p>") intact -- flattening text onto the parent would
+# silently reorder it.
+# ============================================================================
+
+export TEXT_TAG = "#text"
+
+export task xmlAllDigits(s) {
+    when len(s) == 0 { give false }
+    limit = len(s)
+    repeat i = 0 to limit - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+task xmlHexToInt(hex) {
+    when len(hex) == 0 { give -1 }
+    total = 0
+    limit = len(hex)
+    repeat i = 0 to limit - 1 {
+        code = ord(upper(substr(hex, i, 1)))
+        digit = -1
+        when code >= 48 and code <= 57 { digit = code - 48 }
+        when code >= 65 and code <= 70 { digit = code - 55 }
+        when digit < 0 { give -1 }
+        total = total * 16 + digit
+    }
+    give total
+}
+
+# XML's five predefined entities plus numeric character references.
+export task xmlDecodeEntities(s) {
+    when contains(s, "&") == false { give s }
+    body = s
+    total = len(body)
+    result = ""
+    i = 0
+    while i < total {
+        c = substr(body, i, 1)
+        when c != "&" { result = result + c  i = i + 1  skip }
+
+        # Find the terminating ';' within a plausible distance; a bare '&' in
+        # otherwise valid text is common enough that it should pass through
+        # rather than derail the parse.
+        semi = -1
+        limit = i + 12
+        when limit > total { limit = total }
+        repeat j = i + 1 to limit - 1 {
+            when substr(body, j, 1) == ";" { semi = j  escape }
+        }
+        when semi < 0 { result = result + c  i = i + 1  skip }
+
+        name = substr(body, i + 1, semi - i - 1)
+        decoded = nil
+        when name == "lt" { decoded = "<" }
+        when name == "gt" { decoded = ">" }
+        when name == "amp" { decoded = "&" }
+        when name == "quot" { decoded = `"` }
+        when name == "apos" { decoded = "'" }
+        when startsWith(name, "#") {
+            digits = substr(name, 1, len(name) - 1)
+            when startsWith(digits, "x") or startsWith(digits, "X") {
+                hexPart = substr(digits, 1, len(digits) - 1)
+                code = xmlHexToInt(hexPart)
+                when code >= 0 { decoded = chr(code) }
+            }
+            other {
+                when xmlAllDigits(digits) { decoded = chr(num(digits)) }
+            }
+        }
+        when decoded == nil { result = result + c  i = i + 1  skip }
+        result = result + decoded
+        i = semi + 1
+    }
+    give result
+}
+
+# Escaping for serialisation. `&` first, or the entities added afterwards
+# would themselves be escaped.
+export task xmlEscape(s) {
+    body = replace(str(s), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    give body
+}
+
+export task xmlEscapeAttr(s) {
+    give replace(xmlEscape(s), `"`, "&quot;")
+}
+
+export model Element {
+
+    init(tag) {
+        self.tag = tag
+        self.attrs = {}
+        self.kids = []
+        self.text = ""
+    }
+
+    task isText() { give self.tag == TEXT_TAG }
+
+    # ── access ──────────────────────────────────────────────────────────────
+
+    # An attribute, or `fallback` when absent.
+    task attr(name, fallback) {
+        when has_key(self.attrs, name) { give self.attrs[name] }
+        give fallback
+    }
+
+    task hasAttr(name) { give has_key(self.attrs, name) }
+
+    # Direct children that are elements, in document order.
+    task elements() {
+        found = []
+        get kid in self.kids {
+            when kid.isText() == false { push(found, kid) }
+        }
+        give found
+    }
+
+    # First direct child with this tag, or nil.
+    task child(tag) {
+        get kid in self.kids {
+            when kid.isText() == false and kid.tag == tag { give kid }
+        }
+        give nil
+    }
+
+    # All direct children with this tag.
+    task childrenNamed(tag) {
+        found = []
+        get kid in self.kids {
+            when kid.isText() == false and kid.tag == tag { push(found, kid) }
+        }
+        give found
+    }
+
+    # First descendant with this tag, searched depth-first, or nil.
+    task find(tag) {
+        get kid in self.kids {
+            when kid.isText() { skip }
+            when kid.tag == tag { give kid }
+            deeper = kid.find(tag)
+            when deeper != nil { give deeper }
+        }
+        give nil
+    }
+
+    # Every descendant with this tag, in document order.
+    task findAll(tag) {
+        found = []
+        self.collect(tag, found)
+        give found
+    }
+
+    task collect(tag, found) {
+        get kid in self.kids {
+            when kid.isText() { skip }
+            when kid.tag == tag { push(found, kid) }
+            kid.collect(tag, found)
+        }
+        give nil
+    }
+
+    # All text in this subtree, concatenated. This is what you want for
+    # <name>Ali</name>; for mixed content it flattens, which is the usual
+    # intent when asking for "the text".
+    task textContent() {
+        when self.isText() { give self.text }
+        parts = []
+        get kid in self.kids { push(parts, kid.textContent()) }
+        give join(parts, "")
+    }
+
+    # Trimmed textContent, for the common case of reading a leaf value.
+    task value() { give trim(self.textContent()) }
+
+    # ── building ────────────────────────────────────────────────────────────
+
+    task add(childNode) {
+        push(self.kids, childNode)
+        give self
+    }
+
+    task set(name, attrValue) {
+        self.attrs[name] = str(attrValue)
+        give self
+    }
+
+    task addText(content) {
+        node = Element(TEXT_TAG)
+        node.text = str(content)
+        push(self.kids, node)
+        give self
+    }
+
+    # ── serialisation ───────────────────────────────────────────────────────
+
+    task toXml() { give self.serialize(-1, 0) }
+
+    # `indentWidth` of -1 emits no whitespace, which is what round-tripping
+    # needs: adding indentation would insert text nodes that were not there.
+    task serialize(indentWidth, depth) {
+        when self.isText() { give xmlEscape(self.text) }
+
+        pad = ""
+        lineEnd = ""
+        when indentWidth >= 0 {
+            repeat i = 1 to depth * indentWidth { pad = pad + " " }
+            lineEnd = chr(10)
+        }
+
+        head = pad + "<" + self.tag
+        get name in keys(self.attrs) {
+            head = head + " " + name + `="` + xmlEscapeAttr(self.attrs[name]) + `"`
+        }
+        when len(self.kids) == 0 { give head + "/>" + lineEnd }
+
+        body = ""
+        onlyText = true
+        get kid in self.kids {
+            when kid.isText() == false { onlyText = false }
+        }
+        when onlyText or indentWidth < 0 {
+            get kid in self.kids { body = body + kid.serialize(-1, 0) }
+            give head + ">" + body + "</" + self.tag + ">" + lineEnd
+        }
+        get kid in self.kids {
+            when kid.isText() and trim(kid.text) == "" { skip }
+            body = body + kid.serialize(indentWidth, depth + 1)
+        }
+        give head + ">" + lineEnd + body + pad + "</" + self.tag + ">" + lineEnd
+    }
+}

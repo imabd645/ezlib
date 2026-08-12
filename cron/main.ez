@@ -1,0 +1,484 @@
+# ============================================================================
+# cron — recurring schedules for EZ
+#
+#   use "cron"
+#
+#   schedule = Cron("0 3 * * *")               # 03:00 every day
+#   schedule.next()                            # the next unix timestamp
+#
+#   jobs = Scheduler()
+#   jobs.add("nightly-report", "0 3 * * *", || sendReport())
+#   jobs.add("heartbeat", "@every 30s", || ping())
+#   jobs.run()
+#
+# `queue` runs a job once, possibly after a delay. This is the other thing
+# every service needs: something that happens again, on a calendar.
+#
+# `taskschd` drives the Windows Task Scheduler, which is a different tool for a
+# different job -- it schedules processes, from outside, and needs the machine
+# configured. This runs inside your program and needs nothing.
+# ============================================================================
+
+use "cron/parse.ez"
+use "cron/time.ez"
+
+# next() searches forward a day at a time, so it needs a limit or an expression
+# that can never match would loop forever.
+#
+# Ten years, not four: the longest real gap between occurrences is February
+# 29th across a skipped century -- 2096 to 2104 is eight years, because 2100 is
+# not a leap year. A four-year limit looks generous and is wrong exactly there.
+SEARCH_LIMIT_DAYS = 3700
+
+DAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+MONTH_LABELS = ["January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"]
+
+
+export model Cron {
+
+    init(expression) {
+        self.spec = parseExpression(expression)
+        self.expression = self.spec["expression"]
+        self.offsetMinutes = 0
+    }
+
+    # Interpret the expression in a fixed offset from UTC rather than in UTC.
+    # Minutes, so India (+330) and Nepal (+345) work.
+    task withOffset(minutes) {
+        self.offsetMinutes = minutes
+        give self
+    }
+
+    task isInterval() { give self.spec["everySeconds"] != nil }
+
+    # ── the next occurrence ─────────────────────────────────────────────────
+
+    # The next unix timestamp strictly after `from`, or after now.
+    task next() { give self.nextAfter(nowSeconds()) }
+
+    task nextAfter(from) {
+        when self.isInterval() { give floor(from) + self.spec["everySeconds"] }
+
+        shift = self.offsetMinutes * 60
+        cursor = floor(from) + shift + 1
+        parts = breakDown(cursor)
+        days = parts["days"]
+
+        searched = 0
+        while searched < SEARCH_LIMIT_DAYS {
+            when self.dayMatches(days) {
+                # Only the first day is constrained by the time of day; every
+                # later candidate starts at midnight.
+                found = nil
+                when searched == 0 {
+                    found = self.timeOnOrAfter(days, parts["hour"], parts["minute"], parts["second"])
+                }
+                other { found = self.timeOnOrAfter(days, 0, 0, 0) }
+                when found != nil { give found - shift }
+            }
+            days = days + 1
+            searched = searched + 1
+        }
+        throw Exception(`cron: '{self.expression}' has no occurrence within ten years -- check the day and month fields`)
+    }
+
+    # The next `count` occurrences, for showing a user what a schedule means.
+    task nextRuns(count) { give self.nextRunsAfter(count, nowSeconds()) }
+
+    task nextRunsAfter(count, from) {
+        runs = []
+        cursor = floor(from)
+        repeat i = 1 to count {
+            cursor = self.nextAfter(cursor)
+            push(runs, cursor)
+        }
+        give runs
+    }
+
+    # Does this exact second match? An interval expression has no calendar to
+    # match against, so it never does.
+    task matches(epochSeconds) {
+        when self.isInterval() { give false }
+        moment = floor(epochSeconds) + (self.offsetMinutes * 60)
+        parts = breakDown(moment)
+        when self.dayMatches(parts["days"]) == false { give false }
+        when inList(self.spec["hours"], parts["hour"]) == false { give false }
+        when inList(self.spec["minutes"], parts["minute"]) == false { give false }
+        give inList(self.spec["seconds"], parts["second"])
+    }
+
+    task secondsUntilNext() { give self.next() - nowSeconds() }
+
+    # ── matching ────────────────────────────────────────────────────────────
+
+    # The day-of-month / day-of-week rule is the one thing about cron that
+    # surprises everybody: when BOTH are restricted the day matches if EITHER
+    # does, not both. "0 0 1 * MON" is the first of the month AND every Monday.
+    # It is in POSIX, every crontab behaves this way, and changing it here
+    # would silently reschedule anyone's existing expression.
+    task dayMatches(days) {
+        date = civilFromDays(days)
+        when inList(self.spec["months"], date["month"]) == false { give false }
+
+        domOk = inList(self.spec["dom"], date["day"])
+        dowOk = inList(self.spec["dow"], weekdayFromDays(days))
+
+        when self.spec["domRestricted"] and self.spec["dowRestricted"] {
+            give domOk or dowOk
+        }
+        give domOk and dowOk
+    }
+
+    # The first permitted time on this day at or after the given clock
+    # position, as a timestamp. nil if the day is already past all of them.
+    task timeOnOrAfter(days, fromHour, fromMinute, fromSecond) {
+        base = startOfDay(days)
+        get hour in self.spec["hours"] {
+            when hour >= fromHour {
+                minuteFloor = 0
+                when hour == fromHour { minuteFloor = fromMinute }
+                get minute in self.spec["minutes"] {
+                    when minute >= minuteFloor {
+                        secondFloor = 0
+                        when hour == fromHour and minute == fromMinute { secondFloor = fromSecond }
+                        get second in self.spec["seconds"] {
+                            when second >= secondFloor {
+                                give base + hour * 3600 + minute * 60 + second
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        give nil
+    }
+
+    # ── description ─────────────────────────────────────────────────────────
+
+    # Plain English for the shapes people actually write, and an honest
+    # field-by-field summary for anything else. A schedule you cannot read is
+    # a schedule you cannot review.
+    task describe() {
+        when self.isInterval() { give `every {describeDuration(self.spec["everySeconds"])}` }
+        f = self.spec["fields"]
+        timePart = self.describeTime(f)
+        datePart = self.describeDate(f)
+        when datePart == "" { give timePart }
+        # "every 15 minutes every day" says the same thing twice.
+        when datePart == "every day" and startsWith(timePart, "every") { give timePart }
+        give timePart + " " + datePart
+    }
+
+    task describeTime(f) {
+        seconds = self.spec["seconds"]
+        minutes = self.spec["minutes"]
+        hours = self.spec["hours"]
+        when len(seconds) > 1 and len(minutes) > 1 and len(hours) > 1 {
+            give "every " + describeDuration(strideOf(seconds, 0, 59))
+        }
+        when len(seconds) == 1 and len(minutes) > 1 and len(hours) > 1 {
+            give "every " + describeDuration(strideOf(minutes, 0, 59) * 60)
+        }
+        when len(seconds) == 1 and len(minutes) == 1 and len(hours) > 1 {
+            give `every hour at {pad2(minutes[0])} past`
+        }
+        when len(seconds) == 1 and len(minutes) == 1 and len(hours) == 1 {
+            give `at {pad2(hours[0])}:{pad2(minutes[0])}`
+        }
+        times = []
+        get hour in hours {
+            get minute in minutes { push(times, `{pad2(hour)}:{pad2(minute)}`) }
+        }
+        when len(times) <= 4 { give "at " + join(times, ", ") }
+        give `at {len(times)} times a day`
+    }
+
+    task describeDate(f) {
+        everyDay = self.spec["domRestricted"] == false and self.spec["dowRestricted"] == false
+        allMonths = len(self.spec["months"]) == 12
+        when everyDay and allMonths { give "every day" }
+
+        pieces = []
+        when self.spec["dowRestricted"] {
+            names = []
+            get d in self.spec["dow"] { push(names, DAY_LABELS[d]) }
+            push(pieces, "on " + join(names, ", "))
+        }
+        when self.spec["domRestricted"] {
+            days = []
+            get d in self.spec["dom"] { push(days, ordinal(d)) }
+            when len(days) <= 4 { push(pieces, "on the " + join(days, ", ")) }
+            other { push(pieces, `on {len(days)} days of the month`) }
+        }
+        when allMonths == false {
+            names = []
+            get m in self.spec["months"] { push(names, MONTH_LABELS[m - 1]) }
+            push(pieces, "in " + join(names, ", "))
+        }
+        when len(pieces) == 0 { give "every day" }
+        give join(pieces, " ")
+    }
+
+    task toString() { give `Cron({self.expression})` }
+}
+
+task ordinal(n) {
+    suffix = "th"
+    when n % 100 < 11 or n % 100 > 13 {
+        when n % 10 == 1 { suffix = "st" }
+        other when n % 10 == 2 { suffix = "nd" }
+        other when n % 10 == 3 { suffix = "rd" }
+    }
+    give str(n) + suffix
+}
+
+task describeDuration(seconds) {
+    when seconds % 86400 == 0 and seconds >= 86400 { give plural(seconds / 86400, "day") }
+    when seconds % 3600 == 0 and seconds >= 3600 { give plural(seconds / 3600, "hour") }
+    when seconds % 60 == 0 and seconds >= 60 { give plural(seconds / 60, "minute") }
+    give plural(seconds, "second")
+}
+
+task plural(count, noun) {
+    whole = floor(count)
+    when whole == 1 { give noun }
+    give `{whole} {noun}s`
+}
+
+# The gap between permitted values when they are evenly spaced from the start
+# of the range, which is what `*/n` produces. 1 for anything irregular, so the
+# caller falls back to describing it a different way.
+task strideOf(permitted, low, high) {
+    when len(permitted) < 2 { give 1 }
+    when permitted[0] != low { give 1 }
+    gap = permitted[1] - permitted[0]
+    repeat i = 1 to len(permitted) - 1 {
+        when permitted[i] - permitted[i - 1] != gap { give 1 }
+    }
+    give gap
+}
+
+task inList(permitted, target) {
+    get v in permitted {
+        when v == target { give true }
+    }
+    give false
+}
+
+# ============================================================================
+# Scheduler — the loop that actually runs things
+# ============================================================================
+
+export model Scheduler {
+
+    init() {
+        self.jobs = []
+        self.running = false
+        self.onError = nil
+        self.catchUp = false
+    }
+
+    # `action` takes no arguments. The name is what appears in errors and in
+    # `list()`, so make it something you would want to read in a log.
+    task add(name, expression, action) {
+        when name == nil or name == "" { throw Exception("cron: a job needs a name") }
+        get existing in self.jobs {
+            when existing["name"] == name {
+                throw Exception(`cron: there is already a job named '{name}'`)
+            }
+        }
+        schedule = Cron(expression)
+        push(self.jobs, {
+            "name": name,
+            "schedule": schedule,
+            "action": action,
+            "nextRun": schedule.nextAfter(nowSeconds()),
+            "lastRun": nil,
+            "runs": 0,
+            "failures": 0,
+            "lastError": nil,
+            "enabled": true
+        })
+        give self
+    }
+
+    task remove(name) {
+        kept = []
+        removed = false
+        get job in self.jobs {
+            when job["name"] == name { removed = true }
+            other { push(kept, job) }
+        }
+        self.jobs = kept
+        give removed
+    }
+
+    task enable(name) { give self.setEnabled(name, true) }
+    task disable(name) { give self.setEnabled(name, false) }
+
+    task setEnabled(name, state) {
+        get job in self.jobs {
+            when job["name"] == name {
+                job["enabled"] = state
+                # A job re-enabled after a long pause should not fire for every
+                # occurrence it slept through.
+                when state { job["nextRun"] = job["schedule"].nextAfter(nowSeconds()) }
+                give true
+            }
+        }
+        give false
+    }
+
+    task job(name) {
+        get candidate in self.jobs {
+            when candidate["name"] == name { give candidate }
+        }
+        give nil
+    }
+
+    task list() {
+        rows = []
+        get job in self.jobs {
+            push(rows, {
+                "name": job["name"],
+                "expression": job["schedule"].expression,
+                "describes": job["schedule"].describe(),
+                "nextRun": job["nextRun"],
+                "nextRunAt": formatTime(job["nextRun"]),
+                "lastRun": job["lastRun"],
+                "runs": job["runs"],
+                "failures": job["failures"],
+                "enabled": job["enabled"]
+            })
+        }
+        give rows
+    }
+
+    # Run whatever is due at `now` and return how many fired. This is the whole
+    # scheduler: call it from your own loop if you have one.
+    task tick(now = nil) {
+        moment = now
+        when moment == nil { moment = nowSeconds() }
+        fired = 0
+        get job in self.jobs {
+            when job["enabled"] and job["nextRun"] <= moment {
+                self.fire(job, moment)
+                fired = fired + 1
+            }
+        }
+        give fired
+    }
+
+    # A job that threw must not stop the scheduler, and must not be retried
+    # immediately -- it is rescheduled like any other, and the failure is
+    # recorded where `list()` will show it.
+    task fire(job, moment) {
+        job["lastRun"] = moment
+        job["runs"] = job["runs"] + 1
+        try {
+            action = job["action"]
+            action()
+        }
+        catch (e) {
+            job["failures"] = job["failures"] + 1
+            job["lastError"] = e
+            when self.onError != nil {
+                handler = self.onError
+                handler(job["name"], e)
+            }
+        }
+        # Scheduled from the moment it was due, not from now, so a slow job
+        # does not drift its own schedule later and later.
+        job["nextRun"] = job["schedule"].nextAfter(moment)
+        # Unless it ran so long that it missed occurrences: without this, a job
+        # that overran by an hour would then fire once per minute catching up.
+        when self.catchUp == false {
+            current = nowSeconds()
+            when job["nextRun"] <= current {
+                job["nextRun"] = job["schedule"].nextAfter(current)
+            }
+        }
+        give nil
+    }
+
+    task onFailure(handler) {
+        self.onError = handler
+        give self
+    }
+
+    # How long until something is due. The loop sleeps on this rather than
+    # waking every second to find nothing to do.
+    task secondsUntilNext() {
+        soonest = nil
+        get job in self.jobs {
+            when job["enabled"] {
+                when soonest == nil or job["nextRun"] < soonest { soonest = job["nextRun"] }
+            }
+        }
+        when soonest == nil { give nil }
+        left = soonest - nowSeconds()
+        when left < 0 { give 0 }
+        give left
+    }
+
+    # Block and run jobs until `stopAfterSeconds` has passed, or forever if it
+    # is nil. Returns how many jobs fired.
+    task run() { give self.runFor(nil) }
+
+    task runFor(stopAfterSeconds) {
+        when len(self.jobs) == 0 { throw Exception("cron: the scheduler has no jobs") }
+        self.running = true
+        started = nowSeconds()
+        fired = 0
+        while self.running {
+            fired = fired + self.tick(nowSeconds())
+            when stopAfterSeconds != nil and nowSeconds() - started >= stopAfterSeconds {
+                self.running = false
+                give fired
+            }
+            sleepSeconds(self.sleepFor(stopAfterSeconds, started))
+        }
+        give fired
+    }
+
+    # Never sleep past the end of a bounded run, and never sleep more than a
+    # second at a time so `stop()` from a job takes effect promptly.
+    task sleepFor(stopAfterSeconds, started) {
+        pause = self.secondsUntilNext()
+        when pause == nil or pause > 1 { pause = 1 }
+        when pause < 0.05 { pause = 0.05 }
+        when stopAfterSeconds != nil {
+            left = stopAfterSeconds - (nowSeconds() - started)
+            when left < pause { pause = left }
+            when pause < 0 { pause = 0 }
+        }
+        give pause
+    }
+
+    task stop() {
+        self.running = false
+        give nil
+    }
+}
+
+task sleepSeconds(seconds) {
+    when seconds <= 0 { give nil }
+    until = clock() + (seconds * 1000)
+    while clock() < until { }
+    give nil
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task parse(expression) { give Cron(expression) }
+export task nextRun(expression) { give Cron(expression).next() }
+export task describe(expression) { give Cron(expression).describe() }
+
+export task isValid(expression) {
+    try {
+        Cron(expression)
+        give true
+    }
+    catch (e) { give false }
+}

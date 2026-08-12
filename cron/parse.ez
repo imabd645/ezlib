@@ -1,0 +1,247 @@
+# ============================================================================
+# cron/parse.ez — turning an expression into sets of allowed values
+#
+# Each field becomes a sorted list of the values it permits. Building the list
+# once at parse time is what makes `next()` a search over a handful of
+# candidates rather than a scan over every second until one matches.
+#
+# Supported: * ? , - / , names (JAN, MON), step ranges, and the @macros.
+# ============================================================================
+
+MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun",
+               "jul", "aug", "sep", "oct", "nov", "dec"]
+DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+
+export MACROS = {
+    "@yearly": "0 0 0 1 1 *",
+    "@annually": "0 0 0 1 1 *",
+    "@monthly": "0 0 0 1 * *",
+    "@weekly": "0 0 0 * * 0",
+    "@daily": "0 0 0 * * *",
+    "@midnight": "0 0 0 * * *",
+    "@hourly": "0 0 * * * *",
+    "@minutely": "0 * * * * *",
+    "@secondly": "* * * * * *"
+}
+
+# Splits on runs of whitespace. A copy-pasted crontab line often has tabs or
+# doubled spaces, and rejecting those would be a pointless failure.
+export task splitFields(text) {
+    fields = []
+    current = ""
+    get ch in split(str(text), "") {
+        when ch == " " or ch == "\t" {
+            when current != "" { push(fields, current) }
+            current = ""
+        }
+        other { current = current + ch }
+    }
+    when current != "" { push(fields, current) }
+    give fields
+}
+
+# Returns { seconds, minutes, hours, dom, months, dow, domRestricted,
+#           dowRestricted, expression, fields }
+export task parseExpression(text) {
+    when text == nil { throw Exception("cron: no expression given") }
+    raw = trim(str(text))
+    when raw == "" { throw Exception("cron: the expression is empty") }
+
+    source = raw
+    when startsWith(raw, "@") {
+        key = lower(raw)
+        when has_key(MACROS, key) { source = MACROS[key] }
+        other when startsWith(key, "@every ") { give parseEvery(raw, substr(raw, 7, len(raw) - 7)) }
+        other {
+            throw Exception(`cron: unknown macro '{raw}' -- try {join(sort(keys(MACROS)), ", ")} or '@every 5m'`)
+        }
+    }
+
+    fields = splitFields(source)
+    # Five fields is the classic crontab line; six adds seconds on the front,
+    # which is what most schedulers written since do.
+    when len(fields) == 5 { insert(fields, 0, "0") }
+    when len(fields) != 6 {
+        throw Exception(`cron: expected 5 or 6 fields, got {len(fields)} in '{raw}'`)
+    }
+
+    dom = fields[3]
+    dow = fields[5]
+    give {
+        "expression": raw,
+        "fields": fields,
+        "seconds": parseField(fields[0], 0, 59, nil, "second"),
+        "minutes": parseField(fields[1], 0, 59, nil, "minute"),
+        "hours": parseField(fields[2], 0, 23, nil, "hour"),
+        "dom": parseField(dom, 1, 31, nil, "day of month"),
+        "months": parseField(fields[4], 1, 12, MONTH_NAMES, "month"),
+        "dow": parseField(dow, 0, 6, DAY_NAMES, "day of week"),
+        "domRestricted": isRestricted(dom),
+        "dowRestricted": isRestricted(dow),
+        "everySeconds": nil
+    }
+}
+
+# `@every 30s`, `@every 5m`, `@every 2h`. Not a cron expression at all -- a
+# fixed interval from the last run -- so it is kept as one and handled
+# separately by next().
+task parseEvery(raw, spec) {
+    body = trim(lower(spec))
+    when body == "" { throw Exception(`cron: '{raw}' needs an interval, for example '@every 5m'`) }
+    unit = substr(body, len(body) - 1, 1)
+    digits = substr(body, 0, len(body) - 1)
+    multiplier = 1
+    when unit == "s" { multiplier = 1 }
+    other when unit == "m" { multiplier = 60 }
+    other when unit == "h" { multiplier = 3600 }
+    other when unit == "d" { multiplier = 86400 }
+    other {
+        digits = body
+        multiplier = 1
+    }
+    amount = num(digits)
+    when amount == nil or str(amount) == "nan" or amount <= 0 {
+        throw Exception(`cron: '{raw}' is not a valid interval -- try '@every 30s', '@every 5m', '@every 2h'`)
+    }
+    give {
+        "expression": raw,
+        "fields": [],
+        "seconds": [], "minutes": [], "hours": [], "dom": [], "months": [], "dow": [],
+        "domRestricted": false, "dowRestricted": false,
+        "everySeconds": floor(amount * multiplier)
+    }
+}
+
+task isRestricted(field) { give field != "*" and field != "?" }
+
+# One field into a sorted list of permitted values. `names` gives the
+# three-letter aliases where the field has them.
+export task parseField(field, low, high, names, label) {
+    body = trim(str(field))
+    when body == "" { throw Exception(`cron: the {label} field is empty`) }
+    # `?` means "no opinion" and appears in the day fields of Quartz-style
+    # expressions. Treated as `*`, which is what it means in practice.
+    when body == "?" { body = "*" }
+
+    allowed = {}
+    get piece in split(body, ",") {
+        addPiece(allowed, trim(piece), low, high, names, label)
+    }
+
+    permitted = []
+    repeat v = low to high {
+        when has_key(allowed, str(v)) { push(permitted, v) }
+    }
+    when len(permitted) == 0 {
+        throw Exception(`cron: the {label} field '{field}' permits no values`)
+    }
+    give permitted
+}
+
+task addPiece(allowed, piece, low, high, names, label) {
+    when piece == "" { throw Exception(`cron: the {label} field has an empty entry`) }
+
+    stride = 1
+    body = piece
+    when contains(piece, "/") {
+        halves = split(piece, "/")
+        when len(halves) != 2 {
+            throw Exception(`cron: '{piece}' in the {label} field has more than one /`)
+        }
+        body = trim(halves[0])
+        stride = fieldNumber(trim(halves[1]), nil, label, piece)
+        when stride < 1 {
+            throw Exception(`cron: a step of {stride} in the {label} field would never advance`)
+        }
+        # `*/5` and `0/5` mean the same thing; a bare `5/2` means from 5 on.
+        when body == "*" or body == "" { body = str(low) + "-" + str(high) }
+        other when contains(body, "-") == false {
+            body = body + "-" + str(high)
+        }
+    }
+
+    first = low
+    last = high
+    when body != "*" {
+        when contains(body, "-") {
+            ends = splitRange(body)
+            first = fieldNumber(ends[0], names, label, piece)
+            last = fieldNumber(ends[1], names, label, piece)
+        }
+        other {
+            first = fieldNumber(body, names, label, piece)
+            last = first
+        }
+    }
+
+    # Sunday is both 0 and 7 in every crontab ever written.
+    when label == "day of week" {
+        when first == 7 { first = 0 }
+        when last == 7 { last = 0 }
+    }
+
+    when first < low or first > high or last < low or last > high {
+        throw Exception(`cron: '{piece}' is outside the {label} range {low}-{high}`)
+    }
+
+    # A wrapping range like 5-1 in a month field, or FRI-MON, is a real thing
+    # people write and means "through the end and round again".
+    when first > last {
+        addSpan(allowed, first, high, stride)
+        addSpan(allowed, low, last, stride)
+        give nil
+    }
+    addSpan(allowed, first, last, stride)
+    give nil
+}
+
+task addSpan(allowed, first, last, stride) {
+    value = first
+    while value <= last {
+        allowed[str(value)] = true
+        value = value + stride
+    }
+    give nil
+}
+
+# Split on the last `-` that is not a leading sign, so negative values are
+# reported as out of range rather than silently mangled.
+task splitRange(body) {
+    parts = split(body, "-")
+    when len(parts) != 2 {
+        throw Exception(`cron: '{body}' is not a valid range`)
+    }
+    give [trim(parts[0]), trim(parts[1])]
+}
+
+task fieldNumber(token, names, label, piece) {
+    body = trim(str(token))
+    when body == "" { throw Exception(`cron: '{piece}' in the {label} field is incomplete`) }
+    when names != nil {
+        index = indexOfName(names, lower(body))
+        when index >= 0 { give index + nameBase(label) }
+    }
+    digitsOnly = true
+    get ch in split(body, "") {
+        when indexOf("0123456789", ch) < 0 { digitsOnly = false }
+    }
+    when digitsOnly == false {
+        throw Exception(`cron: '{body}' is not a number the {label} field understands`)
+    }
+    give num(body)
+}
+
+# Months are 1-based, days of week 0-based.
+task nameBase(label) {
+    when label == "month" { give 1 }
+    give 0
+}
+
+task indexOfName(names, body) {
+    index = 0
+    get name in names {
+        when name == body { give index }
+        index = index + 1
+    }
+    give -1
+}

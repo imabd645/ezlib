@@ -1,0 +1,166 @@
+# ============================================================================
+# redis — test suite
+#   ez test.ez
+#
+# The protocol codec is tested exhaustively without a server. The client tests
+# run only when a Redis is reachable on 127.0.0.1:6379, and are reported as
+# skipped otherwise -- a missing server is not a failing library.
+# ============================================================================
+
+use "redis"
+use "redis/resp.ez"
+
+PASS = 0
+FAIL = 0
+SKIP = 0
+CR = chr(13) + chr(10)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(expected)) }
+
+out "redis tests"
+
+# ── encoding ────────────────────────────────────────────────────────────────
+check("encode one arg", respEncode(["PING"]), "*1" + CR + "$4" + CR + "PING" + CR)
+check("encode two args", respEncode(["GET", "k"]),
+      "*2" + CR + "$3" + CR + "GET" + CR + "$1" + CR + "k" + CR)
+check("encode empty value", respEncode(["SET", "k", ""]),
+      "*3" + CR + "$3" + CR + "SET" + CR + "$1" + CR + "k" + CR + "$0" + CR + "" + CR)
+# Length prefixes are why a value containing CRLF survives the wire.
+check("encode value with crlf", respEncode(["SET", "k", "a" + CR + "b"]),
+      "*3" + CR + "$3" + CR + "SET" + CR + "$1" + CR + "k" + CR + "$4" + CR + "a" + CR + "b" + CR)
+check("encode numbers as text", respEncode(["INCRBY", "k", str(5)]),
+      "*3" + CR + "$6" + CR + "INCRBY" + CR + "$1" + CR + "k" + CR + "$1" + CR + "5" + CR)
+
+# ── decoding ────────────────────────────────────────────────────────────────
+task decoded(data) {
+    r = respDecode(data, 0)
+    when r == nil { give nil }
+    give r[0]
+}
+task consumed(data) {
+    r = respDecode(data, 0)
+    when r == nil { give -1 }
+    give r[1]
+}
+
+check("simple string", decoded("+OK" + CR), "OK")
+check("simple string consumed", consumed("+OK" + CR), 5)
+check("integer", decoded(":42" + CR), 42)
+check("negative integer", decoded(":-7" + CR), -7)
+check("zero", decoded(":0" + CR), 0)
+check("bulk string", decoded("$5" + CR + "hello" + CR), "hello")
+check("bulk consumed", consumed("$5" + CR + "hello" + CR), 11)
+check("empty bulk", decoded("$0" + CR + "" + CR), "")
+check("nil bulk is nil", decoded("$-1" + CR), nil)
+check("bulk with crlf inside", decoded("$4" + CR + "a" + CR + "b" + CR), "a" + CR + "b")
+checkVal("array", decoded("*2" + CR + "$1" + CR + "a" + CR + ":7" + CR), ["a", 7])
+checkVal("empty array", decoded("*0" + CR), [])
+check("nil array is nil", decoded("*-1" + CR), nil)
+checkVal("nested array",
+         decoded("*2" + CR + "*1" + CR + ":1" + CR + ":2" + CR), [[1], 2])
+checkVal("array with nil member",
+         decoded("*2" + CR + "$-1" + CR + "$1" + CR + "a" + CR), [nil, "a"])
+
+# Errors decode to a value rather than throwing, so a caller can inspect them.
+err = decoded("-ERR unknown command" + CR)
+check("error is a dictionary", respIsError(err), true)
+check("error message", err["error"], "ERR unknown command")
+check("string is not an error", respIsError("OK"), false)
+check("nil is not an error", respIsError(nil), false)
+
+# ── short reads ─────────────────────────────────────────────────────────────
+# TCP splits messages anywhere. The decoder must say "not yet" rather than
+# guess, or the stream desynchronises.
+check("incomplete line", respDecode("+OK", 0), nil)
+check("incomplete bulk body", respDecode("$5" + CR + "hel", 0), nil)
+check("bulk missing trailer", respDecode("$5" + CR + "hello", 0), nil)
+check("incomplete array", respDecode("*2" + CR + "$1" + CR + "a" + CR, 0), nil)
+check("empty input", respDecode("", 0), nil)
+
+# Two replies in one buffer: the first is decoded and its length reported so
+# the caller can advance past it.
+both = "+OK" + CR + ":1" + CR
+check("first of two", decoded(both), "OK")
+check("offset after first", consumed(both), 5)
+check("second at offset", respDecode(both, 5)[0], 1)
+
+# ── malformed ───────────────────────────────────────────────────────────────
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("unknown marker", || respDecode("!bad" + CR, 0))
+throws("non-numeric length", || respDecode("$abc" + CR, 0))
+throws("non-numeric integer", || respDecode(":12x" + CR, 0))
+
+# ── URL parsing ─────────────────────────────────────────────────────────────
+# Built without connecting: the client opens its socket lazily.
+u1 = Redis("h", 1)
+check("host stored", u1.host, "h")
+check("port stored", u1.port, 1)
+check("not connected yet", u1.connected, false)
+check("timeout chainable", u1.timeout(100).timeoutMs, 100)
+
+# ── live server (skipped when absent) ───────────────────────────────────────
+probe = Redis("127.0.0.1", 6379)
+probe.timeout(300)
+alive = probe.isAlive()
+
+when alive == false {
+    SKIP = 12
+    out "  (no server on 127.0.0.1:6379 -- 12 client tests skipped)"
+}
+other {
+    r = Redis("127.0.0.1", 6379)
+    r.timeout(2000)
+    KEY = "ez:test:key"
+    r.delete(KEY)
+
+    check("ping", r.ping(), "PONG")
+    check("set returns OK", r.set(KEY, "v1"), "OK")
+    check("get", r.get(KEY), "v1")
+    check("exists", r.exists(KEY), true)
+    check("getOr present", r.getOr(KEY, "fb"), "v1")
+    r.delete(KEY)
+    check("get after delete", r.get(KEY), nil)
+    check("getOr fallback", r.getOr(KEY, "fb"), "fb")
+    check("exists false", r.exists(KEY), false)
+
+    r.delete(KEY)
+    r.set(KEY, "5")
+    check("increment", r.increment(KEY), 6)
+    check("incrementBy", r.incrementBy(KEY, 4), 10)
+
+    HKEY = "ez:test:hash"
+    r.delete(HKEY)
+    r.hashSet(HKEY, "a", "1")
+    r.hashSet(HKEY, "b", "2")
+    check("hashGet", r.hashGet(HKEY, "a"), "1")
+    check("hashAll is a dictionary", r.hashAll(HKEY)["b"], "2")
+
+    LKEY = "ez:test:list"
+    r.delete(LKEY)
+    r.listPush(LKEY, "x")
+    r.listPush(LKEY, "y")
+    check("listLength", r.listLength(LKEY), 2)
+
+    r.delete(KEY)  r.delete(HKEY)  r.delete(LKEY)
+    r.close()
+}
+
+out ""
+out `  passed {PASS}   failed {FAIL}   skipped {SKIP}`
+when FAIL > 0 { exit(1) }

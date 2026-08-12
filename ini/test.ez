@@ -1,0 +1,124 @@
+# ============================================================================
+# ini — test suite
+#   ez test.ez
+# ============================================================================
+
+use "ini"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+Q = chr(34)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+out "ini tests"
+
+# ── keys and values ─────────────────────────────────────────────────────────
+check("simple key", INI.parse("a = 1")["a"], 1)
+check("no spaces", INI.parse("a=1")["a"], 1)
+check("colon separator", INI.parse("a: 1")["a"], 1)
+check("value with spaces", INI.parse("a = hello world")["a"], "hello world")
+check("empty value", INI.parse("a =")["a"], "")
+check("equals in value", INI.parse("a = b=c")["a"], "b=c")
+
+# ── typing ──────────────────────────────────────────────────────────────────
+check("integer", typeOf(INI.parse("a = 42")["a"]), "integer")
+check("float", typeOf(INI.parse("a = 1.5")["a"]), "float")
+check("negative", INI.parse("a = -7")["a"], -7)
+check("bool true", INI.parse("a = true")["a"], true)
+check("bool yes", INI.parse("a = yes")["a"], true)
+check("bool off", INI.parse("a = off")["a"], false)
+check("bool case insensitive", INI.parse("a = TRUE")["a"], true)
+check("null", INI.parse("a = null")["a"], nil)
+check("text stays text", INI.parse("a = hello")["a"], "hello")
+check("version stays text", INI.parse("a = 1.2.3")["a"], "1.2.3")
+check("partial number is text", INI.parse("a = 12abc")["a"], "12abc")
+
+# Quoting preserves the string form -- the reason ports and codes survive.
+check("quoted number is text", typeOf(INI.parse(`a = "42"`)["a"]), "string")
+check("quoted bool is text", typeOf(INI.parse(`a = "true"`)["a"]), "string")
+check("single quotes", INI.parse("a = 'raw'")["a"], "raw")
+check("quoted keeps spaces", INI.parse(`a = "  x  "`)["a"], "  x  ")
+# Built with chr(34): a backtick string turns backslash-n into a real newline
+# before INI ever sees it, so the escape has to be assembled explicitly.
+check("escape newline", INI.parse("a = " + Q + "x\\ny" + Q)["a"], "x" + NL + "y")
+
+# ── comments ────────────────────────────────────────────────────────────────
+check("semicolon comment", INI.parse("a = 1 ; note")["a"], 1)
+check("hash comment", INI.parse("a = 1 # note")["a"], 1)
+check("full line comment", INI.parse("; c" + NL + "a = 1")["a"], 1)
+check("hash without space kept", INI.parse("a = x#y")["a"], "x#y")
+check("comment inside quotes kept", INI.parse(`a = "x ; y"`)["a"], "x ; y")
+
+# ── sections ────────────────────────────────────────────────────────────────
+cfg = INI.parse("top = 1" + NL + "[a]" + NL + "x = 1" + NL + "[b]" + NL + "y = 2")
+check("top level key", cfg["top"], 1)
+check("section value", cfg["a"]["x"], 1)
+check("second section", cfg["b"]["y"], 2)
+check("section list", to_json(INI.sections(cfg)), to_json(["a", "b"]))
+check("section with spaces", INI.parse("[ a b ]" + NL + "x = 1")["a b"]["x"], 1)
+check("repeated section merges",
+      INI.parse("[a]" + NL + "x = 1" + NL + "[a]" + NL + "y = 2")["a"]["y"], 2)
+check("blank lines ignored", INI.parse("a = 1" + NL + NL + "b = 2")["b"], 2)
+
+# ── access helpers ──────────────────────────────────────────────────────────
+check("get top level", INI.get(cfg, "top", 0), 1)
+check("get nested", INI.get(cfg, "a.x", 0), 1)
+check("get missing section", INI.get(cfg, "zz.x", "fb"), "fb")
+check("get missing key", INI.get(cfg, "a.zz", "fb"), "fb")
+check("get missing top", INI.get(cfg, "zz", "fb"), "fb")
+check("has true", INI.has(cfg, "a.x"), true)
+check("has false", INI.has(cfg, "a.zz"), false)
+# A key holding nil is still present.
+nilCfg = INI.parse("[s]" + NL + "k = null")
+check("has nil-valued key", INI.has(nilCfg, "s.k"), true)
+
+# ── round trip ──────────────────────────────────────────────────────────────
+task roundTrips(label, source) {
+    once = INI.parse(source)
+    twice = INI.parse(INI.stringify(once))
+    check(label, to_json(twice), to_json(once))
+}
+roundTrips("rt scalars", "a = 1" + NL + "b = text" + NL + "c = true")
+roundTrips("rt sections", "[x]" + NL + "a = 1" + NL + "[y]" + NL + "b = 2")
+roundTrips("rt mixed", "top = 1" + NL + "[s]" + NL + "k = v")
+roundTrips("rt tricky strings", `a = "true"` + NL + `b = "42"` + NL + `c = "1.5"`)
+roundTrips("rt nil", "a = null")
+
+# Stringify quotes anything that would change type on the way back.
+emitted = INI.stringify({ "a": "true", "b": "42" })
+check("quotes ambiguous string", contains(emitted, `"true"`), true)
+check("quotes ambiguous number", contains(emitted, `"42"`), true)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+task throws(label, source) {
+    try {
+        INI.parse(source)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("bare word", "just text")
+throws("unclosed section", "[abc")
+throws("empty section name", "[]")
+throws("empty key", "= value")
+
+check("isValid true", INI.isValid("a = 1"), true)
+check("isValid false", INI.isValid("nope"), false)
+check("parseOr fallback", INI.parseOr("nope", "fb"), "fb")
+check("empty source", to_json(INI.parse("")), to_json({}))
+check("nil source", to_json(INI.parse(nil)), to_json({}))
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

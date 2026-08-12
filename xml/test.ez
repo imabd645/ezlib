@@ -1,0 +1,136 @@
+# ============================================================================
+# xml — test suite
+#   ez test.ez
+# ============================================================================
+
+use "xml"
+
+PASS = 0
+FAIL = 0
+NL = chr(10)
+Q = chr(34)
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+out "xml tests"
+
+# ── basics ──────────────────────────────────────────────────────────────────
+check("root tag", XML.parse("<a/>").tag, "a")
+check("root with text", XML.parse("<a>hi</a>").value(), "hi")
+check("self closing", len(XML.parse("<a/>").kids), 0)
+check("nested child", XML.parse("<a><b>x</b></a>").child("b").value(), "x")
+check("missing child is nil", XML.parse("<a/>").child("z"), nil)
+check("child count", len(XML.parse("<a><b/><c/></a>").elements()), 2)
+check("whitespace between tags dropped",
+      len(XML.parse("<a>" + NL + "  <b/>" + NL + "</a>").elements()), 1)
+
+# ── attributes ──────────────────────────────────────────────────────────────
+check("double-quoted attr", XML.parse("<a x=" + Q + "1" + Q + "/>").attr("x", "?"), "1")
+check("single-quoted attr", XML.parse("<a x='1'/>").attr("x", "?"), "1")
+check("attr fallback", XML.parse("<a/>").attr("z", "def"), "def")
+check("hasAttr true", XML.parse("<a x='1'/>").hasAttr("x"), true)
+check("hasAttr false", XML.parse("<a/>").hasAttr("x"), false)
+check("two attrs", XML.parse("<a x='1' y='2'/>").attr("y", "?"), "2")
+check("spaces around equals", XML.parse("<a x = '1'/>").attr("x", "?"), "1")
+check("attr with entity", XML.parse("<a x='a&amp;b'/>").attr("x", "?"), "a&b")
+check("attr containing quote", XML.parse("<a x='he said " + Q + "hi" + Q + "'/>").attr("x", "?"),
+      "he said " + Q + "hi" + Q)
+
+# ── entities ────────────────────────────────────────────────────────────────
+check("lt gt", XML.parse("<a>&lt;b&gt;</a>").value(), "<b>")
+check("amp", XML.parse("<a>a&amp;b</a>").value(), "a&b")
+check("apos quot", XML.parse("<a>&apos;&quot;</a>").value(), "'" + Q)
+check("numeric decimal", XML.parse("<a>&#65;</a>").value(), "A")
+check("numeric hex", XML.parse("<a>&#x41;</a>").value(), "A")
+check("bare ampersand kept", XML.parse("<a>a & b</a>").value(), "a & b")
+check("unknown entity kept", XML.parse("<a>&nope;</a>").value(), "&nope;")
+
+# ── comments, CDATA, prolog ─────────────────────────────────────────────────
+check("comment ignored", XML.parse("<a><!-- hi --><b/></a>").child("b").tag, "b")
+check("comment not text", XML.parse("<a><!-- hi -->x</a>").value(), "x")
+check("prolog skipped", XML.parse("<?xml version='1.0'?><a>x</a>").value(), "x")
+check("doctype skipped", XML.parse("<!DOCTYPE a><a>x</a>").tag, "a")
+check("cdata literal", XML.parse("<a><![CDATA[<b>&amp;]]></a>").value(), "<b>&amp;")
+check("cdata with brackets", XML.parse("<a><![CDATA[a]b]]></a>").value(), "a]b")
+
+# ── queries ─────────────────────────────────────────────────────────────────
+doc = XML.parse("<r><g><i id='1'/><i id='2'/></g><i id='3'/></r>")
+check("findAll descends", len(doc.findAll("i")), 3)
+check("findAll order", doc.findAll("i")[0].attr("id", ""), "1")
+check("find first descendant", doc.find("i").attr("id", ""), "1")
+check("find missing", doc.find("zz"), nil)
+check("childrenNamed direct only", len(doc.childrenNamed("i")), 1)
+check("child direct only", doc.child("i").attr("id", ""), "3")
+check("elements excludes text", len(XML.parse("<a>t<b/></a>").elements()), 1)
+
+# ── mixed content ───────────────────────────────────────────────────────────
+mixed = XML.parse("<p>a <b>B</b> c</p>")
+check("mixed textContent", mixed.textContent(), "a B c")
+check("mixed keeps order", len(mixed.kids), 3)
+check("mixed child text", mixed.child("b").value(), "B")
+
+# ── building ────────────────────────────────────────────────────────────────
+node = XML.element("user")
+node.set("id", 7)
+node.add(XML.leaf("name", "Ali"))
+check("built tag", node.tag, "user")
+check("built attr", node.attr("id", ""), "7")
+check("built child", node.child("name").value(), "Ali")
+check("built xml", XML.stringify(node), "<user id=" + Q + "7" + Q + "><name>Ali</name></user>")
+check("leaf escapes", XML.stringify(XML.leaf("a", "<x>&")), "<a>&lt;x&gt;&amp;</a>")
+check("attr escaping", XML.stringify(XML.element("a").set("x", Q)),
+      "<a x=" + Q + "&quot;" + Q + "/>")
+
+# ── round trip ──────────────────────────────────────────────────────────────
+task roundTrips(label, source) {
+    once = XML.stringify(XML.parse(source))
+    twice = XML.stringify(XML.parse(once))
+    check(label, twice, once)
+}
+roundTrips("rt simple", "<a><b>x</b></a>")
+roundTrips("rt attrs", "<a x='1'><b y='2'/></a>")
+roundTrips("rt entities", "<a>&lt;&amp;&gt;</a>")
+roundTrips("rt mixed", "<p>a <b>B</b> c</p>")
+roundTrips("rt empty", "<a/>")
+
+# ── toDict ──────────────────────────────────────────────────────────────────
+check("dict leaf text", XML.toDict(XML.parse("<a>x</a>")), "x")
+check("dict child", XML.toDict(XML.parse("<a><b>x</b></a>"))["b"], "x")
+check("dict attr prefix", XML.toDict(XML.parse("<a x='1'><b>y</b></a>"))["@x"], "1")
+check("dict repeated becomes list",
+      len(XML.toDict(XML.parse("<a><b>1</b><b>2</b></a>"))["b"]), 2)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+task throws(label, source) {
+    try {
+        XML.parse(source)
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+throws("mismatched tags", "<a><b></a></b>")
+throws("unclosed element", "<a><b></a>")
+throws("stray end tag", "</a>")
+throws("no root", "just text")
+throws("two roots", "<a/><b/>")
+throws("unquoted attr", "<a x=1/>")
+throws("attr without value", "<a x/>")
+throws("unterminated comment", "<a><!-- x</a>")
+throws("unterminated cdata", "<a><![CDATA[x</a>")
+
+check("isValid true", XML.isValid("<a/>"), true)
+check("isValid false", XML.isValid("<a>"), false)
+check("parseOr fallback", XML.parseOr("<a>", "fb"), "fb")
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

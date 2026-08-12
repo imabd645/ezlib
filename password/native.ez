@@ -1,0 +1,154 @@
+# ============================================================================
+# password/native.ez — PBKDF2 through the operating system
+#
+# `crypto`'s PBKDF2 hashes natively but loops in EZ, crossing the FFI boundary
+# twice per iteration. Measured at roughly 1.5 ms per iteration, which puts a
+# properly-sized 600,000-iteration hash at about fifteen minutes.
+#
+# BCryptDeriveKeyPBKDF2 does the whole derivation inside one call, so the
+# iteration count costs what it costs in C rather than what it costs in an
+# interpreter. That is the difference between a usable default and a
+# theoretical one.
+#
+# Everything here degrades: if the DLL, the symbols, or the call fail, the
+# caller falls back to the pure-EZ implementation with a lower iteration
+# count. A password library that refuses to run is worse than a slower one.
+# ============================================================================
+
+BCRYPT_ALG_HANDLE_HMAC_FLAG = 8
+STATUS_SUCCESS = 0
+
+# Resolved once. nil means "no native path", checked by isAvailable().
+_lib = nil
+_open = nil
+_derive = nil
+_close = nil
+_ready = false
+_probed = false
+
+task probe() {
+    when _probed { give _ready }
+    _probed = true
+    try {
+        _lib = os_load_lib("bcrypt.dll")
+        when _lib == nil or _lib == 0 { give false }
+        _open = os_get_func(_lib, "BCryptOpenAlgorithmProvider")
+        _derive = os_get_func(_lib, "BCryptDeriveKeyPBKDF2")
+        _close = os_get_func(_lib, "BCryptCloseAlgorithmProvider")
+        when _open == nil or _open == 0 { give false }
+        when _derive == nil or _derive == 0 { give false }
+        _ready = true
+    }
+    catch (e) { _ready = false }
+    give _ready
+}
+
+export task isAvailable() { give probe() }
+
+# BCrypt takes algorithm names as UTF-16. Built byte by byte rather than with
+# a string literal, because EZ strings are UTF-8 and passing one directly
+# gives the API a name it cannot match.
+task wideString(text) {
+    body = str(text)
+    total = len(body)
+    buf = os_alloc((total + 1) * 2)
+    repeat i = 0 to total - 1 {
+        os_write_byte(buf, i * 2, ord(substr(body, i, 1)))
+        os_write_byte(buf, i * 2 + 1, 0)
+    }
+    os_write_byte(buf, total * 2, 0)
+    os_write_byte(buf, total * 2 + 1, 0)
+    give buf
+}
+
+task bytesToBuffer(octets) {
+    total = len(octets)
+    size = total
+    when size == 0 { size = 1 }
+    buf = os_alloc(size)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b % 256)
+        index = index + 1
+    }
+    give buf
+}
+
+task bufferToBytes(buf, count) {
+    octets = []
+    repeat i = 0 to count - 1 { push(octets, os_read_byte(buf, i)) }
+    give octets
+}
+
+# Derives `keyLen` bytes from a password and salt, both given as byte arrays.
+# Returns the derived bytes, or nil when the native path is unavailable or the
+# call fails -- never a partial or zeroed key, which would silently weaken
+# every hash that used it.
+export task derive(passwordBytes, saltBytes, iterations, keyLen) {
+    when probe() == false { give nil }
+
+    algName = nil
+    algHandle = nil
+    pwBuf = nil
+    saltBuf = nil
+    outBuf = nil
+    result = nil
+
+    try {
+        algName = wideString("SHA256")
+        # BCryptOpenAlgorithmProvider writes the handle through a pointer, so
+        # it needs somewhere to put it.
+        algHandle = os_alloc(8)
+        repeat i = 0 to 7 { os_write_byte(algHandle, i, 0) }
+
+        status = os_call(_open, "int", algHandle, algName, 0, BCRYPT_ALG_HANDLE_HMAC_FLAG)
+        when status != STATUS_SUCCESS { give nil }
+
+        handle = os_read_int64(algHandle, 0)
+        pwBuf = bytesToBuffer(passwordBytes)
+        saltBuf = bytesToBuffer(saltBytes)
+        outBuf = os_alloc(keyLen)
+
+        status = os_call(_derive, "int", handle,
+                         pwBuf, len(passwordBytes),
+                         saltBuf, len(saltBytes),
+                         iterations,
+                         outBuf, keyLen,
+                         0)
+        when status == STATUS_SUCCESS { result = bufferToBytes(outBuf, keyLen) }
+
+        when _close != nil and _close != 0 { os_call(_close, "int", handle, 0) }
+    }
+    catch (e) { result = nil }
+
+    try { when algName != nil { os_free(algName) } } catch (e) { }
+    try { when algHandle != nil { os_free(algHandle) } } catch (e) { }
+    try { when pwBuf != nil { os_free(pwBuf) } } catch (e) { }
+    try { when saltBuf != nil { os_free(saltBuf) } } catch (e) { }
+    try { when outBuf != nil { os_free(outBuf) } } catch (e) { }
+
+    give result
+}
+
+export task stringToBytes(text) {
+    octets = []
+    body = str(text)
+    total = len(body)
+    repeat i = 0 to total - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+export task hexToBytesList(hex) {
+    octets = []
+    body = lower(str(hex))
+    total = len(body)
+    index = 0
+    while index + 1 < total {
+        high = indexOf("0123456789abcdef", substr(body, index, 1))
+        low = indexOf("0123456789abcdef", substr(body, index + 1, 1))
+        when high < 0 or low < 0 { give octets }
+        push(octets, high * 16 + low)
+        index = index + 2
+    }
+    give octets
+}

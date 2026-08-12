@@ -1,0 +1,110 @@
+# ============================================================================
+# redis/resp.ez — the RESP wire protocol
+#
+# Redis speaks a small, line-oriented protocol. Commands go out as arrays of
+# bulk strings; replies are one of five types distinguished by their first
+# byte:
+#
+#   +OK\r\n            simple string
+#   -ERR reason\r\n    error
+#   :42\r\n            integer
+#   $5\r\nhello\r\n    bulk string ($-1 means nil)
+#   *2\r\n...          array   (*-1 means nil)
+#
+# Decoding returns [value, bytesConsumed] so a reader can tell a short read
+# from a complete one -- TCP does not preserve message boundaries, and a
+# decoder that cannot say "not yet" will corrupt the stream.
+# ============================================================================
+
+export CRLF = chr(13) + chr(10)
+
+# Length-prefixed, so a value containing \r\n survives intact.
+export task respEncode(args) {
+    parts = ["*" + str(len(args)) + CRLF]
+    get arg in args {
+        body = str(arg)
+        push(parts, "$" + str(len(body)) + CRLF + body + CRLF)
+    }
+    give join(parts, "")
+}
+
+# Index of the next CRLF at or after `from`, or -1.
+task respLineEnd(data, from) {
+    total = len(data)
+    i = from
+    while i + 1 < total {
+        when substr(data, i, 2) == CRLF { give i }
+        i = i + 1
+    }
+    give -1
+}
+
+task respFail(msg) {
+    throw Exception(`redis: malformed reply -- {msg}`)
+}
+
+# Parses an integer that may be negative, without going through num(), which
+# accepts trailing junk.
+task respInt(body) {
+    s = trim(body)
+    when s == "" { respFail("empty number") }
+    negative = false
+    when startsWith(s, "-") { negative = true  s = substr(s, 1, len(s) - 1) }
+    when s == "" { respFail("bare minus sign") }
+    value = 0
+    total = len(s)
+    repeat i = 0 to total - 1 {
+        code = ord(substr(s, i, 1))
+        when code < 48 or code > 57 { respFail(`'{body}' is not a number`) }
+        value = value * 10 + (code - 48)
+    }
+    when negative { give -value }
+    give value
+}
+
+# Returns [value, consumed], or nil when more bytes are needed.
+#
+# A nil bulk string and a nil array both decode to EZ nil, which is what
+# Redis means by them: "no such key" and "no such result".
+export task respDecode(data, from) {
+    total = len(data)
+    when from >= total { give nil }
+
+    marker = substr(data, from, 1)
+    lineAt = respLineEnd(data, from + 1)
+    when lineAt < 0 { give nil }
+    body = substr(data, from + 1, lineAt - from - 1)
+    after = lineAt + 2
+
+    when marker == "+" { give [body, after - from] }
+    when marker == "-" { give [{ "error": body }, after - from] }
+    when marker == ":" { give [respInt(body), after - from] }
+
+    when marker == "$" {
+        size = respInt(body)
+        when size < 0 { give [nil, after - from] }
+        when after + size + 2 > total { give nil }
+        give [substr(data, after, size), after + size + 2 - from]
+    }
+
+    when marker == "*" {
+        count = respInt(body)
+        when count < 0 { give [nil, after - from] }
+        items = []
+        cursor = after
+        repeat i = 1 to count {
+            inner = respDecode(data, cursor)
+            when inner == nil { give nil }
+            push(items, inner[0])
+            cursor = cursor + inner[1]
+        }
+        give [items, cursor - from]
+    }
+
+    respFail(`unknown reply type '{marker}'`)
+}
+
+export task respIsError(value) {
+    when typeOf(value) != "dictionary" { give false }
+    give has_key(value, "error")
+}

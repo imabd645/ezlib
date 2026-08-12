@@ -1,0 +1,10 @@
+{
+    "name": "mailer",
+    "version": "1.0.0",
+    "description": "High-level mailer for EZ. HTML templates, connection pooling, and provider presets for Gmail, SendGrid, Mailgun, AWS SES, and Outlook.",
+    "author": "Abdullah Masood",
+    "main": "main.ez",
+    "dependencies": {
+        "email": "^1.0.0"
+    }
+}

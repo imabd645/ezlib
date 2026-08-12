@@ -1,0 +1,258 @@
+# ============================================================================
+# table — terminal tables for EZ
+#
+#   use "table"
+#
+#   t = Table(["Name", "Qty"])
+#   t.row(["bolt", 12])
+#   t.row(["washer", 4])
+#   out t.render()
+#
+# Columns are sized from their contents, measured with ANSI escapes ignored --
+# a coloured cell is longer in bytes than it looks, and padding by len() would
+# leave every column after it ragged.
+# ============================================================================
+
+use "color"
+use "table/borders.ez"
+
+export model Table {
+
+    init(headers) {
+        self.headers = headers
+        when headers == nil { self.headers = [] }
+        self.rows = []
+        self.style = borderStyle("single")
+        self.aligns = []
+        self.padding = 1
+        self.maxWidths = []
+        self.showHeader = len(self.headers) > 0
+    }
+
+    # ── configuration ───────────────────────────────────────────────────────
+
+    # single (default), rounded, double, ascii, markdown, none
+    task borders(name) {
+        self.style = borderStyle(name)
+        when name == "markdown" { self.showHeader = true }
+        give self
+    }
+
+    # Per column: "left" (default), "right", "center". Numbers usually want
+    # right, so columns line up on the decimal point.
+    task align(list) {
+        self.aligns = list
+        give self
+    }
+
+    # Truncate any column wider than this. 0 means unlimited.
+    task widths(list) {
+        self.maxWidths = list
+        give self
+    }
+
+    task spacing(cells) {
+        self.padding = cells
+        give self
+    }
+
+    task row(cells) {
+        push(self.rows, cells)
+        give self
+    }
+
+    # Add several rows at once.
+    task addRows(list) {
+        get cells in list { push(self.rows, cells) }
+        give self
+    }
+
+    # Build from a list of dictionaries, taking the columns from `fields`.
+    # This is the shape query results arrive in.
+    task fromRecords(records, fields) {
+        self.headers = fields
+        self.showHeader = true
+        get record in records {
+            cells = []
+            get field in fields {
+                when has_key(record, field) { push(cells, record[field]) }
+                other { push(cells, "") }
+            }
+            push(self.rows, cells)
+        }
+        give self
+    }
+
+    # ── layout ──────────────────────────────────────────────────────────────
+
+    task columnCount() {
+        count = len(self.headers)
+        get cells in self.rows {
+            when len(cells) > count { count = len(cells) }
+        }
+        give count
+    }
+
+    task cellText(cells, index) {
+        when index >= len(cells) { give "" }
+        value = cells[index]
+        when value == nil { give "" }
+        give str(value)
+    }
+
+    # Widest visible cell per column, capped by maxWidths.
+    task columnWidths() {
+        count = self.columnCount()
+        widths = []
+        repeat i = 1 to count { push(widths, 0) }
+
+        repeat i = 0 to count - 1 {
+            when self.showHeader {
+                w = visibleLength(self.cellText(self.headers, i))
+                when w > widths[i] { widths[i] = w }
+            }
+            get cells in self.rows {
+                w = visibleLength(self.cellText(cells, i))
+                when w > widths[i] { widths[i] = w }
+            }
+            when i < len(self.maxWidths) {
+                cap = self.maxWidths[i]
+                when cap > 0 and widths[i] > cap { widths[i] = cap }
+            }
+        }
+        give widths
+    }
+
+    task alignOf(index) {
+        when index < len(self.aligns) { give self.aligns[index] }
+        give "left"
+    }
+
+    # Truncates on visible length, appending an ellipsis. Escapes are dropped
+    # when truncating, because cutting mid-sequence would leave the terminal
+    # in that colour for everything after it.
+    task fit(text, width) {
+        visible = visibleLength(text)
+        when visible <= width { give text }
+        # Cut on a CHARACTER boundary: substr is byte-based, so slicing a
+        # multi-byte character in half would corrupt the rest of the line.
+        when width <= 1 { give visibleSubstr(stripAnsi(text), 0, width) }
+        give visibleSubstr(stripAnsi(text), 0, width - 1) + "…"
+    }
+
+    task pad(text, width, alignment) {
+        body = self.fit(text, width)
+        gap = width - visibleLength(body)
+        when gap <= 0 { give body }
+        left = ""
+        right = ""
+        when alignment == "right" { repeat i = 1 to gap { left = left + " " } }
+        other {
+            when alignment == "center" {
+                half = (gap - (gap % 2)) / 2
+                repeat i = 1 to half { left = left + " " }
+                repeat i = 1 to gap - half { right = right + " " }
+            }
+            other { repeat i = 1 to gap { right = right + " " } }
+        }
+        give left + body + right
+    }
+
+    # ── rendering ───────────────────────────────────────────────────────────
+
+    task rule(widths, left, mid, right) {
+        when self.style["horizontal"] == "" { give nil }
+        parts = []
+        get w in widths {
+            body = ""
+            repeat i = 1 to w + (self.padding * 2) { body = body + self.style["horizontal"] }
+            push(parts, body)
+        }
+        give left + join(parts, mid) + right
+    }
+
+    task line(cells, widths) {
+        gap = ""
+        repeat i = 1 to self.padding { gap = gap + " " }
+        parts = []
+        index = 0
+        get w in widths {
+            push(parts, gap + self.pad(self.cellText(cells, index), w, self.alignOf(index)) + gap)
+            index = index + 1
+        }
+        vertical = self.style["vertical"]
+        body = vertical + join(parts, vertical) + vertical
+        when vertical == " " { give trim(body) }
+        give body
+    }
+
+    # Markdown's separator row carries the alignment, using colons.
+    task markdownRule(widths) {
+        parts = []
+        index = 0
+        get w in widths {
+            total = w + (self.padding * 2)
+            alignment = self.alignOf(index)
+            body = ""
+            repeat i = 1 to total { body = body + "-" }
+            when alignment == "right" { body = substr(body, 0, total - 1) + ":" }
+            when alignment == "center" {
+                body = ":" + substr(body, 1, total - 2) + ":"
+            }
+            push(parts, body)
+            index = index + 1
+        }
+        give "|" + join(parts, "|") + "|"
+    }
+
+    task render() {
+        widths = self.columnWidths()
+        when len(widths) == 0 { give "" }
+        lines = []
+
+        isMarkdown = self.style["topLeft"] == "" and self.style["horizontal"] == "-"
+
+        when isMarkdown == false {
+            top = self.rule(widths, self.style["topLeft"], self.style["topMid"], self.style["topRight"])
+            when top != nil { push(lines, top) }
+        }
+
+        when self.showHeader {
+            push(lines, self.line(self.headers, widths))
+            when isMarkdown { push(lines, self.markdownRule(widths)) }
+            other {
+                mid = self.rule(widths, self.style["midLeft"], self.style["midMid"], self.style["midRight"])
+                when mid != nil { push(lines, mid) }
+            }
+        }
+
+        get cells in self.rows { push(lines, self.line(cells, widths)) }
+
+        when isMarkdown == false {
+            bottom = self.rule(widths, self.style["botLeft"], self.style["botMid"], self.style["botRight"])
+            when bottom != nil { push(lines, bottom) }
+        }
+        give join(lines, chr(10))
+    }
+
+    task print() {
+        out self.render()
+        give nil
+    }
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+# One call from headers and rows.
+export task renderTable(headers, rows) {
+    t = Table(headers)
+    t.addRows(rows)
+    give t.render()
+}
+
+# One call from a list of dictionaries.
+export task recordsTable(records, fields) {
+    t = Table(nil)
+    t.fromRecords(records, fields)
+    give t.render()
+}

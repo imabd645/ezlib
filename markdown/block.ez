@@ -1,0 +1,252 @@
+# ============================================================================
+# markdown/block.ez — line-level structure
+#
+# Walks the document a line at a time, since every block type is decided by
+# how a line starts. Fenced code is handled before anything else so its
+# contents are never interpreted as markdown.
+# ============================================================================
+
+use "markdown/inline.ez"
+
+task mdIndentOf(line) {
+    n = 0
+    total = len(line)
+    repeat i = 0 to total - 1 {
+        c = substr(line, i, 1)
+        when c == " " { n = n + 1 }
+        other { when c == chr(9) { n = n + 4 }  other { escape } }
+    }
+    give n
+}
+
+task mdIsRule(line) {
+    body = replace(trim(line), " ", "")
+    when len(body) < 3 { give false }
+    get ch in ["-", "*", "_"] {
+        allSame = true
+        total = len(body)
+        repeat i = 0 to total - 1 {
+            when substr(body, i, 1) != ch { allSame = false  escape }
+        }
+        when allSame { give true }
+    }
+    give false
+}
+
+task mdBulletRest(line) {
+    body = trim(line)
+    get marker in ["- ", "* ", "+ "] {
+        when startsWith(body, marker) { give substr(body, 2, len(body) - 2) }
+    }
+    give nil
+}
+
+# "1. text" -> "text"
+task mdOrderedRest(line) {
+    body = trim(line)
+    total = len(body)
+    i = 0
+    while i < total {
+        code = ord(substr(body, i, 1))
+        when code < 48 or code > 57 { escape }
+        i = i + 1
+    }
+    when i == 0 { give nil }
+    when i + 1 >= total { give nil }
+    when substr(body, i, 2) != ". " { give nil }
+    give substr(body, i + 2, total - i - 2)
+}
+
+task mdHeadingLevel(line) {
+    body = trim(line)
+    level = 0
+    while level < len(body) and substr(body, level, 1) == "#" { level = level + 1 }
+    when level == 0 or level > 6 { give 0 }
+    when level >= len(body) { give 0 }
+    when substr(body, level, 1) != " " { give 0 }
+    give level
+}
+
+task mdSplitRow(line) {
+    body = trim(line)
+    when startsWith(body, "|") { body = substr(body, 1, len(body) - 1) }
+    when endsWith(body, "|") { body = substr(body, 0, len(body) - 1) }
+    cells = []
+    get cell in split(body, "|") { push(cells, trim(cell)) }
+    give cells
+}
+
+# A table separator: |---|:--:| etc.
+task mdIsSeparator(line) {
+    body = trim(line)
+    when contains(body, "-") == false { give false }
+    get cell in mdSplitRow(body) {
+        stripped = replace(replace(replace(cell, "-", ""), ":", ""), " ", "")
+        when stripped != "" { give false }
+        when contains(cell, "-") == false { give false }
+    }
+    give true
+}
+
+export task mdRenderBlocks(lines, startIndex, minIndent, sink) {
+    i = startIndex
+    total = len(lines)
+
+    while i < total {
+        raw = lines[i]
+        body = trim(raw)
+        indent = mdIndentOf(raw)
+
+        when body == "" { i = i + 1  skip }
+        # A dedent ends this nested block and returns control to the caller.
+        when indent < minIndent and startIndex > 0 { escape }
+
+        # ── fenced code ────────────────────────────────────────────────────
+        when startsWith(body, "```") or startsWith(body, "~~~") {
+            fence = substr(body, 0, 3)
+            language = trim(substr(body, 3, len(body) - 3))
+            i = i + 1
+            codeLines = []
+            while i < total {
+                when startsWith(trim(lines[i]), fence) { i = i + 1  escape }
+                push(codeLines, lines[i])
+                i = i + 1
+            }
+            attr = ""
+            when language != "" { attr = ` class="language-` + mdEscape(language) + `"` }
+            push(sink, "<pre><code" + attr + ">" + mdEscape(join(codeLines, chr(10))) + "</code></pre>")
+            skip
+        }
+
+        when mdIsRule(body) { push(sink, "<hr>")  i = i + 1  skip }
+
+        level = mdHeadingLevel(body)
+        when level > 0 {
+            text = trim(substr(body, level, len(body) - level))
+            # Trailing #s are decoration in ATX headings.
+            while endsWith(text, "#") { text = trim(substr(text, 0, len(text) - 1)) }
+            tag = "h" + str(level)
+            push(sink, "<" + tag + ">" + mdInline(text) + "</" + tag + ">")
+            i = i + 1
+            skip
+        }
+
+        # ── blockquote ─────────────────────────────────────────────────────
+        when startsWith(body, ">") {
+            quoted = []
+            while i < total {
+                current = trim(lines[i])
+                when startsWith(current, ">") == false { escape }
+                stripped = substr(current, 1, len(current) - 1)
+                when startsWith(stripped, " ") { stripped = substr(stripped, 1, len(stripped) - 1) }
+                push(quoted, stripped)
+                i = i + 1
+            }
+            inner = []
+            mdRenderBlocks(quoted, 0, 0, inner)
+            push(sink, "<blockquote>" + join(inner, "") + "</blockquote>")
+            skip
+        }
+
+        # ── table ──────────────────────────────────────────────────────────
+        when contains(body, "|") and i + 1 < total and mdIsSeparator(lines[i + 1]) {
+            header = mdSplitRow(body)
+            i = i + 2
+            rows = []
+            while i < total {
+                current = trim(lines[i])
+                when current == "" or contains(current, "|") == false { escape }
+                push(rows, mdSplitRow(current))
+                i = i + 1
+            }
+            html = "<table><thead><tr>"
+            get cell in header { html = html + "<th>" + mdInline(cell) + "</th>" }
+            html = html + "</tr></thead><tbody>"
+            get row in rows {
+                html = html + "<tr>"
+                get cell in row { html = html + "<td>" + mdInline(cell) + "</td>" }
+                html = html + "</tr>"
+            }
+            push(sink, html + "</tbody></table>")
+            skip
+        }
+
+        # ── lists ──────────────────────────────────────────────────────────
+        bullet = mdBulletRest(body)
+        ordered = mdOrderedRest(body)
+        when bullet != nil or ordered != nil {
+            tag = "ul"
+            when bullet == nil { tag = "ol" }
+            items = []
+            listIndent = indent
+            while i < total {
+                current = trim(lines[i])
+                when current == "" {
+                    # A blank line ends the list unless more items follow.
+                    when i + 1 < total and (mdBulletRest(trim(lines[i + 1])) != nil or mdOrderedRest(trim(lines[i + 1])) != nil) {
+                        i = i + 1
+                        skip
+                    }
+                    escape
+                }
+                when mdIndentOf(lines[i]) < listIndent { escape }
+                itemText = mdBulletRest(current)
+                when itemText == nil { itemText = mdOrderedRest(current) }
+                when itemText == nil { escape }
+                i = i + 1
+
+                # Nested list: following lines indented further.
+                nested = []
+                while i < total {
+                    when trim(lines[i]) == "" { escape }
+                    when mdIndentOf(lines[i]) <= listIndent { escape }
+                    push(nested, lines[i])
+                    i = i + 1
+                }
+                entry = mdInline(itemText)
+                when len(nested) > 0 {
+                    inner = []
+                    mdRenderBlocks(nested, 0, 0, inner)
+                    entry = entry + join(inner, "")
+                }
+                push(items, "<li>" + entry + "</li>")
+            }
+            push(sink, "<" + tag + ">" + join(items, "") + "</" + tag + ">")
+            skip
+        }
+
+        # ── paragraph ──────────────────────────────────────────────────────
+        paraLines = []
+        while i < total {
+            current = trim(lines[i])
+            when current == "" { escape }
+            when mdIsRule(current) or mdHeadingLevel(current) > 0 { escape }
+            when startsWith(current, ">") or startsWith(current, "```") { escape }
+            when mdBulletRest(current) != nil or mdOrderedRest(current) != nil { escape }
+            # The raw line is kept, not the trimmed one: a hard break is two
+            # trailing spaces, which trimming would destroy.
+            push(paraLines, lines[i])
+            i = i + 1
+        }
+        when len(paraLines) > 0 {
+            # Two trailing spaces mean a hard break, as in every markdown
+            # implementation; otherwise wrapped lines join with a space.
+            # A sentinel rather than "<br>" directly: mdInline escapes its
+            # input, so a literal tag inserted here would come back as
+            # &lt;br&gt;. chr(2) cannot occur in escaped output.
+            BREAK = chr(2)
+            joined = ""
+            index = 0
+            get lineText in paraLines {
+                when index > 0 {
+                    when endsWith(paraLines[index - 1], "  ") { joined = joined + BREAK }
+                    other { joined = joined + " " }
+                }
+                joined = joined + trim(lineText)
+                index = index + 1
+            }
+            push(sink, "<p>" + replace(mdInline(joined), BREAK, "<br>") + "</p>")
+        }
+    }
+    give i
+}

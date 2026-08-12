@@ -1,0 +1,589 @@
+// ============================================================================
+// EZ ORM — Query Builder
+// Chainable API for constructing and executing SQL queries
+// ============================================================================
+
+use "errors.ez"
+use "sql.ez"
+use "relationship.ez"
+
+export model Query {
+    init(session, modelClass) {
+        self.session = session
+        self.modelClass = modelClass
+        self.meta = session.engine.getMeta(modelClass)
+        self.tableName = self.meta["table"]
+        self.dialect = session.engine.dialect
+
+        self._filters = []
+        self._orderings = []
+        self._limit = nil
+        self._offset = nil
+        self._eager = []      // relation names to preload
+        self._joins = []      // relation names joined into the SQL
+    }
+
+    // Preload these relations, so reading them later costs no extra query.
+    //
+    //     session.query(User).withRelated("posts").all()
+    //
+    // Loading N users and then touching u.posts on each is N+1 queries; this
+    // makes it two, whatever N is.
+    task withRelated(name) {
+        when typeOf(self.session.engine.relationMeta(self.modelClass, name)) == "nil" {
+            throw SchemaError("No relation named '" + str(name) + "' on model '" + self.modelClass.__name__ + "'.")
+        }
+        push(self._eager, str(name))
+        give self
+    }
+
+    // Join a relation so its columns can be filtered on.
+    //
+    //     session.query(Post).join("author").filter("author.name", "ana").all()
+    //
+    // Only the base model's rows come back -- this is for filtering, not for
+    // selecting the other table's columns. Use withRelated() to actually load
+    // the related rows.
+    task join(name) {
+        rel = self.session.engine.relationMeta(self.modelClass, name)
+        when typeOf(rel) == "nil" {
+            throw SchemaError("No relation named '" + str(name) + "' on model '" + self.modelClass.__name__ + "'.")
+        }
+        push(self._joins, str(name))
+        give self
+    }
+
+    // ── Safety ────────────────────────────────────────────────────
+
+    // Operators permitted in a WHERE clause. Anything outside this set is
+    // rejected rather than concatenated into the SQL.
+    task _allowedOps() {
+        give ["=", "!=", "<>", "<", "<=", ">", ">=", "LIKE", "NOT LIKE", "IN", "NOT IN", "IS", "IS NOT"]
+    }
+
+    // Validates a field name against the model's registered columns.
+    //
+    // Field names and operators used to be concatenated straight into the SQL
+    // while only values were bound, so a field taken from user input (a `sort`
+    // query parameter, say) was a direct injection vector. Every identifier now
+    // has to match a column this model actually declares.
+    task _checkField(field) {
+        f = str(field)
+
+        // "relation.column" refers to a joined table. The relation has to have
+        // been joined first, and the column has to exist on the target model --
+        // so a joined field is validated exactly as strictly as a local one and
+        // is no more of an injection vector.
+        dot = indexOf(f, ".")
+        when dot != -1 {
+            relName = substr(f, 0, dot)
+            colName = substr(f, dot + 1, len(f) - dot - 1)
+            joined = false
+            get j in self._joins {
+                when j == relName { joined = true }
+            }
+            when not joined {
+                throw SchemaError("Field '" + f + "' refers to relation '" + relName + "', which this query has not joined. Call .join(\"" + relName + "\") first.")
+            }
+            rel = self.session.engine.relationMeta(self.modelClass, relName)
+            targetMeta = self.session.engine.getMeta(self.session.engine.classFor(rel["target"]))
+            get c in targetMeta["columns"] {
+                when c["name"] == colName { give f }
+            }
+            throw SchemaError("Unknown column '" + colName + "' on joined model '" + rel["target"] + "'.")
+        }
+
+        get c in self.meta["columns"] {
+            when c["name"] == f {
+                give f
+            }
+        }
+        throw SchemaError("Unknown column '" + f + "' on model '" + self.modelClass.__name__ + "'. Known columns: " + join(self._columnNames(), ", "))
+    }
+
+    // A validated field name as SQL. Qualified with its table only when the
+    // query has joins, so a plain query emits exactly the SQL it always did.
+    task _sqlField(field) {
+        f = str(field)
+        dot = indexOf(f, ".")
+        when dot != -1 {
+            relName = substr(f, 0, dot)
+            colName = substr(f, dot + 1, len(f) - dot - 1)
+            rel = self.session.engine.relationMeta(self.modelClass, relName)
+            targetMeta = self.session.engine.getMeta(self.session.engine.classFor(rel["target"]))
+            give quoteIdent(targetMeta["table"], self.dialect) + "." + quoteIdent(colName, self.dialect)
+        }
+        when len(self._joins) > 0 {
+            give quoteIdent(self.tableName, self.dialect) + "." + quoteIdent(f, self.dialect)
+        }
+        give quoteIdent(f, self.dialect)
+    }
+
+    task _columnNames() {
+        names = []
+        get c in self.meta["columns"] {
+            push(names, c["name"])
+        }
+        give names
+    }
+
+    task _checkOp(op) {
+        upper_op = upper(str(op))
+        get allowed in self._allowedOps() {
+            when allowed == upper_op {
+                give upper_op
+            }
+        }
+        throw SchemaError("Unsupported SQL operator '" + str(op) + "'. Allowed: " + join(self._allowedOps(), ", "))
+    }
+
+    // Returns the declared type for a column, for hydration coercion.
+    task _typeOfColumn(name) {
+        get c in self.meta["columns"] {
+            when c["name"] == name {
+                give c["type"]
+            }
+        }
+        give nil
+    }
+
+    // ── Building ──────────────────────────────────────────────────
+
+    // Returns an independent copy of this query.
+    // The builder methods mutate in place, so cloning is what lets a partially
+    // built query be reused as the base for several different queries.
+    task clone() {
+        q = Query(self.session, self.modelClass)
+        get f in self._filters {
+            push(q._filters, f)
+        }
+        get o in self._orderings {
+            push(q._orderings, o)
+        }
+        get e in self._eager {
+            push(q._eager, e)
+        }
+        get j in self._joins {
+            push(q._joins, j)
+        }
+        q._limit = self._limit
+        q._offset = self._offset
+        give q
+    }
+
+    // Adds a WHERE clause.
+    // e.g., filter("age", ">", 18) or filter("name", "Abdullah")
+    task filter(field, op_or_val, val=nil) {
+        op = "="
+        value = op_or_val
+
+        when val != nil {
+            op = op_or_val
+            value = val
+        }
+
+        checkedField = self._checkField(field)
+        checkedOp = self._checkOp(op)
+
+        // IN / NOT IN take a list and expand to one placeholder per element.
+        when checkedOp == "IN" or checkedOp == "NOT IN" {
+            when typeOf(value) != "array" {
+                throw SchemaError("Operator " + checkedOp + " expects an array of values.")
+            }
+            when len(value) == 0 {
+                throw SchemaError("Operator " + checkedOp + " requires a non-empty array.")
+            }
+        }
+
+        push(self._filters, {
+            "field": checkedField,
+            "op": checkedOp,
+            "value": value
+        })
+        give self
+    }
+
+    // Adds a "field IS NULL" / "field IS NOT NULL" clause.
+    task filterNull(field, isNull=true) {
+        checkedField = self._checkField(field)
+        op = "IS NOT NULL"
+        when isNull { op = "IS NULL" }
+        push(self._filters, {
+            "field": checkedField,
+            "op": op,
+            "value": nil,
+            "noParam": true
+        })
+        give self
+    }
+
+    // Adds an ORDER BY clause.
+    task orderBy(field, direction="ASC") {
+        checkedField = self._checkField(field)
+
+        // Direction was previously interpolated raw, so orderBy(f, "ASC; DROP
+        // TABLE x--") was injectable. Only the two legal keywords are accepted.
+        dir = upper(str(direction))
+        when dir != "ASC" and dir != "DESC" {
+            throw SchemaError("Sort direction must be ASC or DESC, got '" + str(direction) + "'.")
+        }
+
+        push(self._orderings, {
+            "field": checkedField,
+            "direction": dir
+        })
+        give self
+    }
+
+    // Adds a LIMIT clause.
+    task limit(n) {
+        self._limit = self._checkInt(n, "limit")
+        give self
+    }
+
+    // Adds an OFFSET clause.
+    task offset(n) {
+        self._offset = self._checkInt(n, "offset")
+        give self
+    }
+
+    task _checkInt(n, what) {
+        when n == nil { give nil }
+        when typeOf(n) != "integer" and typeOf(n) != "float" {
+            throw SchemaError(what + "() expects a number, got " + typeOf(n) + ".")
+        }
+        when n < 0 {
+            throw SchemaError(what + "() must not be negative.")
+        }
+        give n
+    }
+
+    // ── Execution ─────────────────────────────────────────────────
+
+    // Executes the query and returns an array of model instances.
+    task all() {
+        res = self._buildSQL("SELECT *", true)
+        rows = self.session.engine.driver.query(res["sql"], res["params"])
+        instances = []
+
+        get row in rows {
+            push(instances, self._hydrate(row))
+        }
+
+        give self._loadEager(instances)
+    }
+
+    // Executes the query and returns the first instance, or nil if none found.
+    // Uses a clone so that calling first() does not permanently pin LIMIT 1
+    // onto this query object.
+    task first() {
+        q = self.clone()
+        q._limit = 1
+        res = q.all()
+        when len(res) > 0 {
+            give res[0]
+        }
+        give nil
+    }
+
+    // Returns true when at least one row matches.
+    task exists() {
+        give self.first() != nil
+    }
+
+    // Executes a COUNT(*) query and returns the integer result.
+    // ORDER BY / LIMIT / OFFSET are deliberately not applied: they are
+    // meaningless (or actively wrong) for an aggregate, and the previous
+    // version inherited them from the shared builder.
+    task count() {
+        res = self._buildSQL("SELECT COUNT(*) AS ez_count", false)
+        rows = self.session.engine.driver.query(res["sql"], res["params"])
+        when len(rows) > 0 {
+            row = rows[0]
+            when has_key(row, "ez_count") {
+                give num(row["ez_count"])
+            }
+            // Defensive: some drivers fold identifiers to a different case.
+            get k in keys(row) {
+                give num(row[k])
+            }
+        }
+        give 0
+    }
+
+    // Executes a bulk DELETE for all rows matching the query filters.
+    // Requires at least one filter: an unfiltered bulk delete wipes the table,
+    // which should never be an accident. Use deleteAll() to mean it.
+    task delete() {
+        when len(self._filters) == 0 {
+            throw IntegrityError("Refusing to run an unfiltered DELETE on '" + self.tableName + "'. Add a filter, or call deleteAll() if you really mean to empty the table.")
+        }
+        give self._runDelete()
+    }
+
+    // Deletes every row in the table.
+    task deleteAll() {
+        give self._runDelete()
+    }
+
+    task _runDelete() {
+        // ORDER BY / LIMIT are not portable in DELETE (SQLite needs a compile
+        // flag, Postgres rejects them outright), so they are never emitted.
+        res = self._buildSQL("DELETE", false)
+        self.session.engine.driver.execute(res["sql"], res["params"])
+        give self.session.engine.driver.changes()
+    }
+
+    // Applies a bulk UPDATE to all matching rows. values is a dict of
+    // column name → new value.
+    task update(values) {
+        when values == nil or len(keys(values)) == 0 {
+            throw SchemaError("update() requires at least one column to set.")
+        }
+        when len(self._filters) == 0 {
+            throw IntegrityError("Refusing to run an unfiltered UPDATE on '" + self.tableName + "'. Add a filter first.")
+        }
+
+        setParts = []
+        params = []
+        get k in keys(values) {
+            checked = self._checkField(k)
+            push(setParts, quoteIdent(checked, self.dialect) + " = ?")
+            push(params, values[k])
+        }
+
+        where = self._buildWhere()
+        sql = "UPDATE " + quoteIdent(self.tableName, self.dialect) + " SET " + join(setParts, ", ") + where["sql"]
+        get p in where["params"] {
+            push(params, p)
+        }
+
+        self.session.engine.driver.execute(sql, params)
+        give self.session.engine.driver.changes()
+    }
+
+    // ── Internal Helpers ──────────────────────────────────────────
+
+    // Converts a database row dictionary into a model instance.
+    // Values are coerced to the declared column type so that a bool column
+    // reads back as true/false rather than SQLite's 0/1 or MySQL's "0"/"1".
+    //
+    // Everything here writes with setattr(), which is the raw path: it does not
+    // go through Model.__setattr__, so loading a row does not mark every one of
+    // its columns as changed.
+    task _hydrate(row) {
+        pkName = self.meta["pk"]
+
+        // Identity map: one row is one instance for the life of the session.
+        // Without it the same row fetched twice produced two objects that could
+        // drift apart and both be flushed, each overwriting the other.
+        pkVal = nil
+        when has_key(row, pkName) { pkVal = coerceValue(row[pkName], self._typeOfColumn(pkName)) }
+        when typeOf(pkVal) != "nil" {
+            cached = self.session._identityGet(self.modelClass, pkVal)
+            when typeOf(cached) != "nil" { give cached }
+        }
+
+        inst = self.modelClass()
+        get colInfo in self.meta["columns"] {
+            colName = colInfo["name"]
+            when has_key(row, colName) {
+                setattr(inst, colName, coerceValue(row[colName], colInfo["type"]))
+            }
+        }
+
+        // The session is what lets a relation resolve on first touch, and
+        // _dirty is what lets UPDATE write only the columns that changed.
+        setattr(inst, "_session", self.session)
+        setattr(inst, "_dirty", {})
+        // This object IS a row. Committing it flushes an UPDATE, never an
+        // INSERT -- see Session._isUpdate.
+        setattr(inst, "_persisted", true)
+
+        when typeOf(pkVal) != "nil" { self.session._identityPut(self.modelClass, pkVal, inst) }
+        give inst
+    }
+
+    // Builds the JOIN fragments for every relation added with join().
+    //
+    // The ON clause comes from the relation, so it is never caller-supplied:
+    //   belongsTo  target.pk  = base.fk
+    //   hasMany    target.fk  = base.pk
+    //
+    // INNER JOIN throughout -- join() exists to narrow results by the other
+    // table, and a LEFT JOIN would keep the rows that fail to match, which is
+    // the opposite of what filtering on a joined column asks for.
+    task _buildJoins() {
+        out_ = ""
+        get relName in self._joins {
+            rel = self.session.engine.relationMeta(self.modelClass, relName)
+            targetClass = self.session.engine.classFor(rel["target"])
+            targetMeta = self.session.engine.getMeta(targetClass)
+            tTable = quoteIdent(targetMeta["table"], self.dialect)
+            bTable = quoteIdent(self.tableName, self.dialect)
+
+            when rel["kind"] == "belongsTo" {
+                left = tTable + "." + quoteIdent(targetMeta["pk"], self.dialect)
+                right = bTable + "." + quoteIdent(rel["foreignKey"], self.dialect)
+                out_ = out_ + " INNER JOIN " + tTable + " ON " + left + " = " + right
+            } other {
+                left = tTable + "." + quoteIdent(rel["foreignKey"], self.dialect)
+                right = bTable + "." + quoteIdent(self.meta["pk"], self.dialect)
+                out_ = out_ + " INNER JOIN " + tTable + " ON " + left + " = " + right
+            }
+        }
+        give out_
+    }
+
+    // Loads every relation named by withRelated() for a set of instances, in
+    // one query per relation rather than one per instance.
+    task _loadEager(instances) {
+        when len(instances) == 0 { give instances }
+        get relName in self._eager {
+            rel = self.session.engine.relationMeta(self.modelClass, relName)
+            targetClass = self.session.engine.classFor(rel["target"])
+            targetMeta = self.session.engine.getMeta(targetClass)
+
+            when rel["kind"] == "hasMany" {
+                // Collect the parents' keys, fetch every child in one IN query,
+                // then bucket them back by foreign key.
+                pkName = self.meta["pk"]
+                keys_ = []
+                get inst in instances {
+                    v = getattr(inst, pkName)
+                    when typeOf(v) != "nil" { push(keys_, v) }
+                }
+                buckets = {}
+                when len(keys_) > 0 {
+                    children = self.session.query(targetClass).filter(rel["foreignKey"], "IN", keys_).all()
+                    get ch in children {
+                        k = str(getattr(ch, rel["foreignKey"]))
+                        when not has_key(buckets, k) { buckets[k] = [] }
+                        push(buckets[k], ch)
+                    }
+                }
+                get inst in instances {
+                    k = str(getattr(inst, pkName))
+                    rows = []
+                    when has_key(buckets, k) { rows = buckets[k] }
+                    // setattr, not assignment: this must not mark the row dirty.
+                    setattr(inst, relName, rows)
+                }
+            } other {
+                // belongsTo: one IN query over the parents' primary keys.
+                fkName = rel["foreignKey"]
+                keys_ = []
+                get inst in instances {
+                    v = getattr(inst, fkName)
+                    when typeOf(v) != "nil" { push(keys_, v) }
+                }
+                byPk = {}
+                when len(keys_) > 0 {
+                    parents = self.session.query(targetClass).filter(targetMeta["pk"], "IN", keys_).all()
+                    get p in parents {
+                        byPk[str(getattr(p, targetMeta["pk"]))] = p
+                    }
+                }
+                get inst in instances {
+                    v = getattr(inst, fkName)
+                    parent = nil
+                    when typeOf(v) != "nil" and has_key(byPk, str(v)) { parent = byPk[str(v)] }
+                    setattr(inst, relName, parent)
+                }
+            }
+        }
+        give instances
+    }
+
+    // Builds the WHERE fragment and its bound parameters.
+    task _buildWhere() {
+        when len(self._filters) == 0 {
+            give { "sql": "", "params": [] }
+        }
+
+        parts = []
+        params = []
+        get f in self._filters {
+            field = self._sqlField(f["field"])
+            op = f["op"]
+
+            when has_key(f, "noParam") {
+                push(parts, field + " " + op)
+            } other when op == "IN" or op == "NOT IN" {
+                marks = []
+                get v in f["value"] {
+                    push(marks, "?")
+                    push(params, v)
+                }
+                push(parts, field + " " + op + " (" + join(marks, ", ") + ")")
+            } other {
+                push(parts, field + " " + op + " ?")
+                push(params, f["value"])
+            }
+        }
+
+        give {
+            "sql": " WHERE " + join(parts, " AND "),
+            "params": params
+        }
+    }
+
+    // Builds the SQL string and parameter array.
+    // withOrdering controls whether ORDER BY / LIMIT / OFFSET are appended —
+    // aggregates and DELETE must not carry them.
+    task _buildSQL(base, withOrdering) {
+        // With joins present, "SELECT *" would return the other table's columns
+        // too and hydration would pick up whichever `id` came last. Select only
+        // the base table's columns.
+        selectPart = base
+        when len(self._joins) > 0 and base == "SELECT *" {
+            selectPart = "SELECT " + quoteIdent(self.tableName, self.dialect) + ".*"
+        }
+
+        sql = selectPart + " FROM " + quoteIdent(self.tableName, self.dialect)
+        sql += self._buildJoins()
+        params = []
+
+        where = self._buildWhere()
+        sql += where["sql"]
+        get p in where["params"] {
+            push(params, p)
+        }
+
+        when withOrdering {
+            when len(self._orderings) > 0 {
+                orderParts = []
+                get o in self._orderings {
+                    push(orderParts, self._sqlField(o["field"]) + " " + o["direction"])
+                }
+                sql += " ORDER BY " + join(orderParts, ", ")
+            }
+
+            when self._limit != nil {
+                sql += " LIMIT ?"
+                push(params, self._limit)
+            }
+
+            // OFFSET without LIMIT is a syntax error in SQLite and MySQL (but
+            // legal in Postgres), so a dialect-appropriate sentinel limit is
+            // supplied when only an offset was requested.
+            when self._offset != nil {
+                when self._limit == nil {
+                    when self.dialect == "sqlite" {
+                        sql += " LIMIT -1"
+                    } other when self.dialect == "mysql" {
+                        sql += " LIMIT 18446744073709551615"
+                    }
+                    // Postgres accepts a bare OFFSET, so nothing is added.
+                }
+                sql += " OFFSET ?"
+                push(params, self._offset)
+            }
+        }
+
+        give {
+            "sql": sql,
+            "params": params
+        }
+    }
+}

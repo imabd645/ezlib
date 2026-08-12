@@ -1,0 +1,277 @@
+# ============================================================================
+# wa_noise.ez — WhatsApp Noise Protocol XX handshake
+#
+# Depends on: wa_crypto.ez (Curve25519, AES-GCM, SHA-256, HKDF helpers)
+# ============================================================================
+
+use "wa_crypto.ez"
+use "wa_proto.ez"
+
+# State constants
+_NOISE_INIT  = 0
+_NOISE_WAIT  = 1
+_NOISE_AUTH  = 2
+_NOISE_READY = 3
+
+# WhatsApp Noise prologue
+_WA_NOISE_PROLOGUE_MAGIC = "WA"
+_WA_NOISE_VERSION = [6, 3]  # protocol version bytes appended to prologue
+
+model WANoise {
+    init() {
+        self.state = _NOISE_INIT
+
+        # Noise handshake state (h, ck, k, n)
+        self.h    = []   # handshake hash (32 bytes)
+        self.ck   = []   # chaining key   (32 bytes)
+        self.k    = []   # current cipher key (32 bytes or empty)
+        self.n    = 0    # nonce counter
+        self.sendCount = 0
+        self.recvCount = 0
+
+        # Key pairs
+        self.localStatic    = {}  # { public, private }
+        self.localEphemeral = {}  # { public, private }
+        self.remoteStatic   = []  # 32 bytes
+        self.remoteEphemeral= []  # 32 bytes
+
+        # Derived transport keys (after handshake)
+        self.sendKey = []
+        self.recvKey = []
+    }
+
+    # ── Internal: mix key (HKDF into ck and k) ───────────────────────────────
+    task _mixKey(inputKeyMaterial) {
+        derived = wac_hkdf(inputKeyMaterial, [], self.ck)
+        self.ck = _wac_sliceBytes(derived, 0, 32)
+        tempK   = _wac_sliceBytes(derived, 32, 32)
+        self.k  = tempK
+        self.n  = 0
+    }
+
+    # ── Internal: mix hash ────────────────────────────────────────────────────
+    task _mixHash(data) {
+        combined = _wac_concatBytes(self.h, data)
+        self.h = wac_sha256(combined)
+    }
+
+    # ── Internal: encrypt with associated data (AEAD) ────────────────────────
+    task _encryptWithAD(plaintext) {
+        when len(self.k) == 0 {
+            self._mixHash(plaintext)
+            give plaintext
+        }
+
+        # Build 12-byte IV from nonce counter (big-endian, 4 zero bytes + 8-byte counter)
+        iv = [0, 0, 0, 0,
+              (self.n >> 56) & 255,
+              (self.n >> 48) & 255,
+              (self.n >> 40) & 255,
+              (self.n >> 32) & 255,
+              (self.n >> 24) & 255,
+              (self.n >> 16) & 255,
+              (self.n >> 8)  & 255,
+               self.n        & 255]
+
+        encrypted = wac_aesGcmEncrypt(self.k, iv, plaintext, self.h)
+        self.n = self.n + 1
+        
+        ciphertextAndTag = _wac_concatBytes(encrypted["ciphertext"], encrypted["tag"])
+        self._mixHash(ciphertextAndTag)
+        give ciphertextAndTag
+    }
+
+    # ── Internal: decrypt with associated data ────────────────────────────────
+    task _decryptWithAD(ciphertextAndTag) {
+        when len(self.k) == 0 {
+            self._mixHash(ciphertextAndTag)
+            give ciphertextAndTag
+        }
+
+        ctLen = len(ciphertextAndTag) - 16
+        ct  = _wac_sliceBytes(ciphertextAndTag, 0, ctLen)
+        tag = _wac_sliceBytes(ciphertextAndTag, ctLen, 16)
+
+        iv = [0, 0, 0, 0,
+              (self.n >> 56) & 255,
+              (self.n >> 48) & 255,
+              (self.n >> 40) & 255,
+              (self.n >> 32) & 255,
+              (self.n >> 24) & 255,
+              (self.n >> 16) & 255,
+              (self.n >> 8)  & 255,
+               self.n        & 255]
+
+        plaintext = wac_aesGcmDecrypt(self.k, iv, ct, tag, self.h)
+        self.n = self.n + 1
+        self.h = wac_sha256(_wac_concatBytes(self.h, ciphertextAndTag))
+        give plaintext
+    }
+
+    # ── Initialize handshake state ────────────────────────────────────────────
+    task initialize(staticKeyPair) {
+        self.localStatic    = staticKeyPair
+        self.localEphemeral = wac_generateKeyPair()
+
+        # h = SHA256("Noise_XX_25519_AESGCM_SHA256")
+        protocolNameBytes = wac_strToBytes("Noise_XX_25519_AESGCM_SHA256\x00\x00\x00\x00")
+        # Pad to 32 bytes
+        while len(protocolNameBytes) < 32 { push(protocolNameBytes, 0) }
+        when len(protocolNameBytes) > 32 {
+            protocolNameBytes = _wac_sliceBytes(protocolNameBytes, 0, 32)
+        }
+        self.h  = protocolNameBytes
+        self.ck = protocolNameBytes
+
+        # Mix prologue: "WA" + [6, 0]
+        prologue = wac_strToBytes(_WA_NOISE_PROLOGUE_MAGIC)
+        get b in _WA_NOISE_VERSION { push(prologue, b) }
+        self._mixHash(prologue)
+
+        self.state = _NOISE_INIT
+    }
+
+    # ── Build ClientHello payload (-> send to server) ─────────────────────────
+    task buildClientHello() {
+        # Mix our ephemeral public key into h
+        self._mixHash(self.localEphemeral["public"])
+
+        # 3. Build ClientHello protobuf
+        # field 1: ephemeral public key
+        ch_e = wap_encodeBytes(1, self.localEphemeral["public"])
+        
+        # wrap in HandshakeMessage (tag 2: clientHello)
+        self.state = _NOISE_WAIT
+        give wap_encodeBytes(2, ch_e)
+    }
+
+    # ── Process ServerHello (received from server) ────────────────────────────
+    task processServerHello(payload) {
+        # payload is HandshakeMessage protobuf bytes.
+        # ServerHello is field 3
+        serverHelloRes = wap_decodeProtobufField(payload, 0, 3)
+        when serverHelloRes == nil {
+            throw "wa_noise: ServerHello missing from HandshakeMessage"
+        }
+        shBytes = serverHelloRes["value"]
+
+        # ServerHello fields:
+        # 1: ephemeral (32 bytes)
+        # 2: static (48 bytes encrypted)
+        # 3: payload (cert chain)
+        
+        eRes = wap_decodeProtobufField(shBytes, 0, 1)
+        when eRes == nil or len(eRes["value"]) != 32 { throw "wa_noise: invalid ServerHello ephemeral" }
+        self.remoteEphemeral = eRes["value"]
+        self._mixHash(self.remoteEphemeral)
+
+        # ECDH with our ephemeral and server ephemeral
+        sharedEE = wac_ecdh(self.localEphemeral["private"], self.remoteEphemeral)
+        self._mixKey(sharedEE)
+
+        sRes = wap_decodeProtobufField(shBytes, 0, 2)
+        when sRes == nil or len(sRes["value"]) < 48 { throw "wa_noise: invalid ServerHello static" }
+        encServerStatic = sRes["value"]
+        
+        serverStaticBytes = self._decryptWithAD(encServerStatic)
+        self.remoteStatic = _wac_sliceBytes(serverStaticBytes, 0, 32)
+
+        # ECDH with our ephemeral and server static key
+        sharedES = wac_ecdh(self.localEphemeral["private"], self.remoteStatic)
+        self._mixKey(sharedES)
+
+        pRes = wap_decodeProtobufField(shBytes, 0, 3)
+        when pRes != nil {
+            encCert = pRes["value"]
+            self._decryptWithAD(encCert)  # mix into h, discard plaintext
+        }
+
+        self.state = _NOISE_AUTH
+    }
+
+    # ── Build ClientFinish (-> send to server) ────────────────────────────────
+    # ── Build ClientFinish (-> send to server) ────────────────────────────────
+    task buildClientFinish() {
+        when self.state != _NOISE_AUTH {
+            throw "wa_noise: must call processServerHello first"
+        }
+
+        # Encrypt our static public key
+        encStaticKey = self._encryptWithAD(self.localStatic["public"])
+
+        # ECDH with our static and server ephemeral
+        sharedSE = wac_ecdh(self.localStatic["private"], self.remoteEphemeral)
+        self._mixKey(sharedSE)
+
+        # Encrypt the ClientPayload protobuf
+        b64 = "GAEqNQgOEggIAhC4FxiLTxoDMDAwIgMwMDAqAzAuMTIAOgdEZXNrdG9wQgMwLjFQAFoCZW5iAlVTMgIgAGABaAGaAbUBCgQAAACkEgEFGiB3cnF+n+FWfkL4ieU8SIbaXEvTrsWpJGrogmZ0hDb0XCIDAAABKiDIYXZRO/ZuaozvPdoI/DkWHUij4cyn+pAqf+snnfUyfjJAc8nafiJDRv2aSXIehDWPVNja94DRu9Te2FtX+Zk6NLvhxMtmSmBQnVdvxG6vik0XSxfjHLLVpZSY1ezG29cVjzoQOJq2xxLQwwZZ8+UvF2d52EINCgdXaW5kb3dzGAEgAA=="
+        clientPayloadBytes = Base64.decodeToBytes(b64)
+        encPayload = self._encryptWithAD(clientPayloadBytes)
+
+        # Build ClientFinish protobuf
+        cf_s = wap_encodeBytes(1, encStaticKey)
+        cf_p = wap_encodeBytes(2, encPayload)
+        clientFinishProto = _wac_concatBytes(cf_s, cf_p)
+
+        # Wrap in HandshakeMessage (tag 4)
+        handshakeMsg = wap_encodeBytes(4, clientFinishProto)
+
+        # Split into send/recv keys using HKDF
+        derived = wac_hkdf([], [], self.ck)
+        self.sendKey = _wac_sliceBytes(derived, 0, 32)
+        self.recvKey = _wac_sliceBytes(derived, 32, 32)
+        self.sendCount = 0
+        self.recvCount = 0
+
+        self.state = _NOISE_READY
+        give handshakeMsg
+    }
+
+    # ── Encrypt a transport message (after handshake) ─────────────────────────
+    task encrypt(plaintext) {
+        when self.state != _NOISE_READY {
+            throw "wa_noise: handshake not complete"
+        }
+
+        iv = [0, 0, 0, 0,
+              (self.sendCount >> 56) & 255,
+              (self.sendCount >> 48) & 255,
+              (self.sendCount >> 40) & 255,
+              (self.sendCount >> 32) & 255,
+              (self.sendCount >> 24) & 255,
+              (self.sendCount >> 16) & 255,
+              (self.sendCount >> 8)  & 255,
+               self.sendCount        & 255]
+
+        result = wac_aesGcmEncrypt(self.sendKey, iv, plaintext, nil)
+        self.sendCount = self.sendCount + 1
+        give _wac_concatBytes(result["ciphertext"], result["tag"])
+    }
+
+    # ── Decrypt a transport message (after handshake) ─────────────────────────
+    task decrypt(ciphertextAndTag) {
+        when self.state != _NOISE_READY {
+            throw "wa_noise: handshake not complete"
+        }
+
+        ctLen = len(ciphertextAndTag) - 16
+        ct  = _wac_sliceBytes(ciphertextAndTag, 0, ctLen)
+        tag = _wac_sliceBytes(ciphertextAndTag, ctLen, 16)
+
+        iv = [0, 0, 0, 0,
+              (self.recvCount >> 56) & 255,
+              (self.recvCount >> 48) & 255,
+              (self.recvCount >> 40) & 255,
+              (self.recvCount >> 32) & 255,
+              (self.recvCount >> 24) & 255,
+              (self.recvCount >> 16) & 255,
+              (self.recvCount >> 8)  & 255,
+               self.recvCount        & 255]
+
+        result = wac_aesGcmDecrypt(self.recvKey, iv, ct, tag, nil)
+        self.recvCount = self.recvCount + 1
+        give result
+    }
+
+    task isReady() { give self.state == _NOISE_READY }
+}

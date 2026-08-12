@@ -1,0 +1,133 @@
+# ============================================================================
+# validate/rules.ez — individual checks
+#
+# Each rule reports a human-readable message describing what was expected.
+# Messages are written for the person who sent the data, not the developer:
+# "must be at least 3 characters" rather than "minLength failed".
+# ============================================================================
+
+# re_test takes the subject first and the pattern second.
+EMAIL_PATTERN = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$"
+URL_PATTERN = "^https?://[^\\s/$.?#].[^\\s]*$"
+SLUG_PATTERN = "^[a-z0-9]+(-[a-z0-9]+)*$"
+UUID_PATTERN = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+
+export task valSizeOf(value) {
+    t = typeOf(value)
+    when t == "string" { give len(value) }
+    when t == "array" or t == "list" { give len(value) }
+    when t == "dictionary" { give len(keys(value)) }
+    give 0
+}
+
+task valUnit(value) {
+    t = typeOf(value)
+    when t == "string" { give "characters" }
+    when t == "array" or t == "list" { give "items" }
+    give "entries"
+}
+
+# Returns nil when the rule passes, or a message describing the failure.
+export task valApplyRule(rule, value) {
+    name = rule["name"]
+    arg = rule["arg"]
+
+    when name == "min" {
+        t = typeOf(value)
+        when t == "integer" or t == "float" {
+            when value < arg { give `must be at least {arg}` }
+            give nil
+        }
+        size = valSizeOf(value)
+        when size < arg { give `must be at least {arg} {valUnit(value)}` }
+        give nil
+    }
+    when name == "max" {
+        t = typeOf(value)
+        when t == "integer" or t == "float" {
+            when value > arg { give `must be at most {arg}` }
+            give nil
+        }
+        size = valSizeOf(value)
+        when size > arg { give `must be at most {arg} {valUnit(value)}` }
+        give nil
+    }
+    when name == "length" {
+        size = valSizeOf(value)
+        when size != arg { give `must be exactly {arg} {valUnit(value)}` }
+        give nil
+    }
+    when name == "integer" {
+        when typeOf(value) == "integer" { give nil }
+        # A float with no fractional part is accepted: JSON has one number
+        # type, so a client sending 5 for an integer field is not an error.
+        when typeOf(value) == "float" and value == round(value) { give nil }
+        give "must be a whole number"
+    }
+    when name == "positive" {
+        when value <= 0 { give "must be greater than zero" }
+        give nil
+    }
+    when name == "negative" {
+        when value >= 0 { give "must be less than zero" }
+        give nil
+    }
+    when name == "pattern" {
+        when re_test(str(value), arg) == false {
+            when rule["message"] != nil { give rule["message"] }
+            give "is not in the expected format"
+        }
+        give nil
+    }
+    when name == "email" {
+        when re_test(str(value), EMAIL_PATTERN) == false { give "must be a valid email address" }
+        give nil
+    }
+    when name == "url" {
+        when re_test(str(value), URL_PATTERN) == false { give "must be a valid http or https URL" }
+        give nil
+    }
+    when name == "slug" {
+        when re_test(str(value), SLUG_PATTERN) == false {
+            give "must be lowercase words separated by single hyphens"
+        }
+        give nil
+    }
+    when name == "uuid" {
+        when re_test(str(value), UUID_PATTERN) == false { give "must be a valid UUID" }
+        give nil
+    }
+    when name == "oneOf" {
+        get allowed in arg {
+            when value == allowed { give nil }
+        }
+        give `must be one of: {join(arg, ", ")}`
+    }
+    when name == "notEmpty" {
+        when valSizeOf(value) == 0 { give "must not be empty" }
+        give nil
+    }
+    when name == "startsWith" {
+        when startsWith(str(value), str(arg)) == false { give `must start with "{arg}"` }
+        give nil
+    }
+    when name == "endsWith" {
+        when endsWith(str(value), str(arg)) == false { give `must end with "{arg}"` }
+        give nil
+    }
+    when name == "contains" {
+        when contains(str(value), str(arg)) == false { give `must contain "{arg}"` }
+        give nil
+    }
+    when name == "custom" {
+        result = arg(value)
+        # A custom check returns true to pass, or a message describing why not.
+        when result == true { give nil }
+        when result == false {
+            when rule["message"] != nil { give rule["message"] }
+            give "is not valid"
+        }
+        give str(result)
+    }
+    throw Exception(`validate: unknown rule '{name}'`)
+}
