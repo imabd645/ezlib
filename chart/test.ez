@@ -1,0 +1,320 @@
+# ============================================================================
+# chart — tests
+#
+# A chart is hard to test because "does it look right" is not an assertion.
+# What can be asserted is everything underneath that: the axis lands on round
+# numbers, the bars start at zero, a gap stays a gap, the markup is
+# well-formed, and a label containing "&" does not destroy the document.
+#
+# The tick expectations below are matplotlib's. They were produced by
+# MaxNLocator, not by running this package and writing down what came out --
+# a test that agrees with the code it tests locks in whatever the code does.
+# ============================================================================
+
+use "chart"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+task refused(name, threw) { checkTrue(name, threw) }
+
+task ticksOf(low, high) { give to_json(niceScale(low, high, 5)["ticks"]) }
+
+# ── axis ────────────────────────────────────────────────────────────────────
+
+out "axis (ground truth: matplotlib MaxNLocator)"
+
+# An axis running 0 to 47 with ticks every 9.4 is technically correct and
+# unreadable. These are the ticks matplotlib chooses for the same ranges.
+check("0..47", ticksOf(0, 47), to_json([0, 20, 40, 60]))
+check("0..100", ticksOf(0, 100), to_json([0, 25, 50, 75, 100]))
+check("0..1", ticksOf(0, 1), to_json([0, 0.25, 0.5, 0.75, 1]))
+check("3..7", ticksOf(3, 7), to_json([3, 4, 5, 6, 7]))
+check("-5..5", ticksOf(-5, 5), to_json([-5, -2.5, 0, 2.5, 5]))
+check("0..0.47", ticksOf(0, 0.47), to_json([0, 0.2, 0.4, 0.6]))
+check("1000..9500", ticksOf(1000, 9500), to_json([0, 2500, 5000, 7500, 10000]))
+check("0..3", ticksOf(0, 3), to_json([0, 1, 2, 3]))
+check("12..19", ticksOf(12, 19), to_json([12, 14, 16, 18, 20]))
+check("-100..-20", ticksOf(-100, -20), to_json([-100, -80, -60, -40, -20]))
+check("0..1000000", ticksOf(0, 1000000), to_json([0, 250000, 500000, 750000, 1000000]))
+check("0.001..0.009", ticksOf(0.001, 0.009), to_json([0, 0.002, 0.004, 0.006, 0.008, 0.01]))
+check("0..7", ticksOf(0, 7), to_json([0, 2, 4, 6, 8]))
+check("2..98", ticksOf(2, 98), to_json([0, 25, 50, 75, 100]))
+check("-1.5..1.5", ticksOf(-1.5, 1.5), to_json([-2, -1, 0, 1, 2]))
+check("0..12", ticksOf(0, 12), to_json([0, 5, 10, 15]))
+check("0..365", ticksOf(0, 365), to_json([0, 100, 200, 300, 400]))
+check("100..105", ticksOf(100, 105), to_json([100, 102, 104, 106]))
+check("0..2.5", ticksOf(0, 2.5), to_json([0, 1, 2, 3]))
+
+# The axis is deliberately WIDER than the data. An axis stopping at 47 cannot
+# have a tick at 50, and that widening is what makes the labels readable.
+axis = niceScale(0, 47, 5)
+checkTrue("the axis reaches past the data", axis["max"] >= 47)
+checkTrue("the axis starts at or below the data", axis["min"] <= 0)
+
+# A flat series has no range to divide. matplotlib returns three identical
+# ticks here, which is a zero-span axis and a division by zero downstream;
+# widening puts the line in the middle of the chart instead.
+flat = niceScale(5, 5, 5)
+checkTrue("a flat series gets a real range", flat["max"] > flat["min"])
+checkTrue("a flat series is centred", flat["min"] < 5 and flat["max"] > 5)
+zeroFlat = niceScale(0, 0, 5)
+checkTrue("a flat zero series gets a real range", zeroFlat["max"] > zeroFlat["min"])
+
+# Reversed bounds are a caller error worth surviving, not crashing on.
+check("reversed bounds are handled", ticksOf(47, 0), ticksOf(0, 47))
+
+# ── number formatting ───────────────────────────────────────────────────────
+
+out "number formatting"
+
+# The decimals follow the step: a step of 1000 needs none, a step of 0.1 needs
+# one. Printing "1500.0000001" because the step accumulated in binary floating
+# point makes the whole chart look broken.
+check("a whole step prints no decimals", formatTick(1500, 500), "1500")
+check("a tenth step prints one decimal", formatTick(0.5, 0.1), "0.5")
+check("a hundredth step prints two", formatTick(0.25, 0.05), "0.25")
+# The decimals follow the step's PRECISION, not its size. A step of 2.5 is
+# greater than 1 and still needs one decimal; printing it with none renders an
+# axis as 10, 13, 15, 18, 20, which reads as arbitrary numbers.
+check("a 2.5 step keeps its half", formatTick(12.5, 2.5), "12.5")
+check("a 2.5 step on a whole value", formatTick(15, 2.5), "15.0")
+check("a 0.25 step keeps two decimals", formatTick(0.75, 0.25), "0.75")
+check("a 20 step needs none", formatTick(40, 20), "40")
+check("a 2500 step needs none", formatTick(7500, 2500), "7500")
+check("zero", formatTick(0, 1), "0")
+check("negative", formatTick(-20, 10), "-20")
+check("rounding carries into the whole part", formatNumber(0.999, 2), "1.00")
+check("negative zero prints as zero", formatNumber(-0.001, 1), "0.0")
+
+check("thousands", withCommas("1500"), "1,500")
+check("millions", withCommas("1000000"), "1,000,000")
+check("no separator below a thousand", withCommas("999"), "999")
+check("exactly a thousand", withCommas("1000"), "1,000")
+check("the fraction is not grouped", withCommas("1234.5678"), "1,234.5678")
+check("a negative keeps its sign", withCommas("-1234"), "-1,234")
+
+# ── markup ──────────────────────────────────────────────────────────────────
+
+out "markup"
+
+svg = line({ "title": "Revenue", "labels": ["Jan", "Feb", "Mar"],
+             "values": [10, 20, 15] })
+checkTrue("output is an svg element", startsWith(svg, "<svg"))
+checkTrue("output closes", endsWith(trim(svg), "</svg>"))
+checkTrue("a viewBox is set, so the chart scales", contains(svg, "viewBox="))
+checkTrue("the title appears", contains(svg, "Revenue"))
+checkTrue("the labels appear", contains(svg, "Feb"))
+checkTrue("a path is drawn", contains(svg, "<path"))
+
+check("the width is honoured", contains(line({ "values": [1, 2], "width": 800 }), "width=\"800\""), true)
+check("the height is honoured", contains(line({ "values": [1, 2], "height": 300 }), "height=\"300\""), true)
+
+# A chart is often built from data someone else supplied -- a column of
+# product names out of a database. An unescaped "&" is the difference between
+# a chart and a document the browser refuses to render.
+hostile = line({ "title": "A & B", "labels": ["<script>", "x\"y", "a'b"],
+                 "values": [1, 2, 3] })
+checkTrue("an ampersand in the title is escaped", contains(hostile, "A &amp; B"))
+checkTrue("a tag in a label is escaped", contains(hostile, "&lt;script&gt;"))
+checkTrue("no raw script tag survives", contains(hostile, "<script>") == false)
+checkTrue("a bare ampersand never reaches the output", contains(hostile, "& B") == false)
+
+# Coordinates are rounded: printing 47.99999999999999 makes the markup
+# unreadable and several times larger than it needs to be.
+checkTrue("coordinates are short", contains(line({ "values": [1, 3, 2] }), "99999") == false)
+
+# ── charts ──────────────────────────────────────────────────────────────────
+
+out "chart types"
+
+checkTrue("line", startsWith(line({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("area", startsWith(area({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("bar", startsWith(bar({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("horizontal bar", startsWith(barh({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("pie", startsWith(pie({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("donut", startsWith(donut({ "values": [1, 2, 3] }), "<svg"))
+checkTrue("sparkline", startsWith(sparkline([1, 2, 3]), "<svg"))
+checkTrue("stacked bar", startsWith(bar({ "series": [[1, 2], [3, 4]], "stacked": true }), "<svg"))
+
+# A bare list is what someone tries first, and making it work is the
+# difference between a package used once and one used often.
+checkTrue("a bare list of numbers", startsWith(line({}, [1, 2, 3]), "<svg"))
+checkTrue("a bare list of series", startsWith(line({}, [[1, 2], [3, 4]]), "<svg"))
+
+# ── bars start at zero ──────────────────────────────────────────────────────
+
+out "bar baselines"
+
+# A bar chart whose axis starts at 40 exaggerates every difference. It is the
+# commonest way a chart misleads without anyone intending it, so bars always
+# include zero.
+barAxis = niceScale(40, 50, 5)
+checkTrue("a line chart need not include zero", barAxis["min"] > 0)
+checkTrue("but a bar chart does", contains(bar({ "values": [40, 45, 50] }), ">0<"))
+
+# A negative bar hangs below the zero line rather than being drawn with a
+# negative height, which would make it vanish.
+negative = bar({ "values": [-5, 10, -3] })
+checkTrue("negative bars render", startsWith(negative, "<svg"))
+checkTrue("a negative bar chart has a zero tick", contains(negative, ">0<"))
+checkTrue("no negative height reaches the markup", contains(negative, "height=\"-") == false)
+checkTrue("no negative width reaches the markup", contains(negative, "width=\"-") == false)
+checkTrue("no negative width in a horizontal bar",
+          contains(barh({ "values": [-5, 10] }), "width=\"-") == false)
+
+# ── gaps ────────────────────────────────────────────────────────────────────
+
+out "missing values"
+
+# A missing reading plotted as zero invents a cliff that was never in the
+# data. A gap splits the line rather than joining across it.
+gapped = line({ "values": [10, nil, 30] })
+checkTrue("a gap does not crash", startsWith(gapped, "<svg"))
+solid = line({ "values": [10, 20, 30] })
+checkTrue("a gap draws differently from a filled value", gapped != solid)
+# Two runs of one point each are drawn as dots, not as a line through the gap.
+checkTrue("a gap breaks the line into runs", contains(gapped, "<circle"))
+checkTrue("a leading gap is handled", startsWith(line({ "values": [nil, 2, 3] }), "<svg"))
+checkTrue("a trailing gap is handled", startsWith(line({ "values": [1, 2, nil] }), "<svg"))
+checkTrue("an all-gap series does not crash",
+          startsWith(line({ "values": [nil, nil] }), "<svg"))
+
+# ── legend ──────────────────────────────────────────────────────────────────
+
+out "legend"
+
+# A legend for a single unnamed series is noise.
+one = line({ "values": [1, 2, 3] })
+checkTrue("no legend for one unnamed series", contains(one, "Series 1") == false)
+two = line({ "series": [{ "name": "A", "values": [1, 2] },
+                        { "name": "B", "values": [3, 4] }] })
+checkTrue("a legend for two series", contains(two, ">A<") and contains(two, ">B<"))
+forced = line({ "values": [1, 2], "showLegend": true })
+checkTrue("a legend can be forced on", contains(forced, "Series 1"))
+suppressed = line({ "series": [{ "name": "A", "values": [1, 2] },
+                               { "name": "B", "values": [3, 4] }],
+                    "showLegend": false })
+checkTrue("a legend can be forced off", contains(suppressed, ">A<") == false)
+
+# ── colours ─────────────────────────────────────────────────────────────────
+
+out "colours"
+
+checkTrue("the palette has entries", len(colors()) >= 6)
+checkTrue("the default colour is used", contains(line({ "values": [1, 2] }), colors()[0]))
+custom = line({ "values": [1, 2], "colors": ["#ff0000"] })
+checkTrue("a custom palette is used", contains(custom, "#ff0000"))
+perSeries = line({ "series": [{ "name": "A", "values": [1, 2], "color": "#00ff00" }] })
+checkTrue("a per-series colour wins", contains(perSeries, "#00ff00"))
+# More series than colours must wrap rather than run off the end.
+many = line({ "series": [[1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11], [12]] })
+checkTrue("more series than colours wraps the palette", startsWith(many, "<svg"))
+
+# ── pie ─────────────────────────────────────────────────────────────────────
+
+out "pie"
+
+# The large-arc flag is where a pie goes wrong: a slice past 180 degrees drawn
+# with the small arc points the wrong way. A 70/30 split is where it shows.
+lopsided = pie({ "values": [70, 30] })
+checkTrue("a slice past 180 degrees uses the large arc", contains(lopsided, " 1 1 "))
+checkTrue("a slice under 180 degrees uses the small arc", contains(lopsided, " 0 1 "))
+
+# A single full-circle slice cannot be drawn as an arc: the start and end
+# points coincide and SVG draws nothing at all.
+whole = pie({ "values": [100] })
+checkTrue("a single slice is a circle, not an empty arc", contains(whole, "<circle"))
+checkTrue("a single donut slice renders", contains(donut({ "values": [100] }), "<path"))
+
+checkTrue("a donut has a hole", donut({ "values": [60, 40] }) != pie({ "values": [60, 40] }))
+checkTrue("percentages can be shown",
+          contains(pie({ "values": [75, 25], "showValues": true }), "75%"))
+checkTrue("a zero value is skipped rather than drawn",
+          startsWith(pie({ "values": [50, 0, 50] }), "<svg"))
+
+threw = false
+try { pie({ "values": [1, -2] }) } catch (e) { threw = true }
+refused("a negative slice is refused", threw)
+threw = false
+try { pie({ "values": [0, 0] }) } catch (e) { threw = true }
+refused("an all-zero pie is refused", threw)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+
+out "errors"
+
+threw = false
+try { line({ "widht": 400, "values": [1] }) } catch (e) { threw = true }
+refused("a misspelled option is refused, not ignored", threw)
+threw = false
+try { line({ "title": "x" }) } catch (e) { threw = true }
+refused("a chart with no data is refused", threw)
+threw = false
+try { line({ "values": [1], "width": 0 }) } catch (e) { threw = true }
+refused("a zero width is refused", threw)
+threw = false
+try { line({ "series": [{ "name": "A" }] }) } catch (e) { threw = true }
+refused("a series with no values is refused", threw)
+threw = false
+try { sparkline([]) } catch (e) { threw = true }
+refused("an empty sparkline is refused", threw)
+
+# ── output helpers ──────────────────────────────────────────────────────────
+
+out "output"
+
+uri = dataUri(line({ "values": [1, 2] }))
+checkTrue("a data URI has the right prefix", startsWith(uri, "data:image/svg+xml"))
+# A raw "#" ends a data URI, so every colour in the markup has to be encoded.
+checkTrue("the hash in a colour is encoded", contains(uri, "%23"))
+checkTrue("no raw hash survives", contains(substr(uri, 30, len(uri) - 30), "#") == false)
+checkTrue("no newline survives", contains(uri, "\n") == false)
+
+html = page("Dashboard", [line({ "values": [1, 2] }), bar({ "values": [3, 4] })])
+checkTrue("a page is a document", startsWith(html, "<!DOCTYPE html>"))
+checkTrue("a page carries its charts", contains(html, "<svg"))
+checkTrue("a page title is escaped", contains(page("A & B", []), "A &amp; B"))
+
+# ── axis labels ─────────────────────────────────────────────────────────────
+
+out "axis labels"
+
+labelled = line({ "values": [1, 2], "yLabel": "Revenue", "xLabel": "Month" })
+checkTrue("the y label appears", contains(labelled, "Revenue"))
+checkTrue("the y label is rotated", contains(labelled, "rotate(-90"))
+checkTrue("the x label appears", contains(labelled, "Month"))
+
+# 200 categories cannot all be printed on a 640-pixel axis, and printing them
+# anyway produces a grey smear where the labels should be.
+crowded = []
+counts = []
+repeat i = 1 to 200 {
+    push(crowded, "Category " + str(i))
+    push(counts, i)
+}
+dense = line({ "labels": crowded, "values": counts })
+checkTrue("crowded labels are thinned, not overprinted", contains(dense, "Category 2<") == false)
+checkTrue("the first label survives thinning", contains(dense, "Category 1<"))
+
+out ""
+when failed == 0 {
+    out `chart: all {passed} checks passed`
+}
+other {
+    out `chart: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

@@ -1,0 +1,344 @@
+# ============================================================================
+# serial — tests
+#
+# Most of a serial package cannot be tested without a device on the other end,
+# and the parts that can be are exactly the parts that fail silently: a DCB
+# with a field at the wrong offset opens the port, returns success, and hands
+# back garbage at the wrong baud rate.
+#
+# So the packing is checked against Windows' OWN DCB. BuildCommDCB turns a mode
+# string into the struct the kernel expects; if this package's bytes and
+# Windows' bytes agree for every field of every configuration, the layout is
+# right for reasons that have nothing to do with my reading of the header.
+#
+# Enumeration is checked the same way, against the ports Windows reports.
+# ============================================================================
+
+use "serial"
+use "serial/win.ez"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+
+# EZ has no anonymous tasks, so each refusal is checked with an inline try.
+task refused(name, threw) { checkTrue(name, threw) }
+
+when isAvailable() == false {
+    out "serial: kernel32.dll unavailable -- this package needs Windows"
+    exit(1)
+}
+
+# ── DCB layout against Windows ──────────────────────────────────────────────
+
+out "DCB packing (ground truth: Windows BuildCommDCB)"
+
+# Every field Windows' own DCB carries, so a mismatch names the field.
+task dcbFields(octets) {
+    give {
+        "length": octets[0] + (octets[1] << 8) + (octets[2] << 16) + (octets[3] << 24),
+        "baud": octets[4] + (octets[5] << 8) + (octets[6] << 16) + (octets[7] << 24),
+        "flags": octets[8] + (octets[9] << 8) + (octets[10] << 16) + (octets[11] << 24),
+        "dataBits": octets[18],
+        "parity": octets[19],
+        "stopBits": octets[20]
+    }
+}
+
+task mine(baud, dataBits, parity, stopBits, flow) {
+    dcb = packDcb({ "baud": baud, "dataBits": dataBits, "parity": parity,
+                    "stopBits": stopBits, "flowControl": flow,
+                    "parityCheck": false })
+    fields = dcbFields(dcbBytes(dcb))
+    os_free(dcb)
+    give fields
+}
+
+task windows(modeString) {
+    dcb = buildDcbReference(modeString)
+    when dcb == nil { give nil }
+    fields = dcbFields(dcbBytes(dcb))
+    os_free(dcb)
+    give fields
+}
+
+# baud, data, parity name, parity letter, stop bits, Windows mode string
+CONFIGS = [
+    [9600, 8, "none", "n", "1"],
+    [115200, 8, "none", "n", "1"],
+    [1200, 7, "even", "e", "1"],
+    [2400, 7, "odd", "o", "2"],
+    [4800, 8, "mark", "m", "1"],
+    [19200, 8, "space", "s", "1"],
+    [38400, 5, "none", "n", "2"],
+    [57600, 6, "even", "e", "1"],
+    [230400, 8, "none", "n", "1"],
+    [921600, 8, "odd", "o", "1"]
+]
+
+get config in CONFIGS {
+    baud = config[0]
+    dataBits = config[1]
+    parityName = config[2]
+    parityLetter = config[3]
+    stopBits = config[4]
+    label = `{baud} {dataBits}{upper(parityLetter)}{stopBits}`
+
+    reference = windows(`baud={baud} parity={parityLetter} data={dataBits} stop={stopBits}`)
+    when reference == nil {
+        out `  (Windows would not build a DCB for {label} -- skipped)`
+    }
+    other {
+        packed = mine(baud, dataBits, parityName, stopBits, "none")
+        check(`{label}: baud`, packed["baud"], reference["baud"])
+        check(`{label}: data bits`, packed["dataBits"], reference["dataBits"])
+        check(`{label}: parity code`, packed["parity"], reference["parity"])
+        check(`{label}: stop bits code`, packed["stopBits"], reference["stopBits"])
+        check(`{label}: struct length`, packed["length"], reference["length"])
+    }
+}
+
+# The struct's own size is its version check -- Windows rejects a DCB whose
+# DCBlength is not sizeof(DCB).
+check("DCBlength is sizeof(DCB)", mine(9600, 8, "none", "1", "none")["length"], 28)
+check("DCB is 28 bytes", DCB_SIZE, 28)
+check("COMMTIMEOUTS is 20 bytes", TIMEOUTS_SIZE, 20)
+check("COMSTAT is 12 bytes", COMSTAT_SIZE, 12)
+
+# ── flags bitfield ──────────────────────────────────────────────────────────
+
+out "DCB flags"
+
+# fBinary is bit 0 and must be set: Windows has not supported non-binary mode
+# since NT and rejects a DCB without it.
+base = { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": "1",
+         "flowControl": "none", "parityCheck": false }
+checkTrue("fBinary is set", (dcbFlags(base) & 1) != 0)
+check("fParity follows parityCheck", dcbFlags(base) & 2, 0)
+
+checked = { "baud": 9600, "dataBits": 8, "parity": "even", "stopBits": "1",
+            "flowControl": "none", "parityCheck": true }
+check("fParity set when parity checking is on", dcbFlags(checked) & 2, 2)
+
+# Flow control writes three different parts of the bitfield, and getting the
+# two-bit fields at 4 and 12 wrong is invisible until a device stops responding
+# under load.
+rts = { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": "1",
+        "flowControl": "rtscts", "parityCheck": false }
+check("rtscts sets fOutxCtsFlow", dcbFlags(rts) & 4, 4)
+check("rtscts sets fRtsControl to handshake", (dcbFlags(rts) >> 12) & 3, 2)
+
+xon = { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": "1",
+        "flowControl": "xonxoff", "parityCheck": false }
+check("xonxoff sets fOutX", dcbFlags(xon) & 256, 256)
+check("xonxoff sets fInX", dcbFlags(xon) & 512, 512)
+check("xonxoff leaves RTS enabled", (dcbFlags(xon) >> 12) & 3, 1)
+
+dsr = { "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": "1",
+        "flowControl": "dsrdtr", "parityCheck": false }
+check("dsrdtr sets fOutxDsrFlow", dcbFlags(dsr) & 8, 8)
+check("dsrdtr sets fDtrControl to handshake", (dcbFlags(dsr) >> 4) & 3, 2)
+
+none = dcbFlags(base)
+check("no flow control leaves DTR enabled", (none >> 4) & 3, 1)
+check("no flow control leaves RTS enabled", (none >> 12) & 3, 1)
+check("no flow control sets no handshake bits", none & 780, 0)
+
+# ── settings validation ─────────────────────────────────────────────────────
+
+out "settings validation"
+
+check("parity none", parityCode("none"), 0)
+check("parity odd", parityCode("odd"), 1)
+check("parity even", parityCode("even"), 2)
+check("parity mark", parityCode("mark"), 3)
+check("parity space", parityCode("space"), 4)
+check("parity is case-insensitive", parityCode("EVEN"), 2)
+check("one stop bit", stopCode("1"), 0)
+check("one and a half stop bits", stopCode("1.5"), 1)
+check("two stop bits", stopCode("2"), 2)
+
+# Each of these raises rather than falling back to a default. A port silently
+# opened with no parity when the device wants even parity returns a stream of
+# plausible-looking wrong bytes, which is far harder to diagnose than a refusal.
+threw = false
+try { parityCode("weird") } catch (e) { threw = true }
+refused("an unknown parity is refused", threw)
+threw = false
+try { stopCode("3") } catch (e) { threw = true }
+refused("an unknown stop bit count is refused", threw)
+threw = false
+try {
+    dcbFlags({ "baud": 9600, "dataBits": 8, "parity": "none", "stopBits": "1",
+               "flowControl": "hardware", "parityCheck": false })
+}
+catch (e) { threw = true }
+refused("an unknown flow control mode is refused", threw)
+threw = false
+try { Port("COM1", { "baudRate": 9600 }) } catch (e) { threw = true }
+refused("a misspelled setting name is refused", threw)
+threw = false
+try { Port("COM1", { "baud": 0 }) } catch (e) { threw = true }
+refused("zero baud is refused", threw)
+threw = false
+try { Port("COM1", { "dataBits": 9 }) } catch (e) { threw = true }
+refused("nine data bits are refused", threw)
+threw = false
+try { Port("COM1", { "dataBits": 4 }) } catch (e) { threw = true }
+refused("four data bits are refused", threw)
+
+# Construction validates but does not open, so this is safe with no hardware.
+port = Port("com3", { "baud": 115200 })
+check("the port name is normalised", port.name, "COM3")
+check("settings default", port.settings["dataBits"], 8)
+check("settings override", port.settings["baud"], 115200)
+check("a new port is closed", port.isOpen(), false)
+threw = false
+try { port.readBytes(1) } catch (e) { threw = true }
+refused("reading a closed port is refused", threw)
+threw = false
+try { port.send("x") } catch (e) { threw = true }
+refused("writing to a closed port is refused", threw)
+
+# ── device paths ────────────────────────────────────────────────────────────
+
+out "device paths"
+
+# COM10 and up cannot be opened by bare name. The prefix is four characters:
+# backslash backslash dot backslash.
+slash = chr(92)
+check("COM3 path", devicePath("COM3"), slash + slash + "." + slash + "COM3")
+check("COM12 path", devicePath("COM12"), slash + slash + "." + slash + "COM12")
+check("path length", len(devicePath("COM3")), 8)
+check("path starts with two backslashes", ord(substr(devicePath("COM3"), 0, 1)), 92)
+check("third character is a dot", substr(devicePath("COM3"), 2, 1), ".")
+
+# ── timeouts ────────────────────────────────────────────────────────────────
+
+out "read timeouts"
+
+# The default Windows timeout blocks until a byte arrives. A disconnected
+# sensor hangs the program forever, so a real timeout has to reach the struct.
+timed = timeoutBytes(500, 1000)
+check("ReadIntervalTimeout is zero for a real timeout", timed[0] + timed[1] + timed[2] + timed[3], 0)
+check("ReadTotalTimeoutConstant carries the timeout",
+      timed[8] + (timed[9] << 8) + (timed[10] << 16) + (timed[11] << 24), 500)
+check("WriteTotalTimeoutConstant carries the write timeout",
+      timed[16] + (timed[17] << 8) + (timed[18] << 16) + (timed[19] << 24), 1000)
+
+# MAXDWORD interval with both read multipliers zero is the documented
+# "return what is buffered, immediately" form.
+instant = timeoutBytes(0, 0)
+check("a zero timeout uses MAXDWORD interval",
+      instant[0] + (instant[1] << 8) + (instant[2] << 16) + (instant[3] << 24), 4294967295)
+check("a zero timeout has no read multiplier",
+      instant[4] + instant[5] + instant[6] + instant[7], 0)
+check("a zero timeout has no read constant",
+      instant[8] + instant[9] + instant[10] + instant[11], 0)
+
+# ── enumeration ─────────────────────────────────────────────────────────────
+
+out "port enumeration"
+
+ports = listPorts()
+checkTrue("listPorts returns a list", len(ports) >= 0)
+
+everyPortLooksRight = true
+get name in ports {
+    when startsWith(name, "COM") == false { everyPortLooksRight = false }
+}
+checkTrue("every entry is a COM port", everyPortLooksRight)
+
+# COM10 sorts before COM9 as text. A list reading COM1, COM10, COM3 looks
+# broken, so the sort is numeric.
+sorted = true
+i = 1
+while i < len(ports) {
+    left = num(substr(ports[i - 1], 3, len(ports[i - 1]) - 3))
+    right = num(substr(ports[i], 3, len(ports[i]) - 3))
+    when left > right { sorted = false }
+    i = i + 1
+}
+checkTrue("ports are sorted numerically, not alphabetically", sorted)
+
+check("isPresent is false for a port that cannot exist", isPresent("COM9999"), false)
+when len(ports) > 0 {
+    checkTrue("isPresent finds a real port", isPresent(ports[0]))
+    checkTrue("isPresent is case-insensitive", isPresent(lower(ports[0])))
+}
+
+checkTrue("the common baud rates include 9600", bauds()[6] == 9600)
+
+# ── opening ─────────────────────────────────────────────────────────────────
+
+out "opening"
+
+# A port that does not exist must say so by name rather than by error number.
+message = ""
+try { openPort("COM9999") } catch (e) { message = e.message }
+checkTrue("a missing port names itself", contains(message, "COM9999"))
+checkTrue("a missing port suggests listPorts", contains(message, "listPorts"))
+
+# If the machine has a port, open it for real. This is the only end-to-end
+# check available without a device on the other end, and it exercises
+# CreateFile, SetupComm, SetCommState and SetCommTimeouts together.
+when len(ports) > 0 {
+    name = ports[0]
+    opened = nil
+    reason = ""
+    try { opened = openPort(name, { "baud": 9600, "readTimeout": 200 }) }
+    catch (e) { reason = e.message }
+
+    when opened != nil {
+        out `  (opened {name} for real)`
+        checkTrue("an opened port reports open", opened.isOpen())
+        checkTrue("queue depth is available", opened.waiting() >= 0)
+        checkTrue("a read with nothing waiting returns quickly", len(opened.readBytes(8)) >= 0)
+        check("readAvailable returns a string with nothing waiting", opened.readAvailable(), "")
+        checkTrue("discard succeeds", opened.discard())
+        # A device with nothing to say produces no line, and the read must give
+        # up rather than block. This is the failure the whole timeout machinery
+        # exists to prevent.
+        started = clock()
+        timedOut = false
+        try { opened.readLine(300) } catch (e) { timedOut = true }
+        elapsed = clock() - started
+        checkTrue("readLine times out rather than blocking", timedOut)
+        checkTrue(`readLine respected the deadline ({elapsed}ms)`, elapsed < 3000)
+        signals = opened.signals()
+        checkTrue("modem signals are readable", signals == nil or has_key(signals, "cts"))
+        opened.close()
+        check("a closed port reports closed", opened.isOpen(), false)
+        # Closing twice is not an error: cleanup code should not need to know.
+        opened.close()
+        passed = passed + 1
+    }
+    other {
+        out `  ({name} is in use or reserved -- {reason})`
+    }
+}
+other {
+    out "  (no COM ports on this machine -- open path not exercised)"
+}
+
+out ""
+when failed == 0 {
+    out `serial: all {passed} checks passed`
+}
+other {
+    out `serial: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

@@ -1,0 +1,400 @@
+# ============================================================================
+# pki — public-key signature verification for EZ
+#
+#   use "pki"
+#
+#   key = PublicKey.fromJwk(jwksKey)          # what a JWKS endpoint serves
+#   key.verify("RS256", signingInput, signature)
+#
+#   key = PublicKey.fromPem(readFile("public.pem"))
+#   cert = Certificate.fromPem(readFile("server.crt"))
+#
+# `crypto` covers the symmetric half: hashing, HMAC, AES. This is the other
+# half -- verifying that something was signed by the holder of a private key
+# you do not have.
+#
+# The gap it closes is concrete. `oauth` receives an OIDC id_token from Google,
+# Microsoft or Apple, and every one of those is signed RS256. `jwt` could only
+# check HMAC signatures, so the token could be decoded but not verified: you
+# were trusting the transport rather than the signature. With this, `jwt` can
+# verify them properly.
+#
+# Verification runs through Windows CNG (bcrypt.dll), not a hand-rolled bignum
+# implementation. Modular exponentiation written in an interpreter would be
+# both far too slow and exactly the kind of code that is subtly wrong in ways
+# tests do not catch.
+# ============================================================================
+
+use "crypto"
+use "pki/asn1.ez"
+use "pki/native.ez"
+
+export model PkiError {
+    init(message) { self.message = message }
+    task toString() { give "PkiError: " + self.message }
+}
+
+# OIDs for the key types this understands.
+OID_RSA = "1.2.840.113549.1.1.1"
+OID_EC = "1.2.840.10045.2.1"
+OID_P256 = "1.2.840.10045.3.1.7"
+OID_P384 = "1.3.132.0.34"
+OID_P521 = "1.3.132.0.35"
+
+export model PublicKey {
+
+    # kind is "RSA" or "EC".
+    init(kind, parts) {
+        self.kind = kind
+        self.parts = parts
+    }
+
+    # A JWK, which is what a JWKS endpoint serves and therefore the usual way
+    # an id_token's key arrives.
+    #
+    #   { "kty": "RSA", "n": "<base64url>", "e": "AQAB" }
+    #   { "kty": "EC", "crv": "P-256", "x": "<base64url>", "y": "<base64url>" }
+    static task fromJwk(jwk) {
+        when jwk == nil or type(jwk) != "dictionary" {
+            throw PkiError("a JWK must be an object")
+        }
+        kty = str(jwk["kty"])
+        when kty == "RSA" {
+            when jwk["n"] == nil or jwk["e"] == nil {
+                throw PkiError("an RSA JWK needs both n and e")
+            }
+            give PublicKey("RSA", {
+                "modulus": base64UrlToBytes(jwk["n"]),
+                "exponent": base64UrlToBytes(jwk["e"])
+            })
+        }
+        when kty == "EC" {
+            when jwk["x"] == nil or jwk["y"] == nil {
+                throw PkiError("an EC JWK needs both x and y")
+            }
+            # Checked here rather than at verification time: a key on a curve
+            # this cannot use is unusable, and discovering that during a
+            # request is worse than discovering it when the key is loaded.
+            curve = requireCurve(str(jwk["crv"]))
+            give PublicKey("EC", {
+                "curve": curve,
+                "x": base64UrlToBytes(jwk["x"]),
+                "y": base64UrlToBytes(jwk["y"])
+            })
+        }
+        throw PkiError(`key type '{kty}' is not supported (RSA and EC are)`)
+    }
+
+    # A PEM public key: either "PUBLIC KEY" (SPKI) or "RSA PUBLIC KEY"
+    # (PKCS#1).
+    static task fromPem(text) {
+        block = fromPem(text)
+        when block["label"] == "RSA PUBLIC KEY" {
+            give PublicKey.fromPkcs1(block["der"])
+        }
+        when block["label"] == "PUBLIC KEY" {
+            give PublicKey.fromSpki(block["der"])
+        }
+        when block["label"] == "CERTIFICATE" {
+            give Certificate.fromDer(block["der"]).publicKey()
+        }
+        throw PkiError(`'{block["label"]}' is not a public key block`)
+    }
+
+    # SubjectPublicKeyInfo ::= SEQUENCE { algorithm, subjectPublicKey BIT STRING }
+    static task fromSpki(der) {
+        outer = expectTag(der, 0, TAG_SEQUENCE, "SubjectPublicKeyInfo")
+        algorithm = expectTag(der, outer["start"], TAG_SEQUENCE, "an AlgorithmIdentifier")
+        oid = readOid(der, algorithm["start"])
+
+        when oid["value"] == OID_RSA {
+            bitString = readBitString(der, algorithm["next"])
+            give PublicKey.fromPkcs1(bitString["value"])
+        }
+        when oid["value"] == OID_EC {
+            curveOid = readOid(der, oid["next"])
+            curve = curveNameFor(curveOid["value"])
+            bitString = readBitString(der, algorithm["next"])
+            point = bitString["value"]
+            # An uncompressed EC point is 0x04 then X and Y, each half the rest.
+            when len(point) < 3 or point[0] != 4 {
+                throw PkiError("only uncompressed EC points are supported")
+            }
+            half = floor((len(point) - 1) / 2)
+            give PublicKey("EC", {
+                "curve": curve,
+                "x": sliceBytes(point, 1, half),
+                "y": sliceBytes(point, 1 + half, half)
+            })
+        }
+        throw PkiError(`the key algorithm {oid["value"]} is not supported`)
+    }
+
+    # RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }
+    static task fromPkcs1(der) {
+        outer = expectTag(der, 0, TAG_SEQUENCE, "RSAPublicKey")
+        modulus = readInteger(der, outer["start"])
+        exponent = readInteger(der, modulus["next"])
+        give PublicKey("RSA", { "modulus": modulus["value"], "exponent": exponent["value"] })
+    }
+
+    # Straight from the two numbers, for a key you already hold.
+    static task fromRsa(modulusBytes, exponentBytes) {
+        give PublicKey("RSA", { "modulus": modulusBytes, "exponent": exponentBytes })
+    }
+
+    task bits() {
+        when self.kind == "RSA" { give len(self.parts["modulus"]) * 8 }
+        give len(self.parts["x"]) * 8
+    }
+
+    # Does `signature` match `message` under `algorithm`?
+    #
+    #   RS256 RS384 RS512   RSASSA-PKCS1-v1_5
+    #   PS256 PS384 PS512   RSASSA-PSS
+    #   ES256 ES384 ES512   ECDSA
+    #
+    # Returns a boolean. A wrong signature is an ordinary answer, not an
+    # error -- the caller decides what a failure means.
+    task verify(algorithm, message, signature) {
+        spec = algorithmSpec(algorithm)
+        when spec["family"] != self.kind {
+            throw PkiError(`{algorithm} needs a {spec["family"]} key, but this is {self.kind}`)
+        }
+        digest = digestFor(spec["hash"], message)
+        when self.kind == "RSA" {
+            give verifyRsa(self.parts["modulus"], self.parts["exponent"],
+                           digest, signature, spec["hash"], spec["padding"])
+        }
+        give verifyEcdsa(self.parts["curve"], self.parts["x"], self.parts["y"],
+                         digest, signature, spec["hash"])
+    }
+
+    # The thumbprint of the key, for matching a JWKS entry or pinning.
+    task fingerprint() {
+        when self.kind == "RSA" {
+            give Hash.sha256(bytesToString(self.parts["modulus"]))
+        }
+        joined = []
+        get b in self.parts["x"] { push(joined, b) }
+        get b in self.parts["y"] { push(joined, b) }
+        give Hash.sha256(bytesToString(joined))
+    }
+
+    task toString() { give `PublicKey({self.kind}, {self.bits()} bits)` }
+}
+
+export task requireCurve(curve) {
+    when curve == "P-256" or curve == "P-384" or curve == "P-521" { give curve }
+    throw PkiError(`the curve '{curve}' is not supported (P-256, P-384 and P-521 are)`)
+}
+
+task curveNameFor(oid) {
+    when oid == OID_P256 { give "P-256" }
+    when oid == OID_P384 { give "P-384" }
+    when oid == OID_P521 { give "P-521" }
+    throw PkiError(`the curve {oid} is not supported (P-256, P-384 and P-521 are)`)
+}
+
+task algorithmSpec(algorithm) {
+    name = upper(str(algorithm))
+    when name == "RS256" { give { "family": "RSA", "hash": "SHA256", "padding": "PKCS1" } }
+    when name == "RS384" { give { "family": "RSA", "hash": "SHA384", "padding": "PKCS1" } }
+    when name == "RS512" { give { "family": "RSA", "hash": "SHA512", "padding": "PKCS1" } }
+    when name == "PS256" { give { "family": "RSA", "hash": "SHA256", "padding": "PSS" } }
+    when name == "PS384" { give { "family": "RSA", "hash": "SHA384", "padding": "PSS" } }
+    when name == "PS512" { give { "family": "RSA", "hash": "SHA512", "padding": "PSS" } }
+    when name == "ES256" { give { "family": "EC", "hash": "SHA256", "padding": "NONE" } }
+    when name == "ES384" { give { "family": "EC", "hash": "SHA384", "padding": "NONE" } }
+    when name == "ES512" { give { "family": "EC", "hash": "SHA512", "padding": "NONE" } }
+    # "none" is refused by name, because accepting it is the classic JWT
+    # forgery: strip the signature, set alg to none, and every token verifies.
+    when name == "NONE" {
+        throw PkiError("the 'none' algorithm is not a signature and is never accepted")
+    }
+    throw PkiError(`'{algorithm}' is not a signature algorithm this supports`)
+}
+
+task digestFor(hashName, message) {
+    when hashName == "SHA256" { give Hash.sha256Bytes(message) }
+    when hashName == "SHA384" { give Hash.sha384Bytes(message) }
+    when hashName == "SHA512" { give Hash.sha512Bytes(message) }
+    throw PkiError(`unsupported hash {hashName}`)
+}
+
+# ============================================================================
+# X.509
+# ============================================================================
+
+# Reads the fields people actually check: who it is for, who issued it, when it
+# expires, and the key inside it.
+export model Certificate {
+    init(der, fields) {
+        self.der = der
+        self.subject = fields["subject"]
+        self.issuer = fields["issuer"]
+        self.notBefore = fields["notBefore"]
+        self.notAfter = fields["notAfter"]
+        self.serial = fields["serial"]
+        self.spkiOffset = fields["spkiOffset"]
+    }
+
+    static task fromPem(text) {
+        block = fromPem(text, "CERTIFICATE")
+        give Certificate.fromDer(block["der"])
+    }
+
+    static task fromDer(der) {
+        outer = expectTag(der, 0, TAG_SEQUENCE, "a Certificate")
+        tbs = expectTag(der, outer["start"], TAG_SEQUENCE, "a TBSCertificate")
+        at = tbs["start"]
+
+        # An optional, explicitly tagged [0] version comes first when present.
+        first = readTlv(der, at)
+        when first["tag"] == 160 { at = first["next"] }
+
+        serialElement = readTlv(der, at)
+        serial = hexOf(sliceBytes(der, serialElement["start"], serialElement["length"]))
+        at = serialElement["next"]
+
+        at = readTlv(der, at)["next"]              # signature algorithm
+        issuerElement = readTlv(der, at)
+        issuer = readName(der, at)
+        at = issuerElement["next"]
+
+        validity = expectTag(der, at, TAG_SEQUENCE, "a Validity")
+        notBefore = readString(der, validity["start"])
+        notAfter = readString(der, notBefore["next"])
+        at = validity["next"]
+
+        subjectElement = readTlv(der, at)
+        subject = readName(der, at)
+        at = subjectElement["next"]
+
+        give Certificate(der, {
+            "subject": subject, "issuer": issuer,
+            "notBefore": readTime(notBefore["value"]),
+            "notAfter": readTime(notAfter["value"]),
+            "serial": serial, "spkiOffset": at
+        })
+    }
+
+    task publicKey() { give PublicKey.fromSpki(sliceFrom(self.der, self.spkiOffset)) }
+
+    # Is `at` (unix seconds) inside the validity window? Expiry is the check
+    # everyone forgets, and a certificate is a statement with a deadline.
+    task isValidAt(at) {
+        give at >= self.notBefore and at <= self.notAfter
+    }
+
+    task commonName() {
+        when has_key(self.subject, "CN") { give self.subject["CN"] }
+        give nil
+    }
+
+    task toString() { give `Certificate({self.commonName()})` }
+}
+
+# A Name is a sequence of sets of attribute type/value pairs. Only the common
+# short names are mapped; anything else is kept under its OID.
+ATTRIBUTE_NAMES = {
+    "2.5.4.3": "CN", "2.5.4.6": "C", "2.5.4.7": "L", "2.5.4.8": "ST",
+    "2.5.4.10": "O", "2.5.4.11": "OU", "1.2.840.113549.1.9.1": "emailAddress"
+}
+
+task readName(der, offset) {
+    element = expectTag(der, offset, TAG_SEQUENCE, "a Name")
+    result = {}
+    at = element["start"]
+    while at < element["next"] {
+        rdn = readTlv(der, at)
+        inner = rdn["start"]
+        while inner < rdn["next"] {
+            pair = readTlv(der, inner)
+            oid = readOid(der, pair["start"])
+            value = readString(der, oid["next"])
+            key = oid["value"]
+            when has_key(ATTRIBUTE_NAMES, key) { key = ATTRIBUTE_NAMES[key] }
+            result[key] = value["value"]
+            inner = pair["next"]
+        }
+        at = rdn["next"]
+    }
+    give result
+}
+
+# UTCTime is "YYMMDDHHMMSSZ" and GeneralizedTime is "YYYYMMDDHHMMSSZ". The
+# two-digit year follows RFC 5280: 50 and above means 19xx.
+task readTime(text) {
+    body = str(text)
+    when len(body) < 11 { give 0 }
+    year = 0
+    at = 0
+    when len(body) >= 15 {
+        year = num(substr(body, 0, 4))
+        at = 4
+    }
+    other {
+        shortYear = num(substr(body, 0, 2))
+        year = 2000 + shortYear
+        when shortYear >= 50 { year = 1900 + shortYear }
+        at = 2
+    }
+    month = num(substr(body, at, 2))
+    day = num(substr(body, at + 2, 2))
+    hour = num(substr(body, at + 4, 2))
+    minute = num(substr(body, at + 6, 2))
+    second = 0
+    when len(body) >= at + 10 { second = num(substr(body, at + 8, 2)) }
+    give daysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second
+}
+
+task daysFromCivil(year, month, day) {
+    y = year
+    when month <= 2 { y = y - 1 }
+    era = floor(y / 400)
+    yoe = y - era * 400
+    shifted = month - 3
+    when month <= 2 { shifted = month + 9 }
+    doy = floor((153 * shifted + 2) / 5) + day - 1
+    doe = yoe * 365 + floor(yoe / 4) - floor(yoe / 100) + doy
+    give era * 146097 + doe - 719468
+}
+
+task sliceFrom(bytes, offset) {
+    piece = []
+    i = offset
+    while i < len(bytes) {
+        push(piece, bytes[i])
+        i = i + 1
+    }
+    give piece
+}
+
+task hexOf(bytes) {
+    digits = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(digits, floor(b / 16), 1) + substr(digits, b % 16, 1)
+    }
+    give result
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task publicKeyFromJwk(jwk) { give PublicKey.fromJwk(jwk) }
+export task publicKeyFromPem(text) { give PublicKey.fromPem(text) }
+export task certificateFromPem(text) { give Certificate.fromPem(text) }
+
+# Picks the key with a matching `kid` out of a JWKS document. A JWKS carries
+# several keys precisely so the issuer can rotate them, and the token's header
+# says which one signed it.
+export task keyFromJwks(jwks, kid) {
+    when jwks == nil or jwks["keys"] == nil {
+        throw PkiError("a JWKS must have a 'keys' array")
+    }
+    get entry in jwks["keys"] {
+        when kid == nil or entry["kid"] == kid { give PublicKey.fromJwk(entry) }
+    }
+    throw PkiError(`no key with kid '{kid}' in this JWKS -- the issuer may have rotated it`)
+}

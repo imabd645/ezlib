@@ -1,0 +1,11 @@
+{
+  "name": "html",
+  "version": "1.0.0",
+  "description": "HTML parsing and CSS selectors for EZ. A lenient parser that recovers from real-world markup, with querying, link and table extraction.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["html", "parser", "scraping", "css", "selector", "dom", "web"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

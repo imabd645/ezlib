@@ -1,0 +1,929 @@
+# ============================================================================
+# chart — charts as SVG, with no dependencies
+#
+#   use "chart"
+#
+#   writeFile("sales.svg", line({
+#       "title": "Revenue",
+#       "labels": ["Jan", "Feb", "Mar", "Apr"],
+#       "series": [{ "name": "2025", "values": [12, 19, 15, 24] }]
+#   }))
+#
+# Numbers arrive from `db`, `csv` and `orm` already; the missing step is seeing
+# them. SVG is the right output: it is text, so it needs no image library; it
+# scales, so it survives being embedded anywhere; and `serve` can return it
+# directly, `pdf` can embed it, and a browser renders it.
+#
+# The parts that make a chart readable rather than merely correct are the
+# defaults here: axes on round numbers, a y-axis including zero for bars,
+# labels that thin out instead of overlapping, and a legend only when there is
+# more than one series.
+# ============================================================================
+
+use "chart/scale.ez"
+use "chart/svg.ez"
+
+# Chosen to stay distinguishable in order, and to survive being printed in
+# greyscale -- the lightness runs down the list rather than staying flat.
+PALETTE = ["#2563eb", "#dc2626", "#16a34a", "#ea580c", "#7c3aed",
+           "#0891b2", "#ca8a04", "#db2777", "#4b5563", "#65a30d"]
+
+AXIS_COLOR = "#94a3b8"
+GRID_COLOR = "#e2e8f0"
+TEXT_COLOR = "#334155"
+MUTED_COLOR = "#64748b"
+
+DEFAULTS = {
+    "width": 640,
+    "height": 400,
+    "title": nil,
+    "labels": nil,
+    "series": nil,
+    "values": nil,
+    "colors": nil,
+    "yLabel": nil,
+    "xLabel": nil,
+    "showGrid": true,
+    "showLegend": nil,
+    "showValues": false,
+    "yMin": nil,
+    "yMax": nil,
+    "ticks": 5,
+    "stacked": false,
+    "smooth": false,
+    "background": "#ffffff",
+    "donut": false
+}
+
+export model ChartError {
+    init(message) { self.message = message }
+    task toString() { give "ChartError: " + self.message }
+}
+
+# ── input ───────────────────────────────────────────────────────────────────
+
+task optionsFrom(given) {
+    settings = {}
+    get key in keys(DEFAULTS) { settings[key] = DEFAULTS[key] }
+    when given != nil {
+        get key in keys(given) {
+            when has_key(settings, key) == false {
+                throw ChartError(`'{key}' is not a chart option`)
+            }
+            settings[key] = given[key]
+        }
+    }
+    when settings["width"] <= 0 or settings["height"] <= 0 {
+        throw ChartError("width and height must be positive")
+    }
+    give settings
+}
+
+# A chart takes either `values` (one series) or `series` (several). Accepting
+# both, and a bare list, is worth the branch: `line([1, 2, 3])` is what someone
+# tries first, and making that work is the difference between a package used
+# once and one used often.
+task seriesFrom(settings, source) {
+    when source != nil and typeOf(source) == "array" {
+        # A list of dictionaries or a list of lists is several series; a list
+        # of numbers is one. Guessing here is worth it: line([1, 2, 3]) and
+        # line([[1, 2], [3, 4]]) are both what someone tries first.
+        when len(source) > 0 and typeOf(source[0]) == "dictionary" {
+            give normalise(source)
+        }
+        when len(source) > 0 and typeOf(source[0]) == "array" {
+            give normalise(source)
+        }
+        give normalise([{ "name": nil, "values": source }])
+    }
+    when settings["series"] != nil { give normalise(settings["series"]) }
+    when settings["values"] != nil {
+        give normalise([{ "name": nil, "values": settings["values"] }])
+    }
+    throw ChartError("a chart needs either 'values' or 'series'")
+}
+
+task normalise(raw) {
+    result = []
+    index = 0
+    get entry in raw {
+        item = entry
+        when typeOf(entry) == "array" { item = { "name": nil, "values": entry } }
+        when has_key(item, "values") == false {
+            throw ChartError("each series needs a 'values' list")
+        }
+        numbers = []
+        get value in item["values"] {
+            # nil is a gap, not a zero. A missing reading plotted as zero
+            # invents a cliff that was never in the data.
+            when value == nil { push(numbers, nil) }
+            other { push(numbers, num(value)) }
+        }
+        name = nil
+        when has_key(item, "name") { name = item["name"] }
+        tint = nil
+        when has_key(item, "color") { tint = item["color"] }
+        push(result, { "name": name, "values": numbers, "color": tint })
+        index = index + 1
+    }
+    when len(result) == 0 { throw ChartError("a chart needs at least one series") }
+    give result
+}
+
+task colorAt(settings, series, index) {
+    when series["color"] != nil { give series["color"] }
+    when settings["colors"] != nil {
+        palette = settings["colors"]
+        give palette[index % len(palette)]
+    }
+    give PALETTE[index % len(PALETTE)]
+}
+
+task labelsFor(settings, series) {
+    when settings["labels"] != nil { give settings["labels"] }
+    longest = 0
+    get item in series {
+        when len(item["values"]) > longest { longest = len(item["values"]) }
+    }
+    made = []
+    repeat i = 1 to longest { push(made, str(i)) }
+    give made
+}
+
+task extentOf(series, stacked) {
+    low = nil
+    high = nil
+    when stacked {
+        count = 0
+        get item in series {
+            when len(item["values"]) > count { count = len(item["values"]) }
+        }
+        repeat i = 0 to count - 1 {
+            total = 0
+            get item in series {
+                when i < len(item["values"]) and item["values"][i] != nil {
+                    total = total + item["values"][i]
+                }
+            }
+            when low == nil or total < low { low = total }
+            when high == nil or total > high { high = total }
+        }
+    }
+    other {
+        get item in series {
+            get value in item["values"] {
+                when value != nil {
+                    when low == nil or value < low { low = value }
+                    when high == nil or value > high { high = value }
+                }
+            }
+        }
+    }
+    when low == nil {
+        low = 0
+        high = 1
+    }
+    give { "low": low, "high": high }
+}
+
+# ── layout ──────────────────────────────────────────────────────────────────
+
+# Margins are computed, not fixed: a y-axis labelled 1,250,000 needs more room
+# than one labelled 5, and a fixed margin either wastes half the width or
+# clips the labels.
+task layoutFor(settings, series, axis, labels) {
+    widest = 0
+    get value in axis["ticks"] {
+        rendered = withCommas(formatTick(value, axis["step"]))
+        when len(rendered) > widest { widest = len(rendered) }
+    }
+    left = 16 + (widest * 7)
+    when settings["yLabel"] != nil { left = left + 18 }
+
+    top = 16
+    when settings["title"] != nil { top = 48 }
+
+    bottom = 44
+    when settings["xLabel"] != nil { bottom = bottom + 20 }
+    legend = showLegend(settings, series)
+    when legend { bottom = bottom + 26 }
+
+    right = 20
+    give { "left": left, "top": top, "right": right, "bottom": bottom,
+           "plotWidth": settings["width"] - left - right,
+           "plotHeight": settings["height"] - top - bottom,
+           "legend": legend }
+}
+
+task showLegend(settings, series) {
+    when settings["showLegend"] != nil { give settings["showLegend"] }
+    # A legend for a single unnamed series is noise.
+    when len(series) == 1 and series[0]["name"] == nil { give false }
+    give len(series) > 1
+}
+
+task frame(settings, parts) {
+    body = join(parts, "\n  ")
+    give "<svg xmlns=\"http://www.w3.org/2000/svg\" " +
+         "width=\"" + str(settings["width"]) + "\" " +
+         "height=\"" + str(settings["height"]) + "\" " +
+         "viewBox=\"0 0 " + str(settings["width"]) + " " + str(settings["height"]) + "\" " +
+         "role=\"img\">\n  " + body + "\n</svg>"
+}
+
+task background(settings) {
+    when settings["background"] == nil { give [] }
+    give [svgRect(0, 0, settings["width"], settings["height"], settings["background"])]
+}
+
+task titleOf(settings) {
+    when settings["title"] == nil { give [] }
+    give [svgLabel(settings["width"] / 2, 28, settings["title"],
+               { "font-size": "16", "font-weight": "600",
+                 "text-anchor": "middle", "fill": "#0f172a" })]
+}
+
+# The y-axis, its grid, and its labels.
+task verticalAxis(settings, layout, axis) {
+    parts = []
+    left = layout["left"]
+    right = left + layout["plotWidth"]
+    get value in axis["ticks"] {
+        y = project(value, axis["min"], axis["max"],
+                    layout["top"] + layout["plotHeight"], layout["top"])
+        when settings["showGrid"] { push(parts, svgLine(left, y, right, y, GRID_COLOR, 1)) }
+        push(parts, svgLabel(left - 8, y + 4, withCommas(formatTick(value, axis["step"])),
+                         { "text-anchor": "end", "fill": MUTED_COLOR, "font-size": "11" }))
+    }
+    push(parts, svgLine(left, layout["top"], left, layout["top"] + layout["plotHeight"], AXIS_COLOR, 1))
+    when settings["yLabel"] != nil {
+        centre = layout["top"] + (layout["plotHeight"] / 2)
+        push(parts, svgElement("text",
+            { "x": coord(14), "y": coord(centre),
+              "transform": "rotate(-90 14 " + coord(centre) + ")",
+              "text-anchor": "middle", "font-size": "12", "fill": MUTED_COLOR,
+              "font-family": "system-ui, -apple-system, Segoe UI, sans-serif" },
+            escapeText(settings["yLabel"])))
+    }
+    give parts
+}
+
+# The x-axis. Labels thin out rather than overlapping: 200 categories on a
+# 640-pixel axis cannot all be printed, and printing them anyway produces a
+# grey smear where the labels should be.
+task horizontalAxis(settings, layout, labels, centred) {
+    parts = []
+    baseline = layout["top"] + layout["plotHeight"]
+    push(parts, svgLine(layout["left"], baseline,
+                     layout["left"] + layout["plotWidth"], baseline, AXIS_COLOR, 1))
+
+    count = len(labels)
+    when count > 0 {
+        widest = 0
+        get name in labels {
+            when len(str(name)) > widest { widest = len(str(name)) }
+        }
+        perLabel = (widest * 7) + 10
+        room = layout["plotWidth"] / perLabel
+        stride = 1
+        when room > 0 and count > room { stride = ceil(count / room) }
+
+        i = 0
+        while i < count {
+            x = labelPosition(layout, i, count, centred)
+            push(parts, svgLabel(x, baseline + 18, str(labels[i]),
+                             { "text-anchor": "middle", "fill": MUTED_COLOR,
+                               "font-size": "11" }))
+            i = i + stride
+        }
+    }
+    when settings["xLabel"] != nil {
+        offset = 38
+        push(parts, svgLabel(layout["left"] + (layout["plotWidth"] / 2), baseline + offset,
+                         settings["xLabel"],
+                         { "text-anchor": "middle", "fill": MUTED_COLOR }))
+    }
+    give parts
+}
+
+# A line chart puts points ON the ticks; a bar chart puts them BETWEEN, in the
+# middle of each band.
+task labelPosition(layout, index, count, centred) {
+    when centred {
+        band = layout["plotWidth"] / count
+        give layout["left"] + (band * index) + (band / 2)
+    }
+    when count == 1 { give layout["left"] + (layout["plotWidth"] / 2) }
+    give layout["left"] + ((layout["plotWidth"] / (count - 1)) * index)
+}
+
+task legendOf(settings, layout, series) {
+    when layout["legend"] == false { give [] }
+    parts = []
+    y = settings["height"] - 14
+    when settings["xLabel"] != nil { y = settings["height"] - 12 }
+
+    entries = []
+    index = 0
+    get item in series {
+        name = item["name"]
+        when name == nil { name = "Series " + str(index + 1) }
+        push(entries, { "name": str(name), "color": colorAt(settings, item, index) })
+        index = index + 1
+    }
+
+    total = 0
+    get entry in entries { total = total + (len(entry["name"]) * 7) + 30 }
+    x = (settings["width"] - total) / 2
+    when x < 8 { x = 8 }
+
+    get entry in entries {
+        push(parts, svgRect(x, y - 9, 10, 10, entry["color"], { "rx": "2" }))
+        push(parts, svgLabel(x + 15, y, entry["name"],
+                         { "font-size": "11", "fill": TEXT_COLOR }))
+        x = x + (len(entry["name"]) * 7) + 30
+    }
+    give parts
+}
+
+task axisFor(settings, series, stacked, includeZero) {
+    extent = extentOf(series, stacked)
+    low = extent["low"]
+    high = extent["high"]
+    # A bar starting at 40 rather than 0 exaggerates every difference, which is
+    # the commonest way a chart misleads without anyone intending it.
+    when includeZero {
+        when low > 0 { low = 0 }
+        when high < 0 { high = 0 }
+    }
+    when settings["yMin"] != nil { low = num(settings["yMin"]) }
+    when settings["yMax"] != nil { high = num(settings["yMax"]) }
+    axis = niceScale(low, high, settings["ticks"])
+    when settings["yMin"] != nil { axis["min"] = num(settings["yMin"]) }
+    when settings["yMax"] != nil { axis["max"] = num(settings["yMax"]) }
+    give axis
+}
+
+# ── line ────────────────────────────────────────────────────────────────────
+
+export task line(options, data = nil) {
+    settings = optionsFrom(options)
+    series = seriesFrom(settings, data)
+    labels = labelsFor(settings, series)
+    axis = axisFor(settings, series, false, false)
+    layout = layoutFor(settings, series, axis, labels)
+
+    parts = background(settings)
+    get piece in titleOf(settings) { push(parts, piece) }
+    get piece in verticalAxis(settings, layout, axis) { push(parts, piece) }
+    get piece in horizontalAxis(settings, layout, labels, false) { push(parts, piece) }
+
+    baseline = layout["top"] + layout["plotHeight"]
+    index = 0
+    get item in series {
+        tint = colorAt(settings, item, index)
+        # A gap splits the line into separate runs rather than joining across
+        # it, which would draw a straight segment through data that is missing.
+        get run in runsOf(item["values"]) {
+            points = []
+            get point in run {
+                x = labelPosition(layout, point["index"], len(labels), false)
+                y = project(point["value"], axis["min"], axis["max"], baseline, layout["top"])
+                push(points, [x, y])
+            }
+            when len(points) == 1 {
+                push(parts, svgCircle(points[0][0], points[0][1], 3, tint))
+            }
+            other when len(points) > 1 {
+                push(parts, svgPath(svgPolyline(points), tint, 2))
+            }
+        }
+        when settings["showValues"] {
+            get run in runsOf(item["values"]) {
+                get point in run {
+                    x = labelPosition(layout, point["index"], len(labels), false)
+                    y = project(point["value"], axis["min"], axis["max"], baseline, layout["top"])
+                    push(parts, svgCircle(x, y, 3, tint))
+                    push(parts, svgLabel(x, y - 8, formatTick(point["value"], axis["step"]),
+                                     { "text-anchor": "middle", "font-size": "10",
+                                       "fill": tint }))
+                }
+            }
+        }
+        index = index + 1
+    }
+    get piece in legendOf(settings, layout, series) { push(parts, piece) }
+    give frame(settings, parts)
+}
+
+export task area(options, data = nil) {
+    settings = optionsFrom(options)
+    series = seriesFrom(settings, data)
+    labels = labelsFor(settings, series)
+    axis = axisFor(settings, series, false, true)
+    layout = layoutFor(settings, series, axis, labels)
+
+    parts = background(settings)
+    get piece in titleOf(settings) { push(parts, piece) }
+    get piece in verticalAxis(settings, layout, axis) { push(parts, piece) }
+    get piece in horizontalAxis(settings, layout, labels, false) { push(parts, piece) }
+
+    baseline = layout["top"] + layout["plotHeight"]
+    zero = project(0, axis["min"], axis["max"], baseline, layout["top"])
+    when axis["min"] > 0 { zero = baseline }
+
+    index = 0
+    get item in series {
+        tint = colorAt(settings, item, index)
+        get run in runsOf(item["values"]) {
+            points = []
+            get point in run {
+                x = labelPosition(layout, point["index"], len(labels), false)
+                y = project(point["value"], axis["min"], axis["max"], baseline, layout["top"])
+                push(points, [x, y])
+            }
+            when len(points) > 1 {
+                shape = svgPolyline(points) +
+                        " L" + coord(points[len(points) - 1][0]) + " " + coord(zero) +
+                        " L" + coord(points[0][0]) + " " + coord(zero) + " Z"
+                push(parts, svgTag("path", { "d": shape, "fill": tint,
+                                          "fill-opacity": "0.18", "stroke": "none" }))
+                push(parts, svgPath(svgPolyline(points), tint, 2))
+            }
+        }
+        index = index + 1
+    }
+    get piece in legendOf(settings, layout, series) { push(parts, piece) }
+    give frame(settings, parts)
+}
+
+# Consecutive stretches of present values, each carrying its original index so
+# a gap does not shift everything after it leftwards.
+task runsOf(values) {
+    runs = []
+    current = []
+    i = 0
+    while i < len(values) {
+        when values[i] == nil {
+            when len(current) > 0 {
+                push(runs, current)
+                current = []
+            }
+        }
+        other { push(current, { "index": i, "value": values[i] }) }
+        i = i + 1
+    }
+    when len(current) > 0 { push(runs, current) }
+    give runs
+}
+
+# ── bar ─────────────────────────────────────────────────────────────────────
+
+export task bar(options, data = nil) {
+    settings = optionsFrom(options)
+    series = seriesFrom(settings, data)
+    labels = labelsFor(settings, series)
+    axis = axisFor(settings, series, settings["stacked"], true)
+    layout = layoutFor(settings, series, axis, labels)
+
+    parts = background(settings)
+    get piece in titleOf(settings) { push(parts, piece) }
+    get piece in verticalAxis(settings, layout, axis) { push(parts, piece) }
+    get piece in horizontalAxis(settings, layout, labels, true) { push(parts, piece) }
+
+    baseline = layout["top"] + layout["plotHeight"]
+    zero = project(0, axis["min"], axis["max"], baseline, layout["top"])
+    count = len(labels)
+    band = layout["plotWidth"] / count
+    padding = band * 0.15
+
+    when settings["stacked"] {
+        get piece in stackedBars(settings, layout, axis, series, count, band, padding, zero, baseline) {
+            push(parts, piece)
+        }
+    }
+    other {
+        get piece in groupedBars(settings, layout, axis, series, count, band, padding, zero, baseline) {
+            push(parts, piece)
+        }
+    }
+    get piece in legendOf(settings, layout, series) { push(parts, piece) }
+    give frame(settings, parts)
+}
+
+task groupedBars(settings, layout, axis, series, count, band, padding, zero, baseline) {
+    parts = []
+    slot = (band - (padding * 2)) / len(series)
+    i = 0
+    while i < count {
+        bandLeft = layout["left"] + (band * i) + padding
+        index = 0
+        get item in series {
+            value = nil
+            when i < len(item["values"]) { value = item["values"][i] }
+            when value != nil {
+                y = project(value, axis["min"], axis["max"], baseline, layout["top"])
+                top = y
+                height = zero - y
+                # A negative bar hangs below the zero line; without this it
+                # would be drawn with a negative height and vanish.
+                when height < 0 {
+                    top = zero
+                    height = 0 - height
+                }
+                when height < 1 { height = 1 }
+                x = bandLeft + (slot * index)
+                push(parts, svgRect(x, top, slot * 0.86, height,
+                                 colorAt(settings, item, index), { "rx": "2" }))
+                when settings["showValues"] {
+                    push(parts, svgLabel(x + (slot * 0.43), top - 5,
+                                     formatTick(value, axis["step"]),
+                                     { "text-anchor": "middle", "font-size": "10",
+                                       "fill": MUTED_COLOR }))
+                }
+            }
+            index = index + 1
+        }
+        i = i + 1
+    }
+    give parts
+}
+
+task stackedBars(settings, layout, axis, series, count, band, padding, zero, baseline) {
+    parts = []
+    width = band - (padding * 2)
+    i = 0
+    while i < count {
+        x = layout["left"] + (band * i) + padding
+        running = 0
+        index = 0
+        get item in series {
+            value = nil
+            when i < len(item["values"]) { value = item["values"][i] }
+            when value != nil {
+                fromY = project(running, axis["min"], axis["max"], baseline, layout["top"])
+                running = running + value
+                toY = project(running, axis["min"], axis["max"], baseline, layout["top"])
+                top = toY
+                height = fromY - toY
+                when height < 0 {
+                    top = fromY
+                    height = 0 - height
+                }
+                push(parts, svgRect(x, top, width, height, colorAt(settings, item, index)))
+            }
+            index = index + 1
+        }
+        i = i + 1
+    }
+    give parts
+}
+
+# Horizontal bars, for the case a vertical chart handles badly: long category
+# names. Twenty product names on an x-axis are unreadable at any angle.
+export task barh(options, data = nil) {
+    settings = optionsFrom(options)
+    series = seriesFrom(settings, data)
+    labels = labelsFor(settings, series)
+    axis = axisFor(settings, series, false, true)
+
+    widest = 0
+    get name in labels {
+        when len(str(name)) > widest { widest = len(str(name)) }
+    }
+    left = 16 + (widest * 7)
+    top = 16
+    when settings["title"] != nil { top = 48 }
+    bottom = 36
+    legend = showLegend(settings, series)
+    when legend { bottom = bottom + 26 }
+    layout = { "left": left, "top": top, "right": 24, "bottom": bottom,
+               "plotWidth": settings["width"] - left - 24,
+               "plotHeight": settings["height"] - top - bottom,
+               "legend": legend }
+
+    parts = background(settings)
+    get piece in titleOf(settings) { push(parts, piece) }
+
+    baseline = layout["top"] + layout["plotHeight"]
+    get value in axis["ticks"] {
+        x = project(value, axis["min"], axis["max"], layout["left"],
+                    layout["left"] + layout["plotWidth"])
+        when settings["showGrid"] { push(parts, svgLine(x, layout["top"], x, baseline, GRID_COLOR, 1)) }
+        push(parts, svgLabel(x, baseline + 16, withCommas(formatTick(value, axis["step"])),
+                         { "text-anchor": "middle", "fill": MUTED_COLOR, "font-size": "11" }))
+    }
+    zero = project(0, axis["min"], axis["max"], layout["left"],
+                   layout["left"] + layout["plotWidth"])
+    push(parts, svgLine(zero, layout["top"], zero, baseline, AXIS_COLOR, 1))
+
+    count = len(labels)
+    band = layout["plotHeight"] / count
+    padding = band * 0.15
+    slot = (band - (padding * 2)) / len(series)
+
+    i = 0
+    while i < count {
+        bandTop = layout["top"] + (band * i) + padding
+        # Centred on the BARS, not on the band: a bar is drawn at 86% of its
+        # slot, so the band centre sits a few pixels below the bar centre.
+        push(parts, svgLabel(layout["left"] - 8,
+                         bandTop + ((slot * len(series) * 0.86) / 2) + 4,
+                         str(labels[i]),
+                         { "text-anchor": "end", "fill": MUTED_COLOR, "font-size": "11" }))
+        index = 0
+        get item in series {
+            value = nil
+            when i < len(item["values"]) { value = item["values"][i] }
+            when value != nil {
+                x = project(value, axis["min"], axis["max"], layout["left"],
+                            layout["left"] + layout["plotWidth"])
+                barLeft = zero
+                width = x - zero
+                when width < 0 {
+                    barLeft = x
+                    width = 0 - width
+                }
+                when width < 1 { width = 1 }
+                push(parts, svgRect(barLeft, bandTop + (slot * index), width, slot * 0.86,
+                                 colorAt(settings, item, index), { "rx": "2" }))
+                when settings["showValues"] {
+                    push(parts, svgLabel(barLeft + width + 6,
+                                     bandTop + (slot * index) + (slot * 0.6),
+                                     formatTick(value, axis["step"]),
+                                     { "font-size": "10", "fill": MUTED_COLOR }))
+                }
+            }
+            index = index + 1
+        }
+        i = i + 1
+    }
+    get piece in legendOf(settings, layout, series) { push(parts, piece) }
+    give frame(settings, parts)
+}
+
+# ── pie ─────────────────────────────────────────────────────────────────────
+
+export task pie(options, data = nil) {
+    settings = optionsFrom(options)
+    series = seriesFrom(settings, data)
+    numbers = series[0]["values"]
+    labels = labelsFor(settings, series)
+
+    total = 0
+    get value in numbers {
+        when value != nil {
+            when value < 0 {
+                throw ChartError("a pie chart cannot show a negative value")
+            }
+            total = total + value
+        }
+    }
+    when total == 0 { throw ChartError("a pie chart needs at least one value above zero") }
+
+    top = 16
+    when settings["title"] != nil { top = 48 }
+    bottom = 16
+    when len(labels) > 1 { bottom = 42 }
+
+    centreX = settings["width"] / 2
+    centreY = top + ((settings["height"] - top - bottom) / 2)
+    radius = (settings["height"] - top - bottom) / 2
+    when settings["width"] / 2 < radius { radius = settings["width"] / 2 }
+    radius = radius - 10
+
+    inner = 0
+    when settings["donut"] { inner = radius * 0.55 }
+
+    parts = background(settings)
+    get piece in titleOf(settings) { push(parts, piece) }
+
+    angle = 0 - 1.5707963267948966       # start at twelve o'clock
+    index = 0
+    entries = []
+    i = 0
+    while i < len(numbers) {
+        value = numbers[i]
+        when value != nil and value > 0 {
+            share = value / total
+            sweep = share * 6.283185307179586
+            tint = PALETTE[index % len(PALETTE)]
+            when settings["colors"] != nil {
+                tint = settings["colors"][index % len(settings["colors"])]
+            }
+            push(parts, wedge(centreX, centreY, radius, inner, angle, angle + sweep, tint))
+
+            when settings["showValues"] {
+                middle = angle + (sweep / 2)
+                labelRadius = radius * 0.68
+                when settings["donut"] { labelRadius = (radius + inner) / 2 }
+                push(parts, svgLabel(centreX + (cosine(middle) * labelRadius),
+                                 centreY + (sine(middle) * labelRadius) + 4,
+                                 formatNumber(share * 100, 0) + "%",
+                                 { "text-anchor": "middle", "font-size": "11",
+                                   "fill": "#ffffff", "font-weight": "600" }))
+            }
+            name = "Slice " + str(i + 1)
+            when i < len(labels) { name = str(labels[i]) }
+            push(entries, { "name": name, "color": tint })
+            angle = angle + sweep
+            index = index + 1
+        }
+        i = i + 1
+    }
+
+    when len(entries) > 1 {
+        get piece in legendOf(settings, { "legend": true }, entriesAsSeries(entries)) {
+            push(parts, piece)
+        }
+    }
+    give frame(settings, parts)
+}
+
+task entriesAsSeries(entries) {
+    made = []
+    get entry in entries {
+        push(made, { "name": entry["name"], "values": [], "color": entry["color"] })
+    }
+    give made
+}
+
+# One wedge. The large-arc flag is the part that goes wrong: a sweep past 180
+# degrees drawn with the small arc produces a wedge pointing the wrong way,
+# and a two-slice pie where one slice is 70% is where it first shows.
+task wedge(cx, cy, outer, inner, from, until, tint) {
+    sweep = until - from
+    # A single full-circle slice cannot be drawn as an arc: the start and end
+    # points coincide and SVG draws nothing at all.
+    when sweep >= 6.283185307179585 {
+        when inner > 0 {
+            body = "M" + coord(cx - outer) + " " + coord(cy) +
+                   " a" + coord(outer) + " " + coord(outer) + " 0 1 0 " + coord(outer * 2) + " 0" +
+                   " a" + coord(outer) + " " + coord(outer) + " 0 1 0 " + coord(0 - (outer * 2)) + " 0" +
+                   " M" + coord(cx - inner) + " " + coord(cy) +
+                   " a" + coord(inner) + " " + coord(inner) + " 0 1 1 " + coord(inner * 2) + " 0" +
+                   " a" + coord(inner) + " " + coord(inner) + " 0 1 1 " + coord(0 - (inner * 2)) + " 0 Z"
+            give svgTag("path", { "d": body, "fill": tint, "fill-rule": "evenodd" })
+        }
+        give svgCircle(cx, cy, outer, tint)
+    }
+
+    large = "0"
+    when sweep > 3.141592653589793 { large = "1" }
+
+    x1 = cx + (cosine(from) * outer)
+    y1 = cy + (sine(from) * outer)
+    x2 = cx + (cosine(until) * outer)
+    y2 = cy + (sine(until) * outer)
+
+    when inner <= 0 {
+        body = "M" + coord(cx) + " " + coord(cy) +
+               " L" + coord(x1) + " " + coord(y1) +
+               " A" + coord(outer) + " " + coord(outer) + " 0 " + large + " 1 " +
+               coord(x2) + " " + coord(y2) + " Z"
+        give svgTag("path", { "d": body, "fill": tint })
+    }
+
+    x3 = cx + (cosine(until) * inner)
+    y3 = cy + (sine(until) * inner)
+    x4 = cx + (cosine(from) * inner)
+    y4 = cy + (sine(from) * inner)
+    body = "M" + coord(x1) + " " + coord(y1) +
+           " A" + coord(outer) + " " + coord(outer) + " 0 " + large + " 1 " +
+           coord(x2) + " " + coord(y2) +
+           " L" + coord(x3) + " " + coord(y3) +
+           " A" + coord(inner) + " " + coord(inner) + " 0 " + large + " 0 " +
+           coord(x4) + " " + coord(y4) + " Z"
+    give svgTag("path", { "d": body, "fill": tint })
+}
+
+export task donut(options, data = nil) {
+    settings = optionsFrom(options)
+    settings["donut"] = true
+    give pie(settings, data)
+}
+
+# ── sparkline ───────────────────────────────────────────────────────────────
+
+# A chart small enough to sit inside a line of text or a table cell: no axes,
+# no labels, just the shape. The one chart a terminal report can carry.
+export task sparkline(readings, options = nil) {
+    settings = optionsFrom(options)
+    when options == nil or has_key(options, "width") == false { settings["width"] = 120 }
+    when options == nil or has_key(options, "height") == false { settings["height"] = 28 }
+
+    numbers = []
+    get value in readings {
+        when value != nil { push(numbers, num(value)) }
+        other { push(numbers, nil) }
+    }
+    present = []
+    get value in numbers {
+        when value != nil { push(present, value) }
+    }
+    when len(present) == 0 { throw ChartError("a sparkline needs at least one value") }
+
+    low = present[0]
+    high = present[0]
+    get value in present {
+        when value < low { low = value }
+        when value > high { high = value }
+    }
+    when low == high {
+        low = low - 1
+        high = high + 1
+    }
+
+    tint = PALETTE[0]
+    when settings["colors"] != nil { tint = settings["colors"][0] }
+
+    points = []
+    i = 0
+    while i < len(numbers) {
+        when numbers[i] != nil {
+            x = 2
+            when len(numbers) > 1 {
+                x = 2 + ((settings["width"] - 4) / (len(numbers) - 1) * i)
+            }
+            y = project(numbers[i], low, high, settings["height"] - 3, 3)
+            push(points, [x, y])
+        }
+        i = i + 1
+    }
+
+    parts = []
+    when settings["background"] != nil {
+        push(parts, svgRect(0, 0, settings["width"], settings["height"], settings["background"]))
+    }
+    push(parts, svgPath(svgPolyline(points), tint, 1.5))
+    push(parts, svgCircle(points[len(points) - 1][0], points[len(points) - 1][1], 2, tint))
+    give frame(settings, parts)
+}
+
+# ── trigonometry ────────────────────────────────────────────────────────────
+#
+# Only the pie chart needs these, and importing `math` for two functions would
+# make every chart depend on it. Taylor series, argument-reduced first because
+# the series loses accuracy badly past a couple of full turns.
+
+TWO_PI = 6.283185307179586
+HALF_PI = 1.5707963267948966
+
+task wrapAngle(angle) {
+    value = angle
+    while value > 3.141592653589793 { value = value - TWO_PI }
+    while value < 0 - 3.141592653589793 { value = value + TWO_PI }
+    give value
+}
+
+export task sine(angle) {
+    x = wrapAngle(angle)
+    term = x
+    total = x
+    i = 1
+    while i <= 8 {
+        term = 0 - (term * x * x) / ((2 * i) * ((2 * i) + 1))
+        total = total + term
+        i = i + 1
+    }
+    give total
+}
+
+export task cosine(angle) { give sine(angle + HALF_PI) }
+
+# ── output ──────────────────────────────────────────────────────────────────
+
+export task save(path, markup) {
+    writeFile(str(path), str(markup))
+    give path
+}
+
+# An SVG in a data: URI, for embedding in an <img src> or a `template`. A raw
+# "#" in the markup ends the URI, so the colours have to be encoded.
+export task dataUri(markup) {
+    body = str(markup)
+    body = replace(body, "%", "%25")
+    body = replace(body, "#", "%23")
+    body = replace(body, "\n", "")
+    body = replace(body, "\"", "'")
+    give "data:image/svg+xml;charset=utf-8," + body
+}
+
+# A complete page, for the commonest case: look at this now.
+export task page(title, charts) {
+    body = ""
+    get svgText in charts {
+        body = body + "<div class=\"chart\">" + str(svgText) + "</div>\n"
+    }
+    give "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">" +
+         "<title>" + escapeText(title) + "</title><style>" +
+         "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;" +
+         "background:#f8fafc;tint:#0f172a;margin:0;padding:32px}" +
+         ".chart{background:#fff;border:1px solid #e2e8f0;border-radius:12px;" +
+         "padding:16px;margin:0 0 24px;display:inline-block}" +
+         "h1{font-size:20px;margin:0 0 24px}" +
+         "</style></head><body><h1>" + escapeText(title) + "</h1>\n" +
+         body + "</body></html>"
+}
+
+export task colors() { give PALETTE }

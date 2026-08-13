@@ -1,0 +1,192 @@
+# ============================================================================
+# html — parsing and querying real web pages
+#
+#   use "html"
+#
+#   page = parse(readFile("page.html"))
+#   get row in page.select("table.results tr") {
+#       out row.select("td")[1].innerText()
+#   }
+#
+# `xml` refuses a malformed document, correctly: in XML a missing close tag is
+# a bug. In HTML it is Tuesday. This parser never fails -- it recovers the way
+# a browser does, because that is what the page was written against.
+#
+# Selectors are the part that makes scraping bearable. Walking `children` by
+# hand works until the page changes; "table.results tr" survives a wrapper div
+# appearing.
+# ============================================================================
+
+use "html/parse.ez"
+use "html/select.ez"
+
+export model Document {
+    init(root) { self.root = root }
+
+    # Every element matching a CSS selector, in document order.
+    task select(selector) { give querySelectorAll(self.root, selector) }
+
+    # The first match, or nil.
+    task selectOne(selector) {
+        found = querySelectorAll(self.root, selector)
+        when len(found) == 0 { give nil }
+        give found[0]
+    }
+
+    task byId(id) { give self.selectOne("#" + str(id)) }
+    task byTag(name) { give self.select(str(name)) }
+    task byClass(name) { give self.select("." + str(name)) }
+
+    task title() {
+        node = self.selectOne("title")
+        when node == nil { give nil }
+        give node.innerText()
+    }
+
+    # Every href on the page. `base` resolves relative ones, which is what
+    # makes the result usable rather than a list of fragments.
+    task links(base = nil) {
+        found = []
+        get node in self.select("a") {
+            href = node.attribute("href")
+            when href != nil and trim(href) != "" {
+                push(found, { "href": resolveUrl(base, href), "text": node.innerText() })
+            }
+        }
+        give found
+    }
+
+    task images(base = nil) {
+        found = []
+        get node in self.select("img") {
+            src = node.attribute("src")
+            when src != nil {
+                push(found, { "src": resolveUrl(base, src), "alt": node.attribute("alt") })
+            }
+        }
+        give found
+    }
+
+    # A table as rows of cell text. The commonest scraping target there is.
+    task table(selector = "table") {
+        node = self.selectOne(selector)
+        when node == nil { give [] }
+        rows = []
+        get tr in querySelectorAll(node, "tr") {
+            cells = []
+            get cell in tr.elementChildren() {
+                when cell.name == "td" or cell.name == "th" { push(cells, cell.innerText()) }
+            }
+            when len(cells) > 0 { push(rows, cells) }
+        }
+        give rows
+    }
+
+    # The metadata a page describes itself with, including OpenGraph.
+    task meta() {
+        found = {}
+        get node in self.select("meta") {
+            name = node.attribute("name")
+            when name == nil { name = node.attribute("property") }
+            content = node.attribute("content")
+            when name != nil and content != nil { found[lower(str(name))] = content }
+        }
+        give found
+    }
+
+    task text() { give self.root.innerText() }
+}
+
+export task parse(source) { give Document(parseHtml(source)) }
+
+# Everything a page says, with the script and style contents removed.
+#
+# Without that removal the "text" of a modern page is mostly JavaScript, which
+# is the single most common surprise when extracting content.
+export task textOf(source) {
+    document = parse(source)
+    pieces = []
+    collectText(document.root, pieces)
+    joined = join(pieces, " ")
+    result = ""
+    spaced = false
+    get ch in split(joined, "") {
+        when ch == " " or ch == "\n" or ch == "\t" or ch == "\r" {
+            when spaced == false { result = result + " " }
+            spaced = true
+        }
+        other {
+            result = result + ch
+            spaced = false
+        }
+    }
+    give trim(result)
+}
+
+task collectText(node, pieces) {
+    when node.kind == "text" {
+        when trim(node.text) != "" { push(pieces, trim(node.text)) }
+        give nil
+    }
+    when node.kind == "comment" { give nil }
+    when node.name == "script" or node.name == "style" { give nil }
+    get child in node.children { collectText(child, pieces) }
+    give nil
+}
+
+# Relative hrefs are the norm; a scraper that does not resolve them collects
+# fragments it cannot fetch.
+export task resolveUrl(base, href) {
+    link = trim(str(href))
+    when base == nil { give link }
+    when contains(link, "://") { give link }
+    when startsWith(link, "//") {
+        scheme = "https:"
+        when startsWith(str(base), "http://") { scheme = "http:" }
+        give scheme + link
+    }
+    root = str(base)
+    when startsWith(link, "#") { give root + link }
+    when startsWith(link, "/") {
+        # Everything up to the third slash is scheme + host.
+        at = indexOf(root, "://")
+        when at < 0 { give link }
+        rest = substr(root, at + 3, len(root) - at - 3)
+        slash = indexOf(rest, "/")
+        origin = root
+        when slash >= 0 { origin = substr(root, 0, at + 3 + slash) }
+        give origin + link
+    }
+    # A relative path hangs off the directory, not the page.
+    directory = root
+    lastSlash = -1
+    at = indexOf(root, "://")
+    when at >= 0 {
+        i = at + 3
+        while i < len(root) {
+            when substr(root, i, 1) == "/" { lastSlash = i }
+            i = i + 1
+        }
+    }
+    when lastSlash >= 0 { directory = substr(root, 0, lastSlash + 1) }
+    other { directory = root + "/" }
+    give directory + link
+}
+
+# Escapes text for safe inclusion in HTML.
+#
+# `template` autoescapes what it renders; this is for the cases where you are
+# building markup yourself. The ampersand goes first, or the escapes introduced
+# after it would be escaped again.
+export task escapeHtml(text) {
+    body = replace(str(text), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    body = replace(body, "\"", "&quot;")
+    give replace(body, "'", "&#39;")
+}
+
+export task unescapeHtml(text) { give decodeEntities(text) }
+
+# Removes every tag, leaving the text. Useful for a summary or a search index.
+export task stripTags(source) { give textOf(source) }

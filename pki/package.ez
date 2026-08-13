@@ -1,0 +1,11 @@
+{
+  "name": "pki",
+  "version": "1.0.0",
+  "description": "Public-key signature verification for EZ. RSA and ECDSA via Windows CNG, JWK and PEM keys, X.509 certificate parsing. Enables RS256/ES256 JWT verification.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["pki", "rsa", "ecdsa", "x509", "jwk", "jwks", "rs256", "signature"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "crypto": "^1.0.0" }
+}

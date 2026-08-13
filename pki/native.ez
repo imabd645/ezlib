@@ -1,0 +1,263 @@
+# ============================================================================
+# pki/native.ez — signature verification through Windows CNG
+#
+# The arithmetic is not done here. Verifying an RSA signature means modular
+# exponentiation on 2048-bit integers; written in an interpreter it would be
+# far too slow to use per request, and it is exactly the kind of code that is
+# subtly wrong in ways a test suite does not catch. bcrypt.dll already does it,
+# is maintained, and is the same implementation the rest of the system trusts.
+#
+# Only VERIFICATION is offered. Signing needs a private key, and a package that
+# accepts private key material invites people to put it somewhere it should not
+# be. Verification is also the operation that actually gates access.
+# ============================================================================
+
+BCRYPT_PAD_PKCS1 = 2
+BCRYPT_PAD_PSS = 8
+
+# The blob magic numbers CNG identifies a key type by. The hex is written
+# alongside because these are only ever quoted in hex, and a decimal constant
+# derived by hand is impossible to check by eye -- all three ECDSA values here
+# were initially wrong by 1024, and a wrong magic makes the key import fail
+# with a status that says nothing about why.
+RSA_PUBLIC_MAGIC = 826364754        # 0x31415352, 'RSA1'
+ECDSA_P256_MAGIC = 827540293        # 0x31534345, 'ECS1'
+ECDSA_P384_MAGIC = 861094725        # 0x33534345, 'ECS3'
+ECDSA_P521_MAGIC = 894649157        # 0x35534345, 'ECS5'
+
+_lib = nil
+_fnOpen = nil
+_fnImport = nil
+_fnVerify = nil
+_fnDestroyKey = nil
+_fnCloseAlg = nil
+_ready = false
+_probed = false
+
+task probe() {
+    when _probed { give _ready }
+    _probed = true
+    try {
+        _lib = os_load_lib("bcrypt.dll")
+        when _lib == nil or _lib == 0 { give false }
+        _fnOpen = os_get_func(_lib, "BCryptOpenAlgorithmProvider")
+        _fnImport = os_get_func(_lib, "BCryptImportKeyPair")
+        _fnVerify = os_get_func(_lib, "BCryptVerifySignature")
+        _fnDestroyKey = os_get_func(_lib, "BCryptDestroyKey")
+        _fnCloseAlg = os_get_func(_lib, "BCryptCloseAlgorithmProvider")
+        when _fnOpen == 0 or _fnImport == 0 or _fnVerify == 0 { give false }
+        _ready = true
+    }
+    catch (e) { _ready = false }
+    give _ready
+}
+
+export task isAvailable() { give probe() }
+
+# CNG names algorithms in UTF-16, built byte by byte because an EZ string is
+# UTF-8 and the API would not match it.
+task wide(text) {
+    body = str(text)
+    total = len(body)
+    buf = os_alloc((total + 1) * 2)
+    repeat i = 0 to total - 1 {
+        os_write_byte(buf, i * 2, ord(substr(body, i, 1)))
+        os_write_byte(buf, i * 2 + 1, 0)
+    }
+    os_write_byte(buf, total * 2, 0)
+    os_write_byte(buf, total * 2 + 1, 0)
+    give buf
+}
+
+task bufferOf(octets) {
+    size = len(octets)
+    when size == 0 { size = 1 }
+    buf = os_alloc(size)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b % 256)
+        index = index + 1
+    }
+    give buf
+}
+
+task freeAll(pointers) {
+    get p in pointers {
+        when p != nil and p != 0 {
+            try { os_free(p) } catch (e) { }
+        }
+    }
+    give nil
+}
+
+# RSASSA-PKCS1-v1_5 or RSASSA-PSS over an already-computed digest.
+export task verifyRsa(modulus, exponent, digest, signature, hashName, padding) {
+    when probe() == false {
+        throw Exception("pki: bcrypt.dll is unavailable -- this package needs Windows")
+    }
+
+    # BCRYPT_RSAKEY_BLOB: magic, bit length, exponent length, modulus length,
+    # then two prime lengths that are zero for a public key, then the values.
+    blobLength = 24 + len(exponent) + len(modulus)
+    blob = os_alloc(blobLength)
+    os_write_uint32(blob, 0, RSA_PUBLIC_MAGIC)
+    os_write_uint32(blob, 4, len(modulus) * 8)
+    os_write_uint32(blob, 8, len(exponent))
+    os_write_uint32(blob, 12, len(modulus))
+    os_write_uint32(blob, 16, 0)
+    os_write_uint32(blob, 20, 0)
+    at = 24
+    get b in exponent {
+        os_write_byte(blob, at, b)
+        at = at + 1
+    }
+    get b in modulus {
+        os_write_byte(blob, at, b)
+        at = at + 1
+    }
+
+    algName = wide("RSA")
+    blobType = wide("RSAPUBLICBLOB")
+    algHandle = os_alloc(8)
+    os_write_int64(algHandle, 0, 0)
+    keyHandle = os_alloc(8)
+    os_write_int64(keyHandle, 0, 0)
+    hashName16 = wide(hashName)
+    padInfo = os_alloc(16)
+
+    result = false
+    try {
+        when os_call(_fnOpen, "int", algHandle, algName, 0, 0) == 0 {
+            alg = os_read_int64(algHandle, 0)
+            imported = os_call(_fnImport, "int", alg, 0, blobType, keyHandle, blob, blobLength, 0)
+            when imported == 0 {
+                key = os_read_int64(keyHandle, 0)
+                digestBuf = bufferOf(digest)
+                signatureBuf = bufferOf(signature)
+
+                flags = BCRYPT_PAD_PKCS1
+                when padding == "PSS" {
+                    flags = BCRYPT_PAD_PSS
+                    # BCRYPT_PSS_PADDING_INFO { LPCWSTR pszAlgId; ULONG cbSalt }
+                    os_write_int64(padInfo, 0, hashName16)
+                    os_write_uint32(padInfo, 8, len(digest))
+                }
+                other {
+                    # BCRYPT_PKCS1_PADDING_INFO { LPCWSTR pszAlgId }
+                    os_write_int64(padInfo, 0, hashName16)
+                }
+
+                status = os_call(_fnVerify, "int", key, padInfo, digestBuf, len(digest),
+                                 signatureBuf, len(signature), flags)
+                # STATUS_SUCCESS. Anything else -- including a malformed
+                # signature -- is a failed verification, not an error to raise:
+                # an invalid signature is an ordinary answer.
+                result = status == 0
+                os_free(digestBuf)
+                os_free(signatureBuf)
+                os_call(_fnDestroyKey, "int", key)
+            }
+            os_call(_fnCloseAlg, "int", alg, 0)
+        }
+    }
+    catch (e) { result = false }
+    freeAll([blob, algName, blobType, algHandle, keyHandle, hashName16, padInfo])
+    give result
+}
+
+# ECDSA over an already-computed digest.
+#
+# The signature must be the raw r||s pair, which is what JWT's ES256 carries.
+# A DER-wrapped signature -- what OpenSSL and X.509 use -- has to be unwrapped
+# first; they are not interchangeable and CNG accepts only the raw form.
+export task verifyEcdsa(curve, x, y, digest, signature, hashName) {
+    when probe() == false {
+        throw Exception("pki: bcrypt.dll is unavailable -- this package needs Windows")
+    }
+    spec = curveSpec(curve)
+
+    blobLength = 8 + len(x) + len(y)
+    blob = os_alloc(blobLength)
+    os_write_uint32(blob, 0, spec["magic"])
+    os_write_uint32(blob, 4, len(x))
+    at = 8
+    get b in x {
+        os_write_byte(blob, at, b)
+        at = at + 1
+    }
+    get b in y {
+        os_write_byte(blob, at, b)
+        at = at + 1
+    }
+
+    algName = wide(spec["algorithm"])
+    blobType = wide("ECCPUBLICBLOB")
+    algHandle = os_alloc(8)
+    os_write_int64(algHandle, 0, 0)
+    keyHandle = os_alloc(8)
+    os_write_int64(keyHandle, 0, 0)
+
+    result = false
+    try {
+        when os_call(_fnOpen, "int", algHandle, algName, 0, 0) == 0 {
+            alg = os_read_int64(algHandle, 0)
+            imported = os_call(_fnImport, "int", alg, 0, blobType, keyHandle, blob, blobLength, 0)
+            when imported == 0 {
+                key = os_read_int64(keyHandle, 0)
+                digestBuf = bufferOf(digest)
+                signatureBuf = bufferOf(signature)
+                # ECDSA takes no padding info at all.
+                status = os_call(_fnVerify, "int", key, 0, digestBuf, len(digest),
+                                 signatureBuf, len(signature), 0)
+                result = status == 0
+                os_free(digestBuf)
+                os_free(signatureBuf)
+                os_call(_fnDestroyKey, "int", key)
+            }
+            os_call(_fnCloseAlg, "int", alg, 0)
+        }
+    }
+    catch (e) { result = false }
+    freeAll([blob, algName, blobType, algHandle, keyHandle])
+    give result
+}
+
+task curveSpec(curve) {
+    name = str(curve)
+    when name == "P-256" { give { "magic": ECDSA_P256_MAGIC, "algorithm": "ECDSA_P256" } }
+    when name == "P-384" { give { "magic": ECDSA_P384_MAGIC, "algorithm": "ECDSA_P384" } }
+    when name == "P-521" { give { "magic": ECDSA_P521_MAGIC, "algorithm": "ECDSA_P521" } }
+    throw Exception(`pki: the curve '{curve}' is not supported`)
+}
+
+# A DER-encoded ECDSA signature -- SEQUENCE { r INTEGER, s INTEGER } -- as the
+# raw r||s pair CNG wants, left-padded to the curve's field size.
+export task ecdsaDerToRaw(der, fieldBytes) {
+    when len(der) < 8 or der[0] != 48 {
+        throw Exception("pki: this is not a DER ECDSA signature")
+    }
+    at = 2
+    when der[1] > 128 { at = 2 + (der[1] - 128) }
+    parts = []
+    repeat i = 1 to 2 {
+        when der[at] != 2 { throw Exception("pki: a DER ECDSA signature is malformed") }
+        length = der[at + 1]
+        start = at + 2
+        # DER adds a leading zero to keep the value positive; it is not part
+        # of the number.
+        while length > 1 and der[start] == 0 {
+            start = start + 1
+            length = length - 1
+        }
+        piece = []
+        while len(piece) < fieldBytes - length { push(piece, 0) }
+        repeat k = 0 to length - 1 { push(piece, der[start + k]) }
+        push(parts, piece)
+        at = start + length
+    }
+    raw = []
+    get piece in parts {
+        get b in piece { push(raw, b) }
+    }
+    give raw
+}

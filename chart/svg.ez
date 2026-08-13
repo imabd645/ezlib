@@ -1,0 +1,108 @@
+# ============================================================================
+# chart/svg.ez — SVG primitives
+#
+# SVG is the right output for a chart: it is text, so it needs no image
+# library; it scales, so it survives being embedded at any size; and every
+# browser and every modern document format renders it.
+#
+# Everything user-supplied is escaped on the way in. A chart is frequently
+# built from data someone else supplied -- a column of product names out of a
+# database -- and an unescaped "&" is the difference between a chart and a
+# document a browser refuses to render.
+# ============================================================================
+
+export task escapeText(text) {
+    body = replace(str(text), "&", "&amp;")
+    body = replace(body, "<", "&lt;")
+    body = replace(body, ">", "&gt;")
+    give body
+}
+
+export task escapeAttribute(text) {
+    body = escapeText(text)
+    body = replace(body, "\"", "&quot;")
+    give replace(body, "'", "&#39;")
+}
+
+# SVG coordinates are decimals, and printing 47.99999999999999 for what should
+# be 48 makes the markup unreadable and enormous. Two places is finer than any
+# display can resolve.
+export task coord(value) {
+    rounded = round(value * 100) / 100
+    whole = round(rounded)
+    when rounded == whole { give str(whole) }
+    give formatNumber(rounded, 2)
+}
+
+export task svgTag(name, attributes) {
+    give "<" + str(name) + attributeText(attributes) + " />"
+}
+
+export task svgElement(name, attributes, body) {
+    give "<" + str(name) + attributeText(attributes) + ">" + str(body) + "</" + str(name) + ">"
+}
+
+task attributeText(attributes) {
+    parts = []
+    get key in keys(attributes) {
+        value = attributes[key]
+        when value != nil {
+            push(parts, " " + str(key) + "=\"" + escapeAttribute(value) + "\"")
+        }
+    }
+    give join(parts, "")
+}
+
+export task svgLine(x1, y1, x2, y2, stroke, width) {
+    give svgTag("line", { "x1": coord(x1), "y1": coord(y1),
+                       "x2": coord(x2), "y2": coord(y2),
+                       "stroke": stroke, "stroke-width": str(width) })
+}
+
+export task svgRect(x, y, width, height, fill, extra = nil) {
+    attributes = { "x": coord(x), "y": coord(y),
+                   "width": coord(width), "height": coord(height), "fill": fill }
+    when extra != nil {
+        get key in keys(extra) { attributes[key] = extra[key] }
+    }
+    give svgTag("rect", attributes)
+}
+
+export task svgCircle(cx, cy, r, fill) {
+    give svgTag("circle", { "cx": coord(cx), "cy": coord(cy), "r": coord(r), "fill": fill })
+}
+
+export task svgPath(d, stroke, width, fill = "none") {
+    give svgTag("path", { "d": d, "fill": fill, "stroke": stroke,
+                       "stroke-width": str(width),
+                       "stroke-linejoin": "round", "stroke-linecap": "round" })
+}
+
+export task svgLabel(x, y, body, options = nil) {
+    attributes = { "x": coord(x), "y": coord(y),
+                   "font-family": "system-ui, -apple-system, Segoe UI, sans-serif",
+                   "font-size": "12", "fill": "#334155" }
+    when options != nil {
+        get key in keys(options) { attributes[key] = options[key] }
+    }
+    give svgElement("text", attributes, escapeText(body))
+}
+
+# A polyline as a path, because a path can be dashed, smoothed and clipped
+# consistently while <polyline> cannot.
+#
+# Every primitive here is prefixed. EZ has one flat namespace, so a bare
+# `line()` here and the `line()` chart in main.ez would be the same name, and
+# whichever module loaded second would silently win.
+export task svgPolyline(points) {
+    when len(points) == 0 { give "" }
+    parts = []
+    first = true
+    get point in points {
+        prefix = "L"
+        when first { prefix = "M" }
+        push(parts, prefix + coord(point[0]) + " " + coord(point[1]))
+        first = false
+    }
+    give join(parts, " ")
+}

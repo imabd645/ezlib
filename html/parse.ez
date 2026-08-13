@@ -1,0 +1,547 @@
+# ============================================================================
+# html/parse.ez — a parser for real pages, not for well-formed documents
+#
+# `xml` refuses a malformed document on purpose, and it is right to: in XML a
+# missing close tag is a bug worth surfacing. In HTML it is Tuesday. Real pages
+# have unclosed <li>, bare <br>, attributes without quotes, stray "<" in text,
+# and tags nobody closes at all. A parser that stops at the first of those
+# parses nothing on the open web.
+#
+# So this one never fails. It recovers, and the recovery rules are the ones the
+# HTML spec describes, because they are what browsers do and therefore what the
+# page was written against:
+#
+#   * VOID elements (br, img, input, meta …) never have children and never
+#     need closing.
+#   * A close tag that does not match the open element closes everything up to
+#     it, which is what makes unclosed <li> and <p> work.
+#   * RAW-TEXT elements (script, style) are read to their close tag without
+#     looking at anything inside -- "if (a < b)" in a script is not a tag.
+#   * A close tag with nothing to close is discarded rather than fatal.
+# ============================================================================
+
+# Elements that cannot have children. An <img> is complete on its own, and
+# treating one as an open element swallows the rest of the document into it.
+VOID_ELEMENTS = ["area", "base", "br", "col", "embed", "hr", "img", "input",
+                 "link", "meta", "param", "source", "track", "wbr"]
+
+# Everything inside these is text, however much it looks like markup.
+RAW_TEXT_ELEMENTS = ["script", "style", "textarea", "title"]
+
+# For each element being OPENED, which currently-open elements it closes.
+#
+# Read as "a <tr> closes any open td, th or tr". The unwinding is a loop, not
+# a single check: with <table><tr><td>x<tr>, the stack at the second <tr> is
+# table > tr > td, so closing only the top would leave the old <tr> open and
+# every later row would nest one level deeper than the last.
+HEADING_CLOSES = ["p", "h1", "h2", "h3", "h4", "h5", "h6"]
+
+CLOSED_BY = {
+    "li": ["li", "p"],
+    "p": ["p"],
+    "td": ["td", "th", "p"],
+    "th": ["td", "th", "p"],
+    "tr": ["td", "th", "tr", "p"],
+    "option": ["option"],
+    "dt": ["dt", "dd", "p"],
+    "dd": ["dt", "dd", "p"],
+    "tbody": ["td", "th", "tr", "thead", "p"],
+    "tfoot": ["td", "th", "tr", "thead", "tbody", "p"],
+    "table": ["p"],
+    "ul": ["p"], "ol": ["p"], "div": ["p"], "section": ["p"], "article": ["p"],
+    # A heading closes an open heading: <h1>a<h2>b makes siblings, not a
+    # nested pair. Without this an unclosed <h1> swallows the section under it
+    # and h1.innerText() returns the whole article.
+    "h1": HEADING_CLOSES, "h2": HEADING_CLOSES, "h3": HEADING_CLOSES,
+    "h4": HEADING_CLOSES, "h5": HEADING_CLOSES, "h6": HEADING_CLOSES
+}
+
+# Elements a browser lays out on their own line. Text either side of one is
+# separated on the page, so it has to be separated in innerText too.
+BLOCK_ELEMENTS = ["address", "article", "aside", "blockquote", "br", "dd", "div",
+                  "dl", "dt", "fieldset", "figcaption", "figure", "footer",
+                  "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
+                  "li", "main", "nav", "ol", "p", "pre", "section", "table",
+                  "tbody", "td", "tfoot", "th", "thead", "tr", "ul"]
+
+task isBlock(name) {
+    get v in BLOCK_ELEMENTS {
+        when v == name { give true }
+    }
+    give false
+}
+
+# Text, with a space wherever the page would have shown a line break. The
+# caller collapses the runs this leaves behind.
+task collectInnerText(node, pieces) {
+    when node.kind == "text" {
+        push(pieces, node.text)
+        give nil
+    }
+    when node.kind == "comment" { give nil }
+    block = node.kind == "element" and isBlock(node.name)
+    when block { push(pieces, " ") }
+    get child in node.children { collectInnerText(child, pieces) }
+    when block { push(pieces, " ") }
+    give nil
+}
+
+export model Node {
+    init(kind, name) {
+        self.kind = kind            # "element", "text", "comment", "document"
+        self.name = name
+        self.attributes = {}
+        self.children = []
+        self.parent = nil
+        self.text = ""
+    }
+
+    task isElement() { give self.kind == "element" }
+    task isText() { give self.kind == "text" }
+
+    task attribute(name) {
+        key = lower(str(name))
+        when has_key(self.attributes, key) { give self.attributes[key] }
+        give nil
+    }
+
+    task hasAttribute(name) { give self.attribute(name) != nil }
+
+    task id() { give self.attribute("id") }
+
+    # class is a space-separated list, not a single value.
+    task classes() {
+        value = self.attribute("class")
+        when value == nil { give [] }
+        found = []
+        get piece in split(str(value), " ") {
+            when trim(piece) != "" { push(found, trim(piece)) }
+        }
+        give found
+    }
+
+    task hasClass(name) {
+        get existing in self.classes() {
+            when existing == str(name) { give true }
+        }
+        give false
+    }
+
+    # All descendant text, concatenated. This is what "what does this element
+    # say" means, and it is the commonest thing a scraper wants.
+    task textContent() {
+        when self.kind == "text" { give self.text }
+        when self.kind == "comment" { give "" }
+        pieces = []
+        get child in self.children { push(pieces, child.textContent()) }
+        give join(pieces, "")
+    }
+
+    # The same, as the text actually appears on the page: runs of whitespace
+    # collapsed, and a boundary at every block element.
+    #
+    # That boundary matters more than it looks. <p>a</p><p>b</p> has no
+    # whitespace anywhere in it, so plain concatenation gives "ab" -- and a
+    # table row of <td>ana<td>31 gives "ana31". The words a page displays on
+    # separate lines have to come back separated, or scraped text is quietly
+    # wrong in a way nothing downstream can undo.
+    task innerText() {
+        pieces = []
+        collectInnerText(self, pieces)
+        raw = join(pieces, "")
+        result = ""
+        spaced = false
+        get ch in split(raw, "") {
+            when ch == " " or ch == "\n" or ch == "\t" or ch == "\r" {
+                when spaced == false { result = result + " " }
+                spaced = true
+            }
+            other {
+                result = result + ch
+                spaced = false
+            }
+        }
+        give trim(result)
+    }
+
+    task elementChildren() {
+        found = []
+        get child in self.children {
+            when child.isElement() { push(found, child) }
+        }
+        give found
+    }
+
+    task toString() {
+        when self.kind == "text" { give "Text(" + substr(self.text, 0, 20) + ")" }
+        give `<{self.name}>`
+    }
+}
+
+task isVoid(name) {
+    get v in VOID_ELEMENTS {
+        when v == name { give true }
+    }
+    give false
+}
+
+task isRawText(name) {
+    get v in RAW_TEXT_ELEMENTS {
+        when v == name { give true }
+    }
+    give false
+}
+
+# Does opening `arriving` close an open `openName`?
+task closesImplicitly(openName, arriving) {
+    when has_key(CLOSED_BY, arriving) == false { give false }
+    get name in CLOSED_BY[arriving] {
+        when name == openName { give true }
+    }
+    give false
+}
+
+# ── entities ────────────────────────────────────────────────────────────────
+
+NAMED_ENTITIES = {
+    "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'",
+    "nbsp": " ", "copy": "©", "reg": "®", "trade": "™", "hellip": "…",
+    "mdash": "—", "ndash": "–", "lsquo": "‘", "rsquo": "’",
+    "ldquo": "“", "rdquo": "”", "middot": "·", "bull": "•", "eacute": "é",
+    "egrave": "è", "agrave": "à", "ccedil": "ç", "uuml": "ü", "ouml": "ö",
+    "auml": "ä", "szlig": "ß", "pound": "£", "euro": "€", "yen": "¥",
+    "sect": "§", "para": "¶", "deg": "°", "plusmn": "±", "times": "×",
+    "divide": "÷", "frac12": "½", "frac14": "¼", "laquo": "«", "raquo": "»"
+}
+
+# Decodes &amp; &#39; and &#x27;. An unknown entity is left exactly as it was
+# rather than dropped -- losing text is worse than leaving it encoded.
+export task decodeEntities(text) {
+    body = str(text)
+    when contains(body, "&") == false { give body }
+    result = ""
+    i = 0
+    while i < len(body) {
+        ch = substr(body, i, 1)
+        when ch != "&" {
+            result = result + ch
+            i = i + 1
+        }
+        other {
+            semicolon = -1
+            limit = i + 12
+            when limit > len(body) { limit = len(body) }
+            k = i + 1
+            while k < limit {
+                when substr(body, k, 1) == ";" {
+                    semicolon = k
+                    k = limit
+                }
+                other { k = k + 1 }
+            }
+            when semicolon < 0 {
+                result = result + ch
+                i = i + 1
+            }
+            other {
+                name = substr(body, i + 1, semicolon - i - 1)
+                decoded = entityFor(name)
+                when decoded == nil {
+                    result = result + substr(body, i, semicolon - i + 1)
+                }
+                other { result = result + decoded }
+                i = semicolon + 1
+            }
+        }
+    }
+    give result
+}
+
+task entityFor(name) {
+    when name == "" { give nil }
+    when startsWith(name, "#") {
+        digits = substr(name, 1, len(name) - 1)
+        code = 0
+        when startsWith(lower(digits), "x") {
+            hex = lower(substr(digits, 1, len(digits) - 1))
+            get ch in split(hex, "") {
+                index = indexOf("0123456789abcdef", ch)
+                when index < 0 { give nil }
+                code = code * 16 + index
+            }
+        }
+        other {
+            get ch in split(digits, "") {
+                index = indexOf("0123456789", ch)
+                when index < 0 { give nil }
+                code = code * 10 + index
+            }
+        }
+        when code == 0 { give nil }
+        give encodeUtf8(code)
+    }
+    key = lower(name)
+    when has_key(NAMED_ENTITIES, key) { give NAMED_ENTITIES[key] }
+    give nil
+}
+
+task encodeUtf8(code) {
+    when code < 128 { give chr(code) }
+    when code < 2048 { give chr(192 + floor(code / 64)) + chr(128 + code % 64) }
+    when code < 65536 {
+        give chr(224 + floor(code / 4096)) + chr(128 + floor(code / 64) % 64) + chr(128 + code % 64)
+    }
+    give chr(240 + floor(code / 262144)) + chr(128 + floor(code / 4096) % 64) +
+         chr(128 + floor(code / 64) % 64) + chr(128 + code % 64)
+}
+
+# ── the parser ──────────────────────────────────────────────────────────────
+
+export task parseHtml(source) {
+    body = str(source)
+    document = Node("document", "#document")
+    stack = [document]
+    i = 0
+
+    while i < len(body) {
+        lessThan = indexOfFrom(body, "<", i)
+        # A "<" that begins no tag is just text, which is why a page saying
+        # "5 < 6" parses instead of exploding.
+        when lessThan < 0 {
+            addText(stack, substr(body, i, len(body) - i))
+            i = len(body)
+        }
+        other {
+            when lessThan > i { addText(stack, substr(body, i, lessThan - i)) }
+
+            when startsWithAt(body, lessThan, "<!--") {
+                closeAt = indexOfFrom(body, "-->", lessThan)
+                when closeAt < 0 { closeAt = len(body) - 3 }
+                comment = Node("comment", "#comment")
+                comment.text = substr(body, lessThan + 4, closeAt - lessThan - 4)
+                appendTo(stack, comment)
+                i = closeAt + 3
+            }
+            other when startsWithAt(body, lessThan, "<!") {
+                # A doctype or a declaration; nothing to keep.
+                closeAt = indexOfFrom(body, ">", lessThan)
+                when closeAt < 0 { closeAt = len(body) - 1 }
+                i = closeAt + 1
+            }
+            other {
+                closeAt = indexOfFrom(body, ">", lessThan)
+                when closeAt < 0 {
+                    # An unterminated tag at the end of the document is text.
+                    addText(stack, substr(body, lessThan, len(body) - lessThan))
+                    i = len(body)
+                }
+                other {
+                    inner = substr(body, lessThan + 1, closeAt - lessThan - 1)
+                    i = closeAt + 1
+                    when startsWith(inner, "/") {
+                        closeElement(stack, lower(trim(substr(inner, 1, len(inner) - 1))))
+                    }
+                    other {
+                        parsed = parseTag(inner)
+                        name = parsed["name"]
+                        when name != "" {
+                            element = Node("element", name)
+                            element.attributes = parsed["attributes"]
+                            openElement(stack, element)
+                            when isVoid(name) or parsed["selfClosing"] {
+                                closeTop(stack)
+                            }
+                            other when isRawText(name) {
+                                # Everything up to the matching close tag is
+                                # text. Without this, a "<" inside a script
+                                # starts a phantom element and the rest of the
+                                # page ends up nested inside it.
+                                endTag = "</" + name
+                                endAt = indexOfFrom(lower(body), endTag, i)
+                                when endAt < 0 { endAt = len(body) }
+                                when endAt > i {
+                                    raw = Node("text", "#text")
+                                    inner2 = substr(body, i, endAt - i)
+                                    # script and style are RAW text -- nothing
+                                    # inside is markup OR an entity. title and
+                                    # textarea are RCDATA: no markup, but
+                                    # entities still decode, so a title reading
+                                    # "Tom &amp; Jerry" says "Tom & Jerry".
+                                    when name == "script" or name == "style" { raw.text = inner2 }
+                                    other { raw.text = decodeEntities(inner2) }
+                                    appendTo(stack, raw)
+                                }
+                                closeTop(stack)
+                                after = indexOfFrom(body, ">", endAt)
+                                when after < 0 { i = len(body) }
+                                other { i = after + 1 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    give document
+}
+
+task parseTag(inner) {
+    body = trim(inner)
+    selfClosing = false
+    when endsWith(body, "/") {
+        selfClosing = true
+        body = trim(substr(body, 0, len(body) - 1))
+    }
+
+    name = ""
+    at = 0
+    while at < len(body) {
+        ch = substr(body, at, 1)
+        when ch == " " or ch == "\t" or ch == "\n" or ch == "\r" { at = len(body) }
+        other {
+            name = name + ch
+            at = at + 1
+        }
+    }
+    # Recompute where the name ended, since the loop above jumps to the end.
+    nameEnd = len(name)
+    attributes = parseAttributes(substr(body, nameEnd, len(body) - nameEnd))
+    give { "name": lower(name), "attributes": attributes, "selfClosing": selfClosing }
+}
+
+# Attributes may be quoted with " or ', or unquoted, or valueless. All four
+# appear in real pages and all four have to work.
+task parseAttributes(text) {
+    attributes = {}
+    body = str(text)
+    i = 0
+    while i < len(body) {
+        while i < len(body) and isSpaceAt(body, i) { i = i + 1 }
+        when i >= len(body) { give attributes }
+
+        name = ""
+        while i < len(body) and isSpaceAt(body, i) == false and substr(body, i, 1) != "=" {
+            name = name + substr(body, i, 1)
+            i = i + 1
+        }
+        when name == "" { i = i + 1 }
+        other {
+            while i < len(body) and isSpaceAt(body, i) { i = i + 1 }
+            value = ""
+            when i < len(body) and substr(body, i, 1) == "=" {
+                i = i + 1
+                while i < len(body) and isSpaceAt(body, i) { i = i + 1 }
+                when i < len(body) {
+                    quote = substr(body, i, 1)
+                    when quote == "\"" or quote == "'" {
+                        i = i + 1
+                        while i < len(body) and substr(body, i, 1) != quote {
+                            value = value + substr(body, i, 1)
+                            i = i + 1
+                        }
+                        i = i + 1
+                    }
+                    other {
+                        while i < len(body) and isSpaceAt(body, i) == false {
+                            value = value + substr(body, i, 1)
+                            i = i + 1
+                        }
+                    }
+                }
+            }
+            other {
+                # A valueless attribute -- disabled, checked -- has the empty
+                # string as its value, which is what the spec says and what
+                # every browser reports. Use hasAttribute to ask whether one is
+                # present; the value carries no information.
+                value = ""
+            }
+            attributes[lower(name)] = decodeEntities(value)
+        }
+    }
+    give attributes
+}
+
+task isSpaceAt(body, i) {
+    ch = substr(body, i, 1)
+    give ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+}
+
+task openElement(stack, element) {
+    # An <li> while an <li> is open closes it first. This is what makes a list
+    # with no close tags produce siblings rather than a staircase -- and it
+    # loops, because a new <tr> has to close both the open <td> and the open
+    # <tr> above it.
+    while len(stack) > 1 {
+        top = stack[len(stack) - 1]
+        when top.isElement() == false { give appendAndPush(stack, element) }
+        when closesImplicitly(top.name, element.name) == false {
+            give appendAndPush(stack, element)
+        }
+        closeTop(stack)
+    }
+    give appendAndPush(stack, element)
+}
+
+task appendAndPush(stack, element) {
+    appendTo(stack, element)
+    push(stack, element)
+    give nil
+}
+
+task appendTo(stack, node) {
+    parent = stack[len(stack) - 1]
+    node.parent = parent
+    push(parent.children, node)
+    give nil
+}
+
+task closeTop(stack) {
+    when len(stack) > 1 { pop(stack) }
+    give nil
+}
+
+# Closes up to and including the named element. A close tag for something that
+# was never opened is discarded -- stray </div> is common and is not a reason
+# to unwind the whole document.
+task closeElement(stack, name) {
+    depth = len(stack) - 1
+    while depth > 0 {
+        when stack[depth].name == name {
+            while len(stack) > depth { pop(stack) }
+            give nil
+        }
+        depth = depth - 1
+    }
+    give nil
+}
+
+task addText(stack, raw) {
+    when trim(raw) == "" and len(raw) > 0 {
+        # Whitespace between elements is still text, and dropping it would
+        # join words that were separated by a newline in the source.
+        node = Node("text", "#text")
+        node.text = raw
+        appendTo(stack, node)
+        give nil
+    }
+    when raw == "" { give nil }
+    node = Node("text", "#text")
+    node.text = decodeEntities(raw)
+    appendTo(stack, node)
+    give nil
+}
+
+export task indexOfFrom(body, needle, from) {
+    when from <= 0 { give indexOf(body, needle) }
+    when from >= len(body) { give -1 }
+    rest = substr(body, from, len(body) - from)
+    found = indexOf(rest, needle)
+    when found < 0 { give -1 }
+    give found + from
+}
+
+task startsWithAt(body, at, prefix) {
+    when at + len(prefix) > len(body) { give false }
+    give substr(body, at, len(prefix)) == prefix
+}

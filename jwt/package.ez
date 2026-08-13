@@ -1,10 +1,11 @@
 {
-    "name": "jwt",
-    "version": "1.0.0",
-    "description": "JSON Web Tokens (JWT) encoder and decoder using HS256 algorithm for EZ Language",
-    "author": "Abdullah Masood",
-    "main": "main.ez",
-    "dependencies": {
-        "crypto": "^1.0.0"
-    }
+  "name": "jwt",
+  "version": "1.1.0",
+  "description": "JSON Web Tokens for EZ. HS256/384/512 plus RS, PS and ES via pki, with an algorithm allow-list and full claim validation.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "dependencies": {
+    "crypto": "^1.0.0",
+    "pki": "^1.0.0"
+  }
 }

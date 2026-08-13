@@ -1,0 +1,11 @@
+{
+  "name": "chart",
+  "version": "1.0.0",
+  "description": "SVG charts for EZ with no dependencies. Line, area, bar, stacked, horizontal bar, pie, donut and sparkline, with axes on round numbers.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["chart", "graph", "svg", "plot", "visualization", "dashboard", "sparkline", "bar", "line", "pie"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

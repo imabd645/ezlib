@@ -1,0 +1,182 @@
+# ============================================================================
+# pki — test suite
+#   ez test.ez
+#
+# Every key, signature and certificate below was produced by .NET's
+# System.Security.Cryptography, not by this package. That matters more here
+# than anywhere: a verifier tested only against its own output will happily
+# accept signatures nobody else produces, and — worse — might accept ones it
+# should reject.
+# ============================================================================
+
+use "pki"
+
+PASS = 0
+FAIL = 0
+
+# A 2048-bit RSA key and a PKCS#1 v1.5 SHA-256 signature over MESSAGE.
+RSA_N = "5H8UkqBR_hndfk8K5E5hkBFzKrQM3jS2J9B5mBzLT4Lk5ZqlSsajXmshEqYVV0Xb51Wk5Gp0HM3Pnni7C7yMTvtBzcEdDU06UwexaWkQd4MWu2dwvzy3oN2rtLjgdcFVyP9LKguyamP-dbyEyg5dXbiLgGgm0IZXW4PNeOCZ2dy-SwiDjlFg0Qmaq7X0vZQhNxtbuFueN6j_XM8tNCZzAMqgSrNzT0HOZlTz05tumigX-OryoMWfKai2g4Dls_TzZMpn1GVyXH9IxFfx7DBrYsFJNYM7-itihAJpwF9xI_KD24MJBLXWb21xhmJaV4xakgBImhF92PjWdwIyw3h_kQ"
+RSA_SIG = "bgS7hWgwxZPWgER1eANFuBYEwVhTpjg+7H62sTmd2ggbUNi+gwU7SA63wyX28SscJeKu/+vx00RCExS5usH4Y0K7uJTNEfvBPLm1ffQpKbtJdjLo63S2c/rk/KN7LXMcC7MrnczZ7bXx5u3IsCbhzes7Pu7IIgfZFlb0khp8K1y51o+9n1lomsiOxKkQNzCwvThAlEbbFCM0R+3xqQ/5C3SWi0lPMbg0SmHwjjD67L6YvgRj8i+DnI+7+FHlzgB0mh+1ieufr0fEK1T9dM+Kzttc1R6RsIXNEtoO7FyVlPaPBzYxZJ5BC6ud3HIw7jxJTKgCnUtFTQ7dFQA16Uw1rQ=="
+MESSAGE = "the message that was signed"
+RSA_SPKI = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5H8UkqBR/hndfk8K5E5hkBFzKrQM3jS2J9B5mBzLT4Lk5ZqlSsajXmshEqYVV0Xb51Wk5Gp0HM3Pnni7C7yMTvtBzcEdDU06UwexaWkQd4MWu2dwvzy3oN2rtLjgdcFVyP9LKguyamP+dbyEyg5dXbiLgGgm0IZXW4PNeOCZ2dy+SwiDjlFg0Qmaq7X0vZQhNxtbuFueN6j/XM8tNCZzAMqgSrNzT0HOZlTz05tumigX+OryoMWfKai2g4Dls/TzZMpn1GVyXH9IxFfx7DBrYsFJNYM7+itihAJpwF9xI/KD24MJBLXWb21xhmJaV4xakgBImhF92PjWdwIyw3h/kQIDAQAB"
+
+# A P-256 key and a raw r||s ECDSA SHA-256 signature over EC_MESSAGE.
+EC_X = "tMGUU0K21GASd2C33fvuCEU6rlVz3UzD99h38iu4yd0"
+EC_Y = "suq5GSaJe-9NfrKUdKRSmhXjaTer8e0HpInuGS6RRnk"
+EC_SIG = "49fA2F5Bwv3OWrdmMw5QTxOQevUnHoCL9zlxklSDIKuQADIOsngm7EMZpYIcdexVsoaxxekrKPDmvbV40/DDxw=="
+EC_MESSAGE = "ecdsa test message"
+
+# A self-signed certificate: CN=ez-test.example.com, O=EZ Lang, C=GB.
+CERT = "MIIC+jCCAeKgAwIBAgIIFd1Clox7s94wDQYJKoZIhvcNAQELBQAwPTELMAkGA1UEBhMCR0IxEDAOBgNVBAoTB0VaIExhbmcxHDAaBgNVBAMTE2V6LXRlc3QuZXhhbXBsZS5jb20wHhcNMjYwODEyMDgwMTM1WhcNMjYwOTEyMDgwMTM1WjA9MQswCQYDVQQGEwJHQjEQMA4GA1UEChMHRVogTGFuZzEcMBoGA1UEAxMTZXotdGVzdC5leGFtcGxlLmNvbTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAL2MwVYlNYc8OmkuBoXUMliTQ4vz0WVp6GDJS4GhV3A6E4Frzih3RBahynrtNXLaOOBGwaW4jKuu+T7mdsYI8eedi+MAupnCC3hjKI2i0vPVoibUAx7TOJNvZlXcKmMedbcrLrvLzq0DE88U6Yn+0ZUBHqFvhcKhQxAGeXMemKoS9mnSKWVEppxeRzz7iXbqIKPwK+uxXr/GJbgm9Iy36sWAzxFHrAo1GOtUctEp66Yvvoa1EJlLVl+wvQM1TI2xGJEqo/gZS87uaFLAz++7/6TZ5sGI/zAOXGxqVgiBBPdlzM4Sa3/LrZ6c+43MTVh8MEl2xiZLiNhgZrYFqdTCUq0CAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAJ71FpKMXwM7k0BWLtpSA23NdEy3hV7YIwxrfj78v+KfVu4UBdPV4+UcsHZE3ZtqyGkOIeQYxBNnxXEKY0DT/zz6+nimulanBKd5K+QK9Kqrze04jtjtrcVEvXT3sctida/xc18z/Qq7J1C7hr3DCLGbqp9CuwNz1u9Kh8gqs1lKuwohQqDeApELwIodS0PaLbrzFiuvKabIS+DoCWtkOc9B1jvXrycIt+iQEzSHUohj8g2N0bb0B8DX5jNVAcG3MT8LwsvM5cMlHLvuPVyxkc1zy0RgVMnimoHcy0LYlFChLSbIuoUehdeLhq9KBbBXqIaDH5XMCAQaSxTD7kOcDlw=="
+CERT_NOT_AFTER = 1789200095
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+out "pki tests"
+
+check("bcrypt is available", isAvailable(), true)
+
+# ── RSA ─────────────────────────────────────────────────────────────────────
+rsaKey = PublicKey.fromJwk({ "kty": "RSA", "n": RSA_N, "e": "AQAB" })
+rsaSig = base64ToBytes(RSA_SIG)
+check("a 2048-bit key", rsaKey.bits(), 2048)
+check("its kind", rsaKey.kind, "RSA")
+
+check("a genuine RS256 signature verifies", rsaKey.verify("RS256", MESSAGE, rsaSig), true)
+# The three ways a signature check must fail.
+check("a changed message is rejected", rsaKey.verify("RS256", MESSAGE + "!", rsaSig), false)
+check("a truncated message is rejected",
+      rsaKey.verify("RS256", substr(MESSAGE, 0, len(MESSAGE) - 1), rsaSig), false)
+flipped = base64ToBytes(RSA_SIG)
+flipped[0] = (flipped[0] + 1) % 256
+check("a flipped signature bit is rejected", rsaKey.verify("RS256", MESSAGE, flipped), false)
+check("an empty signature is rejected", rsaKey.verify("RS256", MESSAGE, []), false)
+# The signature was made with SHA-256; claiming another hash must not pass.
+check("the wrong hash is rejected", rsaKey.verify("RS384", MESSAGE, rsaSig), false)
+check("PSS padding does not accept a PKCS1 signature",
+      rsaKey.verify("PS256", MESSAGE, rsaSig), false)
+
+# ── PEM ─────────────────────────────────────────────────────────────────────
+pem = "-----BEGIN PUBLIC KEY-----\n" + RSA_SPKI + "\n-----END PUBLIC KEY-----\n"
+pemKey = PublicKey.fromPem(pem)
+check("a PEM key parses", pemKey.bits(), 2048)
+# The two encodings describe the same key, so they must agree.
+check("PEM and JWK agree", pemKey.fingerprint(), rsaKey.fingerprint())
+check("and verify the same signature", pemKey.verify("RS256", MESSAGE, rsaSig), true)
+# Line breaks and stray whitespace are normal in a PEM file.
+check("wrapped PEM parses",
+      PublicKey.fromPem("-----BEGIN PUBLIC KEY-----\n" +
+                        substr(RSA_SPKI, 0, 64) + "\n" +
+                        substr(RSA_SPKI, 64, len(RSA_SPKI) - 64) +
+                        "\n-----END PUBLIC KEY-----").fingerprint(), rsaKey.fingerprint())
+throws("text that is not PEM is refused", || PublicKey.fromPem("hello"))
+throws("a PEM block with no end line is refused",
+       || PublicKey.fromPem("-----BEGIN PUBLIC KEY-----\nabc\n"))
+
+# ── ECDSA ───────────────────────────────────────────────────────────────────
+ecKey = PublicKey.fromJwk({ "kty": "EC", "crv": "P-256", "x": EC_X, "y": EC_Y })
+ecSig = base64ToBytes(EC_SIG)
+check("an EC key", ecKey.kind, "EC")
+check("of 256 bits", ecKey.bits(), 256)
+check("a genuine ES256 signature verifies", ecKey.verify("ES256", EC_MESSAGE, ecSig), true)
+check("a changed message is rejected", ecKey.verify("ES256", EC_MESSAGE + "!", ecSig), false)
+ecFlipped = base64ToBytes(EC_SIG)
+ecFlipped[10] = (ecFlipped[10] + 1) % 256
+check("a flipped signature bit is rejected", ecKey.verify("ES256", EC_MESSAGE, ecFlipped), false)
+
+# A key of the wrong family must be refused loudly, not silently fail.
+throws("an RSA algorithm against an EC key", || ecKey.verify("RS256", EC_MESSAGE, ecSig))
+throws("an EC algorithm against an RSA key", || rsaKey.verify("ES256", MESSAGE, rsaSig))
+
+# ── the algorithms that are not offered ─────────────────────────────────────
+# "none" is the classic JWT forgery: strip the signature, claim no algorithm,
+# and everything verifies. It is refused by name.
+throws("'none' is never accepted", || rsaKey.verify("none", MESSAGE, rsaSig))
+throws("nor is an unknown algorithm", || rsaKey.verify("RS999", MESSAGE, rsaSig))
+throws("nor an HMAC algorithm", || rsaKey.verify("HS256", MESSAGE, rsaSig))
+
+# ── JWK handling ────────────────────────────────────────────────────────────
+throws("a JWK with no key type", || PublicKey.fromJwk({ "n": RSA_N }))
+throws("an RSA JWK missing the exponent", || PublicKey.fromJwk({ "kty": "RSA", "n": RSA_N }))
+throws("an EC JWK missing y", || PublicKey.fromJwk({ "kty": "EC", "crv": "P-256", "x": EC_X }))
+throws("an unsupported key type", || PublicKey.fromJwk({ "kty": "OKP", "x": EC_X }))
+throws("an unsupported curve", || PublicKey.fromJwk({ "kty": "EC", "crv": "P-192", "x": EC_X, "y": EC_Y }))
+throws("a JWK that is not an object", || PublicKey.fromJwk("nope"))
+
+# A JWKS carries several keys so the issuer can rotate them; the token's
+# header says which one signed it.
+jwks = { "keys": [
+    { "kid": "old", "kty": "RSA", "n": RSA_N, "e": "AQAB" },
+    { "kid": "current", "kty": "EC", "crv": "P-256", "x": EC_X, "y": EC_Y }
+] }
+check("picks a key by kid", keyFromJwks(jwks, "current").kind, "EC")
+check("and the other one", keyFromJwks(jwks, "old").kind, "RSA")
+# A kid that is not there means the issuer rotated and the cache is stale --
+# a specific situation that deserves a specific message.
+throws("an unknown kid is reported", || keyFromJwks(jwks, "gone"))
+throws("a JWKS with no keys array", || keyFromJwks({ "x": 1 }, "k"))
+
+# ── X.509 ───────────────────────────────────────────────────────────────────
+cert = Certificate.fromDer(base64ToBytes(CERT))
+check("the common name", cert.commonName(), "ez-test.example.com")
+check("the organisation", cert.subject["O"], "EZ Lang")
+check("the country", cert.subject["C"], "GB")
+check("self-signed, so the issuer matches", cert.issuer["CN"], cert.subject["CN"])
+check("the expiry parses exactly", cert.notAfter, CERT_NOT_AFTER)
+check("notBefore is before notAfter", cert.notBefore < cert.notAfter, true)
+check("a serial number was read", len(cert.serial) > 0, true)
+
+# Expiry is the check people forget: a certificate is a statement with a
+# deadline on it.
+check("valid inside the window", cert.isValidAt(cert.notBefore + 100), true)
+check("not valid after it", cert.isValidAt(cert.notAfter + 1), false)
+check("nor before it", cert.isValidAt(cert.notBefore - 1), false)
+
+certKey = cert.publicKey()
+check("the embedded key is RSA", certKey.kind, "RSA")
+check("and 2048 bits", certKey.bits(), 2048)
+
+pemCert = "-----BEGIN CERTIFICATE-----\n" + CERT + "\n-----END CERTIFICATE-----"
+check("a PEM certificate parses", Certificate.fromPem(pemCert).commonName(), "ez-test.example.com")
+# A PEM label mismatch means the file is not what the caller thinks it is.
+throws("a public key is not a certificate", || Certificate.fromPem(pem))
+throws("truncated DER is refused", || Certificate.fromDer([48, 130, 2]))
+
+# ── DER parsing ─────────────────────────────────────────────────────────────
+check("a short-form length", readTlv([2, 1, 5], 0)["length"], 1)
+check("and where the contents start", readTlv([2, 1, 5], 0)["start"], 2)
+# The long form encodes the length's own width in the first byte: 0x81 means
+# one length byte follows.
+check("a long-form length", readTlv([4, 129, 2, 170, 187], 0)["length"], 2)
+check("and its contents start after it", readTlv([4, 129, 2, 170, 187], 0)["start"], 3)
+throws("a length longer than the data is refused", || readTlv([4, 10, 1], 0))
+throws("reading past the end is refused", || readTlv([], 0))
+# DER pads an INTEGER with a leading zero to keep it positive; left in, a
+# 2048-bit modulus becomes 257 bytes and the key import fails.
+check("a leading zero is stripped", to_json(readInteger([2, 2, 0, 255], 0)["value"]), to_json([255]))
+check("but a genuine zero is kept", to_json(readInteger([2, 1, 0], 0)["value"]), to_json([0]))
+check("an OID decodes", readOid([6, 3, 42, 3, 4], 0)["value"], "1.2.3.4")
+
+check("base64 decodes", bytesToString(base64ToBytes("Zm9vYmFy")), "foobar")
+# base64url swaps + and / and drops the padding, which is what JWK uses.
+check("base64url decodes", len(base64UrlToBytes("AQAB")), 3)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

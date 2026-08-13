@@ -1,0 +1,474 @@
+# ============================================================================
+# serial — talking to hardware over a COM port
+#
+#   use "serial"
+#
+#   port = openPort("COM3", { "baud": 9600 })
+#   port.writeLine("MEASURE")
+#   out port.readLine()
+#   port.close()
+#
+# Arduinos, GPS modules, scales, barcode scanners, RS-485 sensors, modems, and
+# every industrial device built before Ethernet was cheap speak serial. It is
+# the oldest interface still in daily use, and the one nothing else replaces.
+#
+# The awkward parts are all here on purpose:
+#
+#   * A read that never returns. The default Windows timeout blocks until a
+#     byte arrives, so a disconnected sensor hangs the program forever. Every
+#     read in this package has a deadline.
+#   * COM10. Ports past 9 cannot be opened by bare name; the \\.\ prefix is
+#     always used so a program does not break when the adapter re-enumerates.
+#   * Framing. Devices delimit with \n, \r\n, or a fixed length, and the reply
+#     arrives in pieces. readLine and readUntil reassemble it.
+# ============================================================================
+
+use "serial/win.ez"
+
+DEFAULTS = {
+    "baud": 9600,
+    "dataBits": 8,
+    "parity": "none",
+    "stopBits": "1",
+    "flowControl": "none",
+    "parityCheck": false,
+    "readTimeout": 1000,
+    "writeTimeout": 1000
+}
+
+COMMON_BAUDS = [110, 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 38400,
+                57600, 115200, 128000, 230400, 256000, 460800, 921600]
+
+export model SerialError {
+    init(message) { self.message = message }
+    task toString() { give "SerialError: " + self.message }
+}
+
+# Every setting is validated before the port is opened, because Windows
+# reports a bad DCB as a generic failure and the caller is left guessing which
+# field it disliked.
+task settingsFrom(options) {
+    settings = {}
+    get key in ["baud", "dataBits", "parity", "stopBits", "flowControl",
+                "parityCheck", "readTimeout", "writeTimeout"] {
+        settings[key] = DEFAULTS[key]
+    }
+    when options != nil {
+        get key in keys(options) {
+            when has_key(settings, key) == false {
+                throw SerialError(`'{key}' is not a serial setting -- expected one of baud, dataBits, parity, stopBits, flowControl, parityCheck, readTimeout, writeTimeout`)
+            }
+            settings[key] = options[key]
+        }
+    }
+
+    settings["baud"] = num(settings["baud"])
+    when settings["baud"] <= 0 { throw SerialError("baud must be positive") }
+
+    settings["dataBits"] = num(settings["dataBits"])
+    when settings["dataBits"] < 5 or settings["dataBits"] > 8 {
+        throw SerialError(`dataBits must be 5, 6, 7 or 8 -- got {settings["dataBits"]}`)
+    }
+
+    # These raise on an unknown name rather than falling back to a default.
+    # Silently using no parity on a device that wants even parity produces a
+    # stream of plausible-looking wrong bytes.
+    parityCode(settings["parity"])
+    stopCode(settings["stopBits"])
+    dcbFlags(settings)
+    give settings
+}
+
+export model Port {
+    init(name, options = nil) {
+        self.name = upper(trim(str(name)))
+        self.settings = settingsFrom(options)
+        self.handle = nil
+        self.buffer = []            # bytes read but not yet consumed
+        self.opened = false
+    }
+
+    task openIt() {
+        when self.opened { give self }
+        handle = openHandle(self.name)
+        when handle == INVALID_HANDLE or handle == 0 {
+            code = lastError()
+            # The three failures worth naming, because each has a different
+            # fix and "error 5" tells the user nothing.
+            when code == 2 {
+                throw SerialError(`{self.name} does not exist -- listPorts() shows what does`)
+            }
+            when code == 5 {
+                throw SerialError(`{self.name} is already open in another program`)
+            }
+            throw SerialError(`{self.name} could not be opened (Windows error {code})`)
+        }
+        self.handle = handle
+        self.opened = true
+
+        try {
+            setBuffers(handle, 8192, 8192)
+            when applySettings(handle, self.settings) == false {
+                throw SerialError(`{self.name} rejected the settings -- baud {self.settings["baud"]}, {self.settings["dataBits"]}{upper(substr(self.settings["parity"], 0, 1))}{self.settings["stopBits"]} (Windows error {lastError()})`)
+            }
+            applyTimeouts(handle, self.settings["readTimeout"], self.settings["writeTimeout"])
+            self.discard()
+        }
+        catch (e) {
+            # A port left open by a failed configure cannot be reopened, and
+            # nothing else on the machine can use it either.
+            closeHandle(handle)
+            self.handle = nil
+            self.opened = false
+            throw e
+        }
+        give self
+    }
+
+    task requireOpen() {
+        when self.opened == false {
+            throw SerialError(`{self.name} is not open`)
+        }
+        give nil
+    }
+
+    # ── reading ─────────────────────────────────────────────────────────────
+
+    # How many bytes have arrived and are waiting, including any this Port has
+    # already buffered internally.
+    task waiting() {
+        self.requireOpen()
+        give len(self.buffer) + queued(self.handle)["input"]
+    }
+
+    # Up to `count` bytes. Returns fewer -- possibly none -- rather than
+    # waiting for the full count.
+    task readBytes(count) {
+        self.requireOpen()
+        octets = []
+        while len(self.buffer) > 0 and len(octets) < count {
+            push(octets, self.buffer[0])
+            self.buffer = tail(self.buffer)
+        }
+        when len(octets) >= count { give octets }
+        get b in win_readBytes(self.handle, count - len(octets)) { push(octets, b) }
+        give octets
+    }
+
+    task read(count = 1024) { give bytesToString(self.readBytes(count)) }
+
+    # Exactly `count` bytes, or a timeout. A device that sends a fixed-length
+    # frame needs this; readBytes returning short is the commonest source of a
+    # half-parsed reading.
+    task readExactly(count, timeoutMs = nil) {
+        self.requireOpen()
+        deadline = self.deadlineFrom(timeoutMs)
+        octets = []
+        while len(octets) < count {
+            get b in self.readBytes(count - len(octets)) { push(octets, b) }
+            when len(octets) >= count { give octets }
+            when clock() > deadline {
+                throw SerialError(`{self.name}: wanted {count} bytes, got {len(octets)} before the timeout`)
+            }
+        }
+        give octets
+    }
+
+    # Everything up to and including a delimiter. The delimiter is not
+    # returned -- it is framing, not data.
+    task readUntil(delimiter, timeoutMs = nil) {
+        self.requireOpen()
+        marker = str(delimiter)
+        when marker == "" { throw SerialError("readUntil needs a delimiter") }
+        deadline = self.deadlineFrom(timeoutMs)
+        collected = []
+        while true {
+            found = self.matchDelimiter(collected, marker)
+            when found >= 0 {
+                text = bytesToString(headOf(collected, found))
+                # Anything past the delimiter belongs to the next frame and
+                # must survive for the next call, or a device that replies
+                # faster than the program reads loses every other message.
+                rest = []
+                i = found + len(marker)
+                while i < len(collected) {
+                    push(rest, collected[i])
+                    i = i + 1
+                }
+                self.pushBack(rest)
+                give text
+            }
+            chunk = self.readBytes(512)
+            when len(chunk) > 0 {
+                get b in chunk { push(collected, b) }
+            }
+            other when clock() > deadline {
+                self.pushBack(collected)
+                throw SerialError(`{self.name}: no '{visible(marker)}' arrived within the timeout`)
+            }
+        }
+    }
+
+    # A line, with \r\n and \n both accepted -- devices disagree, and one that
+    # sends \r\n leaves a stray \r on every line if only \n is stripped.
+    task readLine(timeoutMs = nil) {
+        line = self.readUntil("\n", timeoutMs)
+        when endsWith(line, "\r") { give substr(line, 0, len(line) - 1) }
+        give line
+    }
+
+    # Whatever has arrived, right now, without waiting.
+    task readAvailable() {
+        self.requireOpen()
+        count = self.waiting()
+        when count == 0 { give "" }
+        give self.read(count)
+    }
+
+    task matchDelimiter(octets, marker) {
+        first = ord(substr(marker, 0, 1))
+        total = len(marker)
+        i = 0
+        while i + total <= len(octets) {
+            when octets[i] == first {
+                same = true
+                k = 1
+                while k < total {
+                    when octets[i + k] != ord(substr(marker, k, 1)) {
+                        same = false
+                        k = total
+                    }
+                    other { k = k + 1 }
+                }
+                when same { give i }
+            }
+            i = i + 1
+        }
+        give -1
+    }
+
+    task pushBack(octets) {
+        combined = []
+        get b in octets { push(combined, b) }
+        get b in self.buffer { push(combined, b) }
+        self.buffer = combined
+        give nil
+    }
+
+    task deadlineFrom(timeoutMs) {
+        span = timeoutMs
+        when span == nil { span = self.settings["readTimeout"] }
+        give clock() + num(span)
+    }
+
+    # ── writing ─────────────────────────────────────────────────────────────
+
+    task writeBytes(octets) {
+        self.requireOpen()
+        give win_writeBytes(self.handle, octets)
+    }
+
+    task send(text) { give self.writeBytes(bytesOf(str(text))) }
+
+    # Most devices expect a terminator and answer nothing without one.
+    task writeLine(text, terminator = "\n") {
+        give self.send(str(text) + str(terminator))
+    }
+
+    # Blocks until the bytes have physically left, which matters before
+    # closing: a close with data still queued discards it.
+    task flushOutput() {
+        self.requireOpen()
+        give drain(self.handle)
+    }
+
+    # ── control lines ───────────────────────────────────────────────────────
+
+    task setDtr(on) {
+        self.requireOpen()
+        code = CLRDTR
+        when on { code = SETDTR }
+        give escapeFunction(self.handle, code)
+    }
+
+    task setRts(on) {
+        self.requireOpen()
+        code = CLRRTS
+        when on { code = SETRTS }
+        give escapeFunction(self.handle, code)
+    }
+
+    # An Arduino resets when DTR drops and rises. That is how the bootloader is
+    # entered, and it is also why a program that opens the port and reads
+    # immediately gets the bootloader's output instead of the sketch's.
+    task pulseDtr(ms = 100) {
+        self.setDtr(false)
+        pause(ms)
+        self.setDtr(true)
+        give nil
+    }
+
+    task signals() {
+        self.requireOpen()
+        bits = modemStatus(self.handle)
+        when bits == nil { give nil }
+        give {
+            "cts": (bits & MS_CTS_ON) != 0,
+            "dsr": (bits & MS_DSR_ON) != 0,
+            "ring": (bits & MS_RING_ON) != 0,
+            "carrier": (bits & MS_RLSD_ON) != 0
+        }
+    }
+
+    # ── lifecycle ───────────────────────────────────────────────────────────
+
+    # Throws away buffered input on both sides. Worth doing after opening: a
+    # device that has been talking to nobody has a queue of stale readings, and
+    # the first "measurement" a program reads is often minutes old.
+    task discard() {
+        self.requireOpen()
+        self.buffer = []
+        give purge(self.handle, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT)
+    }
+
+    task close() {
+        when self.opened == false { give nil }
+        try { drain(self.handle) } catch (e) { }
+        closeHandle(self.handle)
+        self.handle = nil
+        self.opened = false
+        self.buffer = []
+        give nil
+    }
+
+    task isOpen() { give self.opened }
+
+    task toString() {
+        state = "closed"
+        when self.opened { state = "open" }
+        give `Port({self.name}, {self.settings["baud"]} baud, {state})`
+    }
+}
+
+# The win.ez transfer functions and the Port methods share names by intent --
+# they are the same operation at two levels. These aliases keep the module-level
+# names distinct so neither shadows the other.
+task win_readBytes(handle, count) { give readBytes(handle, count) }
+task win_writeBytes(handle, octets) { give writeBytes(handle, octets) }
+
+export task openPort(name, options = nil) {
+    port = Port(name, options)
+    port.openIt()
+    give port
+}
+
+# Every COM port the machine currently has, sorted by number rather than by
+# name -- COM10 sorts before COM9 as text, and a list that reads COM1, COM10,
+# COM3 looks broken.
+export task listPorts() {
+    found = []
+    get name in listDevices() {
+        when startsWith(name, "COM") and isNumeric(substr(name, 3, len(name) - 3)) {
+            push(found, name)
+        }
+    }
+    give sortByNumber(found)
+}
+
+task isNumeric(text) {
+    when text == "" { give false }
+    get ch in split(text, "") {
+        code = ord(ch)
+        when code < 48 or code > 57 { give false }
+    }
+    give true
+}
+
+task sortByNumber(names) {
+    remaining = []
+    get name in names { push(remaining, name) }
+    ordered = []
+    while len(remaining) > 0 {
+        best = 0
+        i = 1
+        while i < len(remaining) {
+            when portNumber(remaining[i]) < portNumber(remaining[best]) { best = i }
+            i = i + 1
+        }
+        push(ordered, remaining[best])
+        next = []
+        i = 0
+        while i < len(remaining) {
+            when i != best { push(next, remaining[i]) }
+            i = i + 1
+        }
+        remaining = next
+    }
+    give ordered
+}
+
+task portNumber(name) {
+    digits = substr(str(name), 3, len(str(name)) - 3)
+    when isNumeric(digits) { give num(digits) }
+    give 999999
+}
+
+export task isPresent(name) {
+    wanted = upper(trim(str(name)))
+    get existing in listPorts() {
+        when existing == wanted { give true }
+    }
+    give false
+}
+
+export task bauds() { give COMMON_BAUDS }
+
+task headOf(octets, count) {
+    piece = []
+    i = 0
+    while i < count {
+        push(piece, octets[i])
+        i = i + 1
+    }
+    give piece
+}
+
+task tail(octets) {
+    rest = []
+    i = 1
+    while i < len(octets) {
+        push(rest, octets[i])
+        i = i + 1
+    }
+    give rest
+}
+
+# For error messages: a delimiter of "\n" printed raw puts a newline in the
+# middle of the message and makes it unreadable.
+task visible(text) {
+    # A literal backslash cannot be written in an EZ string literal, so it is
+    # built from its byte.
+    slash = chr(92)
+    rendered = ""
+    get ch in split(str(text), "") {
+        code = ord(ch)
+        when code == 10 { rendered = rendered + slash + "n" }
+        other when code == 13 { rendered = rendered + slash + "r" }
+        other when code < 32 { rendered = rendered + slash + "x" + str(code) }
+        other { rendered = rendered + ch }
+    }
+    give rendered
+}
+
+# The bytes of a string, exactly. len() counts bytes and substr indexes them,
+# so this is byte-exact for any input, including non-ASCII.
+task bytesOf(text) {
+    body = str(text)
+    octets = []
+    i = 0
+    while i < len(body) {
+        push(octets, ord(substr(body, i, 1)))
+        i = i + 1
+    }
+    give octets
+}

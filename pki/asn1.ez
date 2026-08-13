@@ -1,0 +1,188 @@
+# ============================================================================
+# pki/asn1.ez — just enough DER to read a public key or a certificate
+#
+# PEM is base64 around DER, and DER is ASN.1 in tag-length-value form. A full
+# ASN.1 implementation is a large and famously bug-prone thing; this reads the
+# handful of structures a public key and an X.509 certificate are made of, and
+# refuses anything it does not recognise rather than guessing.
+#
+# Everything here works in byte arrays.
+# ============================================================================
+
+export TAG_INTEGER = 2
+export TAG_BITSTRING = 3
+export TAG_OCTETSTRING = 4
+export TAG_NULL = 5
+export TAG_OID = 6
+export TAG_UTF8STRING = 12
+export TAG_SEQUENCE = 48
+export TAG_SET = 49
+export TAG_PRINTABLESTRING = 19
+export TAG_UTCTIME = 23
+export TAG_GENERALIZEDTIME = 24
+
+# One tag-length-value at `offset`.
+#
+# Returns the tag, where the contents start, how long they are, and where the
+# next element begins.
+export task readTlv(bytes, offset) {
+    when offset >= len(bytes) {
+        throw Exception("pki: the DER data ended unexpectedly")
+    }
+    tag = bytes[offset]
+    at = offset + 1
+    when at >= len(bytes) {
+        throw Exception("pki: a DER element has no length")
+    }
+    first = bytes[at]
+    at = at + 1
+    length = 0
+    when first < 128 { length = first }
+    other {
+        # The long form: the low bits say how many bytes the length occupies.
+        count = first - 128
+        when count == 0 or count > 4 {
+            throw Exception("pki: this DER length encoding is not supported")
+        }
+        repeat i = 1 to count {
+            length = length * 256 + bytes[at]
+            at = at + 1
+        }
+    }
+    when at + length > len(bytes) {
+        throw Exception("pki: a DER element claims to be longer than the data")
+    }
+    give { "tag": tag, "start": at, "length": length, "next": at + length }
+}
+
+export task expectTag(bytes, offset, tag, what) {
+    element = readTlv(bytes, offset)
+    when element["tag"] != tag {
+        throw Exception(`pki: expected {what} (tag {tag}) but found tag {element["tag"]}`)
+    }
+    give element
+}
+
+# Named sliceBytes, not slice: `slice` is a builtin, and defining a task
+# with a builtin's name takes that name over for the whole process.
+export task sliceBytes(bytes, offset, length) {
+    piece = []
+    repeat i = 0 to length - 1 { push(piece, bytes[offset + i]) }
+    give piece
+}
+
+# An INTEGER's contents, with the leading zero DER adds to keep a value
+# positive removed. Left in, it makes a 2048-bit modulus 257 bytes and the key
+# import fails with a length error that names nothing useful.
+export task readInteger(bytes, offset) {
+    element = expectTag(bytes, offset, TAG_INTEGER, "an INTEGER")
+    start = element["start"]
+    length = element["length"]
+    when length > 1 and bytes[start] == 0 {
+        start = start + 1
+        length = length - 1
+    }
+    give { "value": sliceBytes(bytes, start, length), "next": element["next"] }
+}
+
+# A BIT STRING's contents, past the unused-bits byte.
+export task readBitString(bytes, offset) {
+    element = expectTag(bytes, offset, TAG_BITSTRING, "a BIT STRING")
+    give {
+        "value": sliceBytes(bytes, element["start"] + 1, element["length"] - 1),
+        "next": element["next"]
+    }
+}
+
+# An OID in dotted form. The first byte packs two components; the rest are
+# base-128 with a continuation bit.
+export task readOid(bytes, offset) {
+    element = expectTag(bytes, offset, TAG_OID, "an OBJECT IDENTIFIER")
+    start = element["start"]
+    length = element["length"]
+    when length == 0 { give { "value": "", "next": element["next"] } }
+
+    first = bytes[start]
+    parts = [str(floor(first / 40)), str(first % 40)]
+    value = 0
+    i = 1
+    while i < length {
+        b = bytes[start + i]
+        value = value * 128 + (b % 128)
+        when b < 128 {
+            push(parts, str(value))
+            value = 0
+        }
+        i = i + 1
+    }
+    give { "value": join(parts, "."), "next": element["next"] }
+}
+
+export task readString(bytes, offset) {
+    element = readTlv(bytes, offset)
+    give { "value": bytesToString(sliceBytes(bytes, element["start"], element["length"])),
+            "next": element["next"] }
+}
+
+# ── PEM ─────────────────────────────────────────────────────────────────────
+
+# The DER inside a PEM block. `label` is optional; when given, a block with a
+# different label is refused rather than decoded into something unexpected.
+export task fromPem(text, label = nil) {
+    body = str(text)
+    beginMark = "-----BEGIN "
+    when contains(body, beginMark) == false {
+        throw Exception("pki: this is not PEM -- no -----BEGIN line found")
+    }
+    at = indexOf(body, beginMark)
+    rest = substr(body, at + len(beginMark), len(body) - at - len(beginMark))
+    dashAt = indexOf(rest, "-----")
+    when dashAt < 0 { throw Exception("pki: the PEM header is malformed") }
+    foundLabel = substr(rest, 0, dashAt)
+    when label != nil and foundLabel != label {
+        throw Exception(`pki: expected a '{label}' block but found '{foundLabel}'`)
+    }
+
+    afterHeader = substr(rest, dashAt + 5, len(rest) - dashAt - 5)
+    endAt = indexOf(afterHeader, "-----END")
+    when endAt < 0 { throw Exception("pki: the PEM block has no -----END line") }
+    encoded = substr(afterHeader, 0, endAt)
+
+    cleaned = ""
+    get ch in split(encoded, "") {
+        when ch != "\n" and ch != "\r" and ch != " " and ch != "\t" { cleaned = cleaned + ch }
+    }
+    give { "label": foundLabel, "der": base64ToBytes(cleaned) }
+}
+
+ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+export task base64ToBytes(text) {
+    body = str(text)
+    octets = []
+    accumulator = 0
+    bits = 0
+    get ch in split(body, "") {
+        when ch != "=" {
+            index = indexOf(ALPHABET, ch)
+            when index >= 0 {
+                accumulator = accumulator * 64 + index
+                bits = bits + 6
+                when bits >= 8 {
+                    bits = bits - 8
+                    divisor = 1
+                    repeat i = 1 to bits { divisor = divisor * 2 }
+                    push(octets, floor(accumulator / divisor) % 256)
+                    accumulator = accumulator % divisor
+                }
+            }
+        }
+    }
+    give octets
+}
+
+# base64url, as JWK and JWT use: - and _ instead of + and /, and no padding.
+export task base64UrlToBytes(text) {
+    body = replace(replace(str(text), "-", "+"), "_", "/")
+    give base64ToBytes(body)
+}

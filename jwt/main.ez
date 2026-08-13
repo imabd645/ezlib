@@ -12,6 +12,7 @@
 # Requires: ezcrypto
 # ============================================================================
 use "crypto"
+use "pki"
 
 # ── Error prefixes ───────────────────────────────────────────────────────────
 # Every throw starts with one of these so a caller can tell an expired token
@@ -26,7 +27,20 @@ export JWT_CLAIM       = "jwt/claim: "
 
 # Algorithms this library will produce or accept. `none` is deliberately absent:
 # accepting it lets anyone strip the signature and forge any payload.
-_JWT_ALGS = ["HS256", "HS384", "HS512"]
+_JWT_ALGS = ["HS256", "HS384", "HS512",
+             "RS256", "RS384", "RS512",
+             "PS256", "PS384", "PS512",
+             "ES256", "ES384", "ES512"]
+
+# The asymmetric half. These are verified with a PUBLIC KEY, never a shared
+# secret, and that distinction is load-bearing: an OIDC id_token from Google,
+# Microsoft or Apple is RS256, and before `pki` this library could decode one
+# but not check its signature.
+_JWT_ASYMMETRIC = ["RS256", "RS384", "RS512",
+                   "PS256", "PS384", "PS512",
+                   "ES256", "ES384", "ES512"]
+
+task _jwtIsAsymmetric(alg) { give _jwtIsIn(alg, _JWT_ASYMMETRIC) }
 
 # ── Internals ────────────────────────────────────────────────────────────────
 
@@ -34,6 +48,22 @@ _JWT_ALGS = ["HS256", "HS384", "HS512"]
 # claims are seconds -- mixing the two makes every exp look ~1000x in the future.
 task _jwtNow() {
     give floor(DateTime().timestamp() / 1000)
+}
+
+
+# Verifies an asymmetric signature. `key` is a pki PublicKey, a JWK dictionary,
+# or PEM text -- whichever the caller happens to hold.
+task _jwtVerifyAsymmetric(alg, key, signingInput, encodedSignature) {
+    resolved = key
+    when typeOf(key) == "dictionary" { resolved = PublicKey.fromJwk(key) }
+    other when typeOf(key) == "string" { resolved = PublicKey.fromPem(key) }
+    when typeOf(resolved) != "instance" {
+        throw JWT_ALGORITHM + str(alg) + " needs a public key, not a shared secret"
+    }
+    signature = b64url_decode(encodedSignature)
+    octets = []
+    repeat i = 0 to len(signature) - 1 { push(octets, ord(substr(signature, i, 1))) }
+    give resolved.verify(alg, signingInput, octets)
 }
 
 task _jwtSignHex(alg, secret, signingInput) {
@@ -209,7 +239,22 @@ export model JWT {
         }
 
         signingInput = parts[0] + "." + parts[1]
-        when not _jwtSecureEquals(parts[2], _jwtSignature(alg, secret, signingInput)) {
+        # An asymmetric token is verified against a public key, so the branch
+        # is taken on the ALGORITHM the header names -- but only after that
+        # algorithm has been checked against the allow-list above. Choosing
+        # the verification path from an unvalidated header is the confusion
+        # attack: a token that says HS256 gets verified with the RSA PUBLIC
+        # key as if it were an HMAC secret, and the public key is public.
+        signatureOk = false
+        when _jwtIsAsymmetric(alg) {
+            signatureOk = _jwtVerifyAsymmetric(alg, secret, signingInput, parts[2])
+        }
+        other {
+            signatureOk = _jwtSecureEquals(parts[2], _jwtSignature(alg, secret, signingInput))
+        }
+        # One exit for both paths, so the claim validation below cannot be
+        # reached without a verified signature by either route.
+        when not signatureOk {
             throw JWT_SIGNATURE + "signature verification failed"
         }
 

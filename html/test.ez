@@ -1,0 +1,309 @@
+# ============================================================================
+# html — tests
+#
+# The markup here is deliberately bad. Well-formed HTML proves nothing about a
+# parser meant for the open web: every interesting case is a page that does not
+# close its tags, quotes nothing, and puts a "<" inside a script.
+# ============================================================================
+
+use "html"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+
+# ── recovery ────────────────────────────────────────────────────────────────
+
+out "recovery from broken markup"
+
+# Unclosed <li>: browsers make these siblings, not a staircase.
+LIST = "<ul><li>one<li>two<li>three</ul>"
+list = parse(LIST)
+check("unclosed li count", len(list.select("li")), 3)
+check("unclosed li first", list.select("li")[0].innerText(), "one")
+check("unclosed li last", list.select("li")[2].innerText(), "three")
+check("li are siblings, not nested", len(list.select("li li")), 0)
+
+# Unclosed <p> likewise.
+PARAS = "<div><p>first<p>second<p>third</div>"
+paras = parse(PARAS)
+check("unclosed p count", len(paras.select("p")), 3)
+check("unclosed p text", paras.select("p")[1].innerText(), "second")
+
+# A heading closes an open heading. Without this an unclosed <h1> swallows
+# everything after it and its text becomes the whole page.
+HEADS = "<section><h1>Title<h2>Sub<h3>Deep</section>"
+heads = parse(HEADS)
+check("h2 closes an open h1", len(heads.select("h1 h2")), 0)
+check("h3 closes an open h2", len(heads.select("h2 h3")), 0)
+check("headings are siblings", len(heads.select("section > h1")), 1)
+check("an unclosed heading does not swallow the page", heads.selectOne("h1").innerText(), "Title")
+
+# A block element closes an open paragraph.
+check("div closes open p", len(parse("<p>text<div>block</div>").select("p div")), 0)
+
+# Void elements never take children.
+VOIDS = "<div><br><img src=a.png><hr><p>after</p></div>"
+voids = parse(VOIDS)
+check("void element has no children", len(voids.select("br")[0].children), 0)
+check("content after a void is a sibling", len(voids.select("div > p")), 1)
+
+# A close tag with nothing open is discarded rather than fatal.
+check("stray close tag survives", parse("</div><p>text</p>").select("p")[0].innerText(), "text")
+
+# An unclosed tag at end of document still yields the element.
+check("unclosed at EOF", parse("<div><span>text").select("span")[0].innerText(), "text")
+
+# ── raw text ────────────────────────────────────────────────────────────────
+
+out "raw text elements"
+
+# "<" inside a script is not a tag. This is the single most common way a naive
+# parser destroys a page.
+SCRIPTED = "<div><script>if (a < b) { s = '</p>'; }</script><p>after</p></div>"
+scripted = parse(SCRIPTED)
+check("script content is not parsed as markup", len(scripted.select("p")), 1)
+checkTrue("script text kept verbatim", contains(scripted.select("script")[0].textContent(), "a < b"))
+check("element after a script is found", scripted.select("p")[0].innerText(), "after")
+
+STYLED = "<style>a > b { color: red }</style><p>x</p>"
+check("style content is not parsed as markup", len(parse(STYLED).select("p")), 1)
+
+# script and style are RAW text -- an entity inside one is left alone, because
+# the script means the literal characters.
+check("entities not decoded in script",
+      parse("<script>a &amp;&amp; b</script>").select("script")[0].textContent(),
+      "a &amp;&amp; b")
+
+# title and textarea are RCDATA: no markup, but entities still decode.
+check("entities decoded in title", parse("<title>Tom &amp; Jerry</title>").title(), "Tom & Jerry")
+check("entities decoded in textarea",
+      parse("<textarea>a &lt; b</textarea>").select("textarea")[0].textContent(),
+      "a < b")
+
+# ── attributes ──────────────────────────────────────────────────────────────
+
+out "attributes"
+
+ATTRS = "<input type=text name='user' value=\"a b\" required disabled>"
+field = parse(ATTRS).select("input")[0]
+check("unquoted attribute", field.attribute("type"), "text")
+check("single-quoted attribute", field.attribute("name"), "user")
+check("double-quoted attribute with a space", field.attribute("value"), "a b")
+check("valueless attribute", field.attribute("required"), "")
+checkTrue("valueless attribute is present", field.hasAttribute("disabled"))
+check("absent attribute is nil", field.attribute("missing"), nil)
+
+# Attribute names are case-insensitive, values are not.
+CASED = "<a HREF='/X'>t</a>"
+check("attribute name is case-insensitive", parse(CASED).select("a")[0].attribute("href"), "/X")
+check("tag name is case-insensitive", len(parse("<DIV><SPAN>x</SPAN></DIV>").select("div span")), 1)
+
+# An attribute holding an entity is decoded.
+check("entity in an attribute value",
+      parse("<a href='/a?x=1&amp;y=2'>t</a>").select("a")[0].attribute("href"),
+      "/a?x=1&y=2")
+
+# class is a list, not a value.
+CLASSED = "<p class='  big   title '>x</p>"
+node = parse(CLASSED).select("p")[0]
+check("classes split on whitespace", len(node.classes()), 2)
+checkTrue("hasClass finds a class", node.hasClass("title"))
+checkTrue("hasClass rejects a partial match", node.hasClass("tit") == false)
+
+# ── entities ────────────────────────────────────────────────────────────────
+
+out "entities"
+
+check("named entity", unescapeHtml("a &amp; b"), "a & b")
+check("numeric entity", unescapeHtml("it&#39;s"), "it's")
+check("hex numeric entity", unescapeHtml("it&#x27;s"), "it's")
+check("lt and gt", unescapeHtml("&lt;p&gt;"), "<p>")
+# An unknown entity is left as it was: losing text is worse than leaving it
+# encoded, and a scraper can still see what it was.
+check("unknown entity is preserved", unescapeHtml("a &notreal; b"), "a &notreal; b")
+check("bare ampersand is preserved", unescapeHtml("a & b"), "a & b")
+check("escapeHtml escapes the ampersand first", escapeHtml("<a href=\"x\">&"), "&lt;a href=&quot;x&quot;&gt;&amp;")
+check("escape round-trips", unescapeHtml(escapeHtml("<a & 'b'>")), "<a & 'b'>")
+
+# ── selectors ───────────────────────────────────────────────────────────────
+
+out "selectors"
+
+PAGE = "<html><body>" +
+       "<div id=wrap class='panel main'>" +
+       "<h1 class=title>Heading</h1>" +
+       "<ul class=nav><li class=item><a href='/one'>One</a></li>" +
+       "<li class='item active'><a href='https://x.test/two'>Two</a></li></ul>" +
+       "<p>Body <em>text</em></p>" +
+       "</div><div class=panel><p>Second</p></div></body></html>"
+page = parse(PAGE)
+
+check("tag selector", len(page.select("p")), 2)
+check("id selector", page.selectOne("#wrap").name, "div")
+check("class selector", len(page.select(".panel")), 2)
+check("tag with class", len(page.select("div.panel")), 2)
+check("two classes must both match", len(page.select(".item.active")), 1)
+check("universal selector counts every element", len(page.select("*")) > 10, true)
+
+check("descendant selector", len(page.select("div a")), 2)
+check("descendant crosses levels", len(page.select("#wrap a")), 2)
+check("child selector does not cross levels", len(page.select("ul > a")), 0)
+check("child selector", len(page.select("ul > li")), 2)
+check("three-step selector", len(page.select("div ul li")), 2)
+
+check("attribute presence", len(page.select("a[href]")), 2)
+check("attribute equality", len(page.select("a[href='/one']")), 1)
+check("attribute prefix", len(page.select("a[href^=/]")), 1)
+check("attribute suffix", len(page.select("a[href$=two]")), 1)
+check("attribute contains", len(page.select("a[href*=x.test]")), 1)
+
+check("comma alternation", len(page.select("h1, em")), 2)
+# An element matching both branches appears once, not twice.
+check("alternation deduplicates", len(page.select("h1, .title")), 1)
+
+check("selectOne returns nil when nothing matches", page.selectOne(".nothing"), nil)
+check("select returns an empty list when nothing matches", len(page.select(".nothing")), 0)
+
+# Results come back in document order, not match order.
+check("document order", page.select(".item")[0].innerText(), "One")
+
+# An unsupported selector raises rather than silently matching the wrong
+# elements -- ignoring the part it cannot parse is how a scraper starts
+# returning quietly wrong data.
+rejected = false
+try { page.select("li:first-child") } catch (e) { rejected = true }
+checkTrue("a pseudo-class is refused, not ignored", rejected)
+
+rejected = false
+try { page.select("") } catch (e) { rejected = true }
+checkTrue("an empty selector is refused", rejected)
+
+# ── text ────────────────────────────────────────────────────────────────────
+
+out "text extraction"
+
+check("textContent concatenates descendants", page.selectOne("p").textContent(), "Body text")
+check("innerText collapses whitespace", parse("<p>a\n\n   b\t c</p>").select("p")[0].innerText(), "a b c")
+check("innerText trims", parse("<p>   x   </p>").select("p")[0].innerText(), "x")
+
+# The single commonest surprise when extracting page content: without removing
+# script and style, the "text" of a modern page is mostly JavaScript.
+NOISY = "<body><script>var x = 1;</script><style>p{color:red}</style><p>Real</p></body>"
+check("textOf omits script and style", textOf(NOISY), "Real")
+checkTrue("textOf keeps the real text", contains(stripTags(NOISY), "Real"))
+checkTrue("textOf drops the script", contains(textOf(NOISY), "var x") == false)
+
+# ── documents ───────────────────────────────────────────────────────────────
+
+out "document helpers"
+
+check("title", page.title(), nil)
+check("byTag", len(page.byTag("li")), 2)
+check("byClass", len(page.byClass("item")), 2)
+check("byId", page.byId("wrap").name, "div")
+
+META = "<head><meta name=description content='A page'>" +
+       "<meta property='og:title' content='Title'>" +
+       "<meta charset=utf-8></head>"
+meta = parse(META).meta()
+check("meta by name", meta["description"], "A page")
+check("meta by property", meta["og:title"], "Title")
+# A meta with no name/content pair contributes nothing rather than a nil key.
+check("meta without content is skipped", has_key(meta, "charset"), false)
+
+links = page.links("https://site.test/docs/page.html")
+check("links found", len(links), 2)
+check("root-relative link resolves against the origin", links[0]["href"], "https://site.test/one")
+check("absolute link is left alone", links[1]["href"], "https://x.test/two")
+check("link text", links[0]["text"], "One")
+
+check("relative link resolves against the directory",
+      resolveUrl("https://site.test/docs/page.html", "other.html"),
+      "https://site.test/docs/other.html")
+check("protocol-relative link takes the base scheme",
+      resolveUrl("http://site.test/a", "//cdn.test/x.js"),
+      "http://cdn.test/x.js")
+check("fragment appends to the page", resolveUrl("https://site.test/a", "#top"), "https://site.test/a#top")
+check("no base leaves the href alone", resolveUrl(nil, "/one"), "/one")
+
+IMAGES = "<div><img src='/a.png' alt='A'><img src='b.png'></div>"
+images = parse(IMAGES).images("https://site.test/x/y.html")
+check("images found", len(images), 2)
+check("image src resolves", images[0]["src"], "https://site.test/a.png")
+check("image alt", images[0]["alt"], "A")
+check("missing alt is nil", images[1]["alt"], nil)
+
+# ── tables ──────────────────────────────────────────────────────────────────
+
+out "tables"
+
+# No </td>, no </tr>, no <tbody> -- which is how hand-written tables look, and
+# what a parser that only closes the top of the stack gets wrong: the second
+# <tr> has to close both the open <td> and the open <tr> above it.
+TABLE = "<table class=results><tr><th>Name<th>Age" +
+        "<tr><td>ana<td>31<tr><td>bo<td>25</table>"
+rows = parse(TABLE).table("table.results")
+check("row count", len(rows), 3)
+check("header row", to_json(rows[0]), to_json(["Name", "Age"]))
+check("first data row", to_json(rows[1]), to_json(["ana", "31"]))
+check("last data row", to_json(rows[2]), to_json(["bo", "25"]))
+# Rows are siblings; a mis-unwound stack nests each one inside the last.
+check("rows are siblings", len(parse(TABLE).select("tr tr")), 0)
+
+CLOSED = "<table><thead><tr><th>A</th></tr></thead>" +
+         "<tbody><tr><td>1</td></tr><tr><td>2</td></tr></tbody></table>"
+closed = parse(CLOSED).table()
+check("tbody rows are found", len(closed), 3)
+check("a fully closed table still parses", closed[2][0], "2")
+
+check("a missing table gives an empty list", len(parse("<p>x</p>").table()), 0)
+
+# ── structure ───────────────────────────────────────────────────────────────
+
+out "tree structure"
+
+TREE = "<div><p>a</p><!-- note --><p>b</p></div>"
+tree = parse(TREE)
+div = tree.selectOne("div")
+check("elementChildren skips text and comments", len(div.elementChildren()), 2)
+check("a comment contributes no text", div.innerText(), "a b")
+check("parent link", tree.selectOne("p").parent.name, "div")
+checkTrue("an element is an element", div.isElement())
+checkTrue("an element is not text", div.isText() == false)
+
+# A doctype is not an element.
+check("doctype is not an element", len(parse("<!DOCTYPE html><p>x</p>").select("p")), 1)
+
+# ── edge cases ──────────────────────────────────────────────────────────────
+
+out "edge cases"
+
+check("empty input parses to an empty document", len(parse("").select("*")), 0)
+check("text with no markup", textOf("just words"), "just words")
+check("a bare < is text, not a tag", contains(textOf("a < b"), "<"), true)
+check("an unterminated tag does not hang", len(parse("<div class=").select("*")) >= 0, true)
+check("a comment is not an element", len(parse("<!-- <p>x</p> -->").select("p")), 0)
+check("an unterminated comment does not hang", len(parse("<!-- never closed").select("*")), 0)
+
+out ""
+when failed == 0 {
+    out `html: all {passed} checks passed`
+}
+other {
+    out `html: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

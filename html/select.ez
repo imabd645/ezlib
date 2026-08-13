@@ -1,0 +1,270 @@
+# ============================================================================
+# html/select.ez — CSS selectors
+#
+# Walking `children` by hand works until the page changes; "table.results tr"
+# survives a wrapper div appearing, which on a site you do not control is the
+# difference between a scraper that lasts a week and one that lasts a year.
+#
+# Supported:
+#
+#   tag  .class  #id  *              simple selectors
+#   [attr]  [attr=value]             attribute presence and equality
+#   [attr^=v] [attr$=v] [attr*=v]    prefix, suffix, contains
+#   a b                              descendant
+#   a > b                            direct child
+#   a, b                             either
+#
+# Not supported, deliberately: pseudo-classes, sibling combinators and
+# :nth-child. Each needs real machinery, and a selector engine that silently
+# ignores a part of the selector it does not understand would match the wrong
+# elements rather than saying so. Anything unrecognised raises.
+# ============================================================================
+
+export model SelectorError {
+    init(message) { self.message = message }
+    task toString() { give "SelectorError: " + self.message }
+}
+
+# One simple selector: a tag, plus any number of qualifiers.
+task parseSimple(text) {
+    body = trim(text)
+    when body == "" { throw SelectorError("an empty selector matches nothing") }
+
+    part = { "tag": nil, "id": nil, "classes": [], "attributes": [] }
+    i = 0
+    # A leading name (or *) is the tag. The scan stops at every character that
+    # begins something else -- including ":", "+" and "~", which are NOT
+    # supported. Absorbing those into the tag name is the dangerous failure:
+    # "li:first-child" would become a tag named "li:first-child", match
+    # nothing, and report an empty result as though the page had changed.
+    while i < len(body) {
+        ch = substr(body, i, 1)
+        when isQualifierStart(ch) { i = len(body) }
+        other {
+            when part["tag"] == nil { part["tag"] = "" }
+            part["tag"] = part["tag"] + ch
+            i = i + 1
+        }
+    }
+    # Recompute the offset the qualifiers start at.
+    at = 0
+    when part["tag"] != nil { at = len(part["tag"]) }
+    when part["tag"] == "*" { part["tag"] = nil }
+    when part["tag"] != nil { part["tag"] = lower(part["tag"]) }
+
+    while at < len(body) {
+        ch = substr(body, at, 1)
+        when ch == "#" {
+            value = readName(body, at + 1)
+            part["id"] = value["text"]
+            at = value["next"]
+        }
+        other when ch == "." {
+            value = readName(body, at + 1)
+            push(part["classes"], value["text"])
+            at = value["next"]
+        }
+        other when ch == "[" {
+            closeAt = indexOfFrom(body, "]", at)
+            when closeAt < 0 { throw SelectorError("an attribute selector has no closing ]") }
+            push(part["attributes"], parseAttributeTest(substr(body, at + 1, closeAt - at - 1)))
+            at = closeAt + 1
+        }
+        other when ch == ":" {
+            throw SelectorError(`pseudo-classes are not supported, so '{body}' cannot be matched -- matching it approximately would return the wrong elements silently`)
+        }
+        other when ch == "+" or ch == "~" {
+            throw SelectorError(`sibling combinators are not supported, so '{body}' cannot be matched`)
+        }
+        other {
+            throw SelectorError(`'{ch}' in '{body}' is not something this selector engine understands`)
+        }
+    }
+    give part
+}
+
+# Anything that ends a tag name. The unsupported ones are listed with the
+# supported ones on purpose, so parseSimple reaches them and raises.
+task isQualifierStart(ch) {
+    give ch == "." or ch == "#" or ch == "[" or ch == ":" or ch == "+" or ch == "~"
+}
+
+task readName(body, from) {
+    text = ""
+    i = from
+    while i < len(body) {
+        ch = substr(body, i, 1)
+        when isQualifierStart(ch) { give { "text": text, "next": i } }
+        text = text + ch
+        i = i + 1
+    }
+    give { "text": text, "next": i }
+}
+
+task parseAttributeTest(body) {
+    text = trim(body)
+    get operator in ["^=", "$=", "*=", "="] {
+        at = indexOf(text, operator)
+        when at > 0 {
+            name = lower(trim(substr(text, 0, at)))
+            value = trim(substr(text, at + len(operator), len(text) - at - len(operator)))
+            when startsWith(value, "\"") or startsWith(value, "'") {
+                value = substr(value, 1, len(value) - 2)
+            }
+            give { "name": name, "operator": operator, "value": value }
+        }
+    }
+    give { "name": lower(text), "operator": "exists", "value": nil }
+}
+
+task matchesSimple(node, part) {
+    when node.isElement() == false { give false }
+    when part["tag"] != nil and node.name != part["tag"] { give false }
+    when part["id"] != nil and node.attribute("id") != part["id"] { give false }
+    get name in part["classes"] {
+        when node.hasClass(name) == false { give false }
+    }
+    get test in part["attributes"] {
+        value = node.attribute(test["name"])
+        when value == nil { give false }
+        when test["operator"] == "=" and str(value) != test["value"] { give false }
+        when test["operator"] == "^=" and startsWith(str(value), test["value"]) == false { give false }
+        when test["operator"] == "$=" and endsWith(str(value), test["value"]) == false { give false }
+        when test["operator"] == "*=" and contains(str(value), test["value"]) == false { give false }
+    }
+    give true
+}
+
+# A selector is a sequence of simple selectors joined by combinators.
+task parseSequence(selector) {
+    steps = []
+    body = trim(str(selector))
+    when body == "" { throw SelectorError("an empty selector matches nothing") }
+
+    current = ""
+    combinator = "descendant"
+    i = 0
+    while i < len(body) {
+        ch = substr(body, i, 1)
+        when ch == ">" {
+            when trim(current) != "" {
+                push(steps, { "combinator": combinator, "part": parseSimple(current) })
+                current = ""
+            }
+            combinator = "child"
+            i = i + 1
+        }
+        other when ch == " " or ch == "\t" or ch == "\n" {
+            when trim(current) != "" {
+                push(steps, { "combinator": combinator, "part": parseSimple(current) })
+                current = ""
+                combinator = "descendant"
+            }
+            i = i + 1
+        }
+        other {
+            current = current + ch
+            i = i + 1
+        }
+    }
+    when trim(current) != "" {
+        push(steps, { "combinator": combinator, "part": parseSimple(current) })
+    }
+    when len(steps) == 0 { throw SelectorError("an empty selector matches nothing") }
+    give steps
+}
+
+# Every element under `root` matching `selector`, in document order.
+export task querySelectorAll(root, selector) {
+    when trim(str(selector)) == "" {
+        throw SelectorError("an empty selector matches nothing -- pass a selector, or use the node's children directly")
+    }
+    results = []
+    seen = {}
+    # A comma is alternation, and the results are merged rather than
+    # concatenated so an element matching both branches appears once.
+    get branch in split(str(selector), ",") {
+        when trim(branch) != "" {
+            get node in matchSequence(root, parseSequence(branch)) {
+                key = nodeKey(node)
+                when has_key(seen, key) == false {
+                    seen[key] = true
+                    push(results, node)
+                }
+            }
+        }
+    }
+    give results
+}
+
+# Matching runs left to right: find everything matching the first stage, then
+# narrow to those whose descendants (or children) match the next.
+task matchSequence(root, steps) {
+    current = [root]
+    first = true
+    get stage in steps {
+        next = []
+        get node in current {
+            candidates = []
+            when stage["combinator"] == "child" and first == false {
+                candidates = node.elementChildren()
+            }
+            other when first {
+                # The first step searches the whole subtree, including the
+                # root's descendants but not the root itself.
+                candidates = descendants(node)
+            }
+            other { candidates = descendants(node) }
+
+            get candidate in candidates {
+                when matchesSimple(candidate, stage["part"]) { push(next, candidate) }
+            }
+        }
+        current = next
+        first = false
+    }
+    give current
+}
+
+task descendants(node) {
+    found = []
+    collectDescendants(node, found)
+    give found
+}
+
+task collectDescendants(node, found) {
+    get child in node.children {
+        when child.isElement() {
+            push(found, child)
+            collectDescendants(child, found)
+        }
+    }
+    give nil
+}
+
+# Identity for deduplication. EZ has no object identity comparison to hand, so
+# a node is identified by its path from the root.
+task nodeKey(node) {
+    parts = []
+    current = node
+    while current != nil and current.parent != nil {
+        index = 0
+        position = 0
+        get sibling in current.parent.children {
+            when sibling == current { position = index }
+            index = index + 1
+        }
+        push(parts, str(position))
+        current = current.parent
+    }
+    give join(parts, "/")
+}
+
+export task indexOfFrom(body, needle, from) {
+    when from <= 0 { give indexOf(body, needle) }
+    when from >= len(body) { give -1 }
+    rest = substr(body, from, len(body) - from)
+    found = indexOf(rest, needle)
+    when found < 0 { give -1 }
+    give found + from
+}

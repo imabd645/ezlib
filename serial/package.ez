@@ -1,0 +1,11 @@
+{
+  "name": "serial",
+  "version": "1.0.0",
+  "description": "Serial port (RS-232/RS-485/USB-serial) communication for EZ. Talk to Arduinos, GPS modules, scales, sensors and industrial hardware over COM ports.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["serial", "rs232", "rs485", "com", "uart", "arduino", "hardware", "embedded", "iot", "modbus"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

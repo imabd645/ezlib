@@ -1,7 +1,7 @@
 # ezlib — the EZ standard library
 
 Every package published to [packages.ez-lang.site](https://packages.ez-lang.site),
-at the version currently released. **69 packages.**
+at the version currently released. **79 packages.**
 
 This repository is a snapshot of the registry, not the source of truth for it.
 The registry is what `ez install` talks to; this is here to be read, diffed and
@@ -44,7 +44,7 @@ ez install <every name below>
 | **socket** | 1.0.0 | TCP and UDP over pure FFI — hostname resolution, timeouts, binary-safe transfers |
 | **auth** | 1.0.0 | Session authentication, password hashing and CSRF for the web framework |
 | **oauth** | 1.0.0 | OAuth 2.0 client — authorization code flow with PKCE, refresh, client credentials, and presets for Google, GitHub, Microsoft, Discord, Slack, GitLab, Spotify, LinkedIn, Facebook, Twitch |
-| **jwt** | 1.0.0 | JSON Web Tokens, HS256 |
+| **jwt** | 1.1.0 | JSON Web Tokens — HS256/384/512 plus RS, PS and ES via `pki`, with `none` refused and claims unreachable until the signature verifies |
 | **ratelimit** | 1.0.0 | Request throttling — sliding window and token bucket, in-memory or Redis-backed, with the conventional headers |
 | **template** | 1.0.0 | Templating with variables, filters, conditionals and loops, HTML autoescaping by default |
 
@@ -82,6 +82,20 @@ ez install <every name below>
 | **crypto** | 1.0.1 | AES-256, SHA hashing, HMAC, PBKDF2, Base64 |
 | **password** | 1.0.0 | PBKDF2-HMAC-SHA256 with per-hash salts and parameters, timing-safe verification, rehash detection |
 | **totp** | 1.0.0 | Time-based one-time passwords (RFC 6238/4226) — 2FA codes, base32, otpauth URIs |
+| **pki** | 1.0.0 | Public-key verification — RSA (PKCS#1 and PSS) and ECDSA (P-256/384/521), JWK, PEM, SPKI and X.509 certificates, through Windows CNG |
+
+### Data and documents
+
+| package | ver | |
+|---|---|---|
+| **html** | 1.0.0 | HTML parsing and CSS selectors — recovers from real-world markup the way a browser does, with link, table and text extraction |
+| **chart** | 1.0.0 | SVG charts with no dependencies — line, area, bar, stacked, horizontal, pie, donut and sparkline, on axes that land on round numbers |
+
+### Hardware
+
+| package | ver | |
+|---|---|---|
+| **serial** | 1.0.0 | Serial ports (RS-232/RS-485/USB) — Arduinos, GPS modules, scales, sensors and industrial hardware, with a deadline on every read |
 
 ### Text, numbers and validation
 
@@ -157,7 +171,7 @@ Most packages stand alone. Those that don't:
 
 ```
 auth      → web            oauth      → crypto        s3         → httpx, crypto
-jwt       → crypto         os         → fs            serve      → fs
+jwt       → crypto, pki    os         → fs            serve      → fs
 log       → fs             password   → crypto        table      → color
 mailer    → email          progress   → color         taskschd   → os, csv
 migrate   → orm            queue      → redis         totp       → crypto
@@ -177,6 +191,10 @@ Windows APIs through the FFI rather than shipping a native module:
 - `gui`, `game`, `audio`, `webcam`, `clipboard`, `notify`, `auto`, `os`,
   `taskschd` — Win32
 - `socket`, `sqlite`, `ffi` — FFI with no C++ in the interpreter
+- `pki` — CNG, for RSA and ECDSA signature verification
+- `serial` — the kernel32 COM-port API
+
+`html` and `chart` are pure EZ and depend on nothing at all.
 
 Three need a library that does not ship with Windows:
 
@@ -188,7 +206,7 @@ Three need a library that does not ship with Windows:
 
 ## Tests
 
-34 of the 69 packages ship a `test.ez` you can run directly:
+68 of the 79 packages ship a `test.ez` you can run directly:
 
 ```
 cd postgres

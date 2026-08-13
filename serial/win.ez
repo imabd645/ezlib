@@ -1,0 +1,393 @@
+# ============================================================================
+# serial/win.ez — the Win32 serial API
+#
+# A COM port is opened with CreateFile like any other file, and then configured
+# through three structs: DCB (baud, framing, flow control), COMMTIMEOUTS (how
+# long a read waits), and COMSTAT (how much is buffered). Every field offset
+# below is fixed by the ABI and wrong offsets fail silently -- the port opens,
+# the call returns success, and the bytes come back as garbage at the wrong
+# baud rate.
+#
+# So the DCB packing here is checked against Windows' own BuildCommDCB in
+# test.ez rather than against my reading of the header.
+# ============================================================================
+
+export GENERIC_READ = 2147483648           # 0x80000000
+export GENERIC_WRITE = 1073741824          # 0x40000000
+export OPEN_EXISTING = 3
+export INVALID_HANDLE = -1
+
+# sizeof(DCB). The first field is the struct's own size and Windows rejects a
+# DCB whose DCBlength does not match, which is the API's version check.
+export DCB_SIZE = 28
+export TIMEOUTS_SIZE = 20
+export COMSTAT_SIZE = 12
+
+# PurgeComm
+export PURGE_TXABORT = 1
+export PURGE_RXABORT = 2
+export PURGE_TXCLEAR = 4
+export PURGE_RXCLEAR = 8
+
+# EscapeCommFunction
+export SETRTS = 3
+export CLRRTS = 4
+export SETDTR = 5
+export CLRDTR = 6
+
+# GetCommModemStatus
+export MS_CTS_ON = 16
+export MS_DSR_ON = 32
+export MS_RING_ON = 64
+export MS_RLSD_ON = 128
+
+_lib = nil
+_ready = false
+_probed = false
+Fn = {}
+
+task probe() {
+    when _probed { give _ready }
+    _probed = true
+    try {
+        _lib = os_load_lib("kernel32.dll")
+        when _lib == nil or _lib == 0 { give false }
+        get name in ["CreateFileA", "CloseHandle", "ReadFile", "WriteFile",
+                     "GetCommState", "SetCommState", "GetCommTimeouts",
+                     "SetCommTimeouts", "ClearCommError", "PurgeComm",
+                     "SetupComm", "EscapeCommFunction", "GetCommModemStatus",
+                     "QueryDosDeviceA", "GetLastError", "BuildCommDCBA", "Sleep",
+                     "FlushFileBuffers"] {
+            Fn[name] = os_get_func(_lib, name)
+            when Fn[name] == 0 { give false }
+        }
+        _ready = true
+    }
+    catch (e) { _ready = false }
+    give _ready
+}
+
+export task isAvailable() { give probe() }
+
+task needLib() {
+    when probe() == false {
+        throw Exception("serial: kernel32.dll is unavailable -- this package needs Windows")
+    }
+    give nil
+}
+
+# kernel32 is already loaded for the port itself, so the delay comes from
+# there rather than from a dependency on `os`.
+export task pause(ms) {
+    needLib()
+    os_call(Fn["Sleep"], "int", num(ms))
+    give nil
+}
+
+export task lastError() {
+    give os_call(Fn["GetLastError"], "int") & 4294967295
+}
+
+# COM1..COM9 can be opened by bare name; COM10 and up cannot, because the name
+# stops being a valid DOS device. The \\.\ prefix works for all of them, so it
+# is always used -- a port that works until the user's adapter enumerates as
+# COM12 is worse than one that never worked.
+#
+# The prefix is built with chr(92) because an EZ string literal drops
+# backslashes: "\\.\COM3" would come out as ".COM3".
+export task devicePath(name) {
+    bs = chr(92)
+    give bs + bs + "." + bs + str(name)
+}
+
+export task openHandle(name) {
+    needLib()
+    handle = os_call(Fn["CreateFileA"], "int", devicePath(name),
+                     GENERIC_READ | GENERIC_WRITE,
+                     0,                 # no sharing: a port has one owner
+                     0,                 # default security
+                     OPEN_EXISTING,     # never create a port
+                     0,                 # synchronous
+                     0)
+    give handle
+}
+
+export task closeHandle(handle) {
+    when handle == nil or handle == 0 { give nil }
+    try { os_call(Fn["CloseHandle"], "int", handle) } catch (e) { }
+    give nil
+}
+
+# ── DCB ─────────────────────────────────────────────────────────────────────
+#
+# DWORD DCBlength; DWORD BaudRate; DWORD <bitfield>; WORD wReserved;
+# WORD XonLim; WORD XoffLim; BYTE ByteSize; BYTE Parity; BYTE StopBits;
+# char XonChar, XoffChar, ErrorChar, EofChar, EvtChar; WORD wReserved1;
+
+PARITY_CODES = { "none": 0, "odd": 1, "even": 2, "mark": 3, "space": 4 }
+STOP_CODES = { "1": 0, "1.5": 1, "2": 2 }
+
+export task parityCode(name) {
+    key = lower(str(name))
+    when has_key(PARITY_CODES, key) { give PARITY_CODES[key] }
+    throw Exception(`serial: parity must be none, odd, even, mark or space -- got '{name}'`)
+}
+
+export task stopCode(value) {
+    key = str(value)
+    when has_key(STOP_CODES, key) { give STOP_CODES[key] }
+    throw Exception(`serial: stop bits must be 1, 1.5 or 2 -- got '{value}'`)
+}
+
+# The bitfield, LSB first:
+#   0 fBinary          1 fParity            2 fOutxCtsFlow    3 fOutxDsrFlow
+# 4-5 fDtrControl      6 fDsrSensitivity    7 fTXContinueOnXoff
+#   8 fOutX            9 fInX              10 fErrorChar     11 fNull
+# 12-13 fRtsControl   14 fAbortOnError
+#
+# fBinary must be 1. Windows has not supported non-binary mode since NT, and a
+# DCB with it clear is rejected outright.
+export task dcbFlags(settings) {
+    flags = 1
+    when settings["parityCheck"] { flags = flags | 2 }
+
+    flow = lower(str(settings["flowControl"]))
+    dtr = 1                                     # DTR_CONTROL_ENABLE
+    rts = 1                                     # RTS_CONTROL_ENABLE
+    when flow == "rtscts" {
+        flags = flags | 4                       # fOutxCtsFlow
+        rts = 2                                 # RTS_CONTROL_HANDSHAKE
+    }
+    other when flow == "xonxoff" {
+        flags = flags | 256                     # fOutX
+        flags = flags | 512                     # fInX
+    }
+    other when flow == "dsrdtr" {
+        flags = flags | 8                       # fOutxDsrFlow
+        dtr = 2                                 # DTR_CONTROL_HANDSHAKE
+    }
+    other when flow != "none" {
+        throw Exception(`serial: flow control must be none, rtscts, xonxoff or dsrdtr -- got '{flow}'`)
+    }
+
+    flags = flags | (dtr << 4)
+    flags = flags | (rts << 12)
+    give flags
+}
+
+export task packDcb(settings) {
+    dcb = os_alloc(DCB_SIZE)
+    repeat i = 0 to DCB_SIZE - 1 { os_write_byte(dcb, i, 0) }
+    os_write_uint32(dcb, 0, DCB_SIZE)
+    os_write_uint32(dcb, 4, settings["baud"])
+    os_write_uint32(dcb, 8, dcbFlags(settings))
+    os_write_uint16(dcb, 14, 2048)              # XonLim
+    os_write_uint16(dcb, 16, 512)               # XoffLim
+    os_write_byte(dcb, 18, settings["dataBits"])
+    os_write_byte(dcb, 19, parityCode(settings["parity"]))
+    os_write_byte(dcb, 20, stopCode(settings["stopBits"]))
+    os_write_byte(dcb, 21, 17)                  # XON  = DC1
+    os_write_byte(dcb, 22, 19)                  # XOFF = DC3
+    give dcb
+}
+
+export task applySettings(handle, settings) {
+    needLib()
+    dcb = packDcb(settings)
+    ok = os_call(Fn["SetCommState"], "int", handle, dcb)
+    os_free(dcb)
+    give ok != 0
+}
+
+# Windows' own DCB for a mode string, used by the tests as ground truth for
+# the packing above.
+export task buildDcbReference(modeString) {
+    needLib()
+    dcb = os_alloc(DCB_SIZE)
+    repeat i = 0 to DCB_SIZE - 1 { os_write_byte(dcb, i, 0) }
+    os_write_uint32(dcb, 0, DCB_SIZE)
+    ok = os_call(Fn["BuildCommDCBA"], "int", str(modeString), dcb)
+    when ok == 0 {
+        os_free(dcb)
+        give nil
+    }
+    give dcb
+}
+
+export task dcbBytes(dcb) {
+    octets = []
+    repeat i = 0 to DCB_SIZE - 1 { push(octets, os_read_byte(dcb, i)) }
+    give octets
+}
+
+# ── timeouts ────────────────────────────────────────────────────────────────
+#
+# The read timeout is what stops a serial program hanging forever on a device
+# that never answers. With every field zero -- the default -- a read blocks
+# until at least one byte arrives, which for a disconnected sensor is until the
+# process is killed.
+
+export task applyTimeouts(handle, readMs, writeMs) {
+    needLib()
+    buf = os_alloc(TIMEOUTS_SIZE)
+    # ReadIntervalTimeout: the gap between bytes that ends a read. MAXDWORD
+    # with both read multipliers zero is the documented "return whatever is
+    # buffered, immediately" form.
+    when readMs <= 0 {
+        os_write_uint32(buf, 0, 4294967295)
+        os_write_uint32(buf, 4, 0)
+        os_write_uint32(buf, 8, 0)
+    }
+    other {
+        os_write_uint32(buf, 0, 0)
+        os_write_uint32(buf, 4, 0)
+        os_write_uint32(buf, 8, readMs)
+    }
+    os_write_uint32(buf, 12, 0)
+    os_write_uint32(buf, 16, writeMs)
+    ok = os_call(Fn["SetCommTimeouts"], "int", handle, buf)
+    os_free(buf)
+    give ok != 0
+}
+
+export task timeoutBytes(readMs, writeMs) {
+    buf = os_alloc(TIMEOUTS_SIZE)
+    when readMs <= 0 {
+        os_write_uint32(buf, 0, 4294967295)
+        os_write_uint32(buf, 4, 0)
+        os_write_uint32(buf, 8, 0)
+    }
+    other {
+        os_write_uint32(buf, 0, 0)
+        os_write_uint32(buf, 4, 0)
+        os_write_uint32(buf, 8, readMs)
+    }
+    os_write_uint32(buf, 12, 0)
+    os_write_uint32(buf, 16, writeMs)
+    octets = []
+    repeat i = 0 to TIMEOUTS_SIZE - 1 { push(octets, os_read_byte(buf, i)) }
+    os_free(buf)
+    give octets
+}
+
+# ── transfer ────────────────────────────────────────────────────────────────
+
+export task readBytes(handle, count) {
+    needLib()
+    when count <= 0 { give [] }
+    buf = os_alloc(count)
+    got = os_alloc(4)
+    os_write_uint32(got, 0, 0)
+    ok = os_call(Fn["ReadFile"], "int", handle, buf, count, got, 0)
+    total = os_read_uint32(got, 0)
+    octets = []
+    when ok != 0 {
+        repeat i = 0 to total - 1 { push(octets, os_read_byte(buf, i)) }
+    }
+    os_free(buf)
+    os_free(got)
+    when ok == 0 { throw Exception(`serial: read failed (Windows error {lastError()})`) }
+    give octets
+}
+
+export task writeBytes(handle, octets) {
+    needLib()
+    total = len(octets)
+    when total == 0 { give 0 }
+    buf = os_alloc(total)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b & 255)
+        index = index + 1
+    }
+    sent = os_alloc(4)
+    os_write_uint32(sent, 0, 0)
+    ok = os_call(Fn["WriteFile"], "int", handle, buf, total, sent, 0)
+    written = os_read_uint32(sent, 0)
+    os_free(buf)
+    os_free(sent)
+    when ok == 0 { throw Exception(`serial: write failed (Windows error {lastError()})`) }
+    give written
+}
+
+# How many bytes have arrived and are waiting. This is what makes a
+# non-blocking read possible at all.
+export task queued(handle) {
+    needLib()
+    errors = os_alloc(4)
+    os_write_uint32(errors, 0, 0)
+    stat = os_alloc(COMSTAT_SIZE)
+    repeat i = 0 to COMSTAT_SIZE - 1 { os_write_byte(stat, i, 0) }
+    ok = os_call(Fn["ClearCommError"], "int", handle, errors, stat)
+    # COMSTAT { DWORD <bitfield>; DWORD cbInQue; DWORD cbOutQue; }
+    inQueue = 0
+    outQueue = 0
+    when ok != 0 {
+        inQueue = os_read_uint32(stat, 4)
+        outQueue = os_read_uint32(stat, 8)
+    }
+    os_free(errors)
+    os_free(stat)
+    give { "input": inQueue, "output": outQueue }
+}
+
+export task purge(handle, flags) {
+    needLib()
+    give os_call(Fn["PurgeComm"], "int", handle, flags) != 0
+}
+
+export task drain(handle) {
+    needLib()
+    give os_call(Fn["FlushFileBuffers"], "int", handle) != 0
+}
+
+export task setBuffers(handle, inputSize, outputSize) {
+    needLib()
+    give os_call(Fn["SetupComm"], "int", handle, inputSize, outputSize) != 0
+}
+
+export task escapeFunction(handle, code) {
+    needLib()
+    give os_call(Fn["EscapeCommFunction"], "int", handle, code) != 0
+}
+
+export task modemStatus(handle) {
+    needLib()
+    buf = os_alloc(4)
+    os_write_uint32(buf, 0, 0)
+    ok = os_call(Fn["GetCommModemStatus"], "int", handle, buf)
+    bits = os_read_uint32(buf, 0)
+    os_free(buf)
+    when ok == 0 { give nil }
+    give bits
+}
+
+# ── enumeration ─────────────────────────────────────────────────────────────
+#
+# QueryDosDevice with no name returns every DOS device on the machine as a
+# double-null-terminated list. Filtering it for COM* is how the ports are found
+# without a registry read or a WMI query, and it sees ports that appear after
+# the process started.
+
+export task listDevices() {
+    needLib()
+    size = 65536
+    buf = os_alloc(size)
+    written = os_call(Fn["QueryDosDeviceA"], "int", 0, buf, size) & 4294967295
+    names = []
+    when written > 0 {
+        current = ""
+        i = 0
+        while i < written {
+            b = os_read_byte(buf, i)
+            when b == 0 {
+                when current != "" { push(names, current) }
+                current = ""
+            }
+            other { current = current + chr(b) }
+            i = i + 1
+        }
+    }
+    os_free(buf)
+    give names
+}
