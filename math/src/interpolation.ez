@@ -3,7 +3,18 @@ use "core.ez"
 use "trigonometry.ez"
 
 export task lerp(a, b, t) { give a + (b - a) * clamp(t, 0, 1) }
-export task map(value, inMin, inMax, outMin, outMax) {
+# The numeric range remap, and also the builtin's array form.
+#
+# This name takes over the global `map` for the whole process, so `use "math"`
+# used to break map(array, fn) for every later caller. Dispatching on the first
+# argument keeps both: an array plus a function is the builtin's job, five
+# numbers is the remap.
+export task map(value, inMin, inMax = nil, outMin = nil, outMax = nil) {
+    when typeOf(value) == "array" {
+        mapped = []
+        get item in value { push(mapped, inMin(item)) }
+        give mapped
+    }
     when inMin == inMax { throw "map(): input range must not be zero" }
     give outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin)
 }

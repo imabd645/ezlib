@@ -125,7 +125,17 @@ export task press(keyStr) {
     up(keyStr)
 }
 
-export task type(text) {
+# Named typeText, not type.
+#
+# It was `type` before, which took over the global type() for the whole
+# process -- and because auto's version returns nothing, every later type(x)
+# silently produced nil instead of the type name. Nothing errored; code that
+# branched on type() just started taking the wrong branch.
+#
+# Unlike min/max/range, this one cannot serve both: type("abc") is a
+# perfectly ordinary builtin call, indistinguishable from asking auto to
+# press those keys.
+export task typeText(text) {
     buf = buffer(text)
     sz = buf_size(buf)
     addr = os_buffer_addr(buf)

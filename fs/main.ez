@@ -102,7 +102,24 @@ export task move(src, dest) {
 
 # Deletes a file or an empty directory at the given path.
 # Returns `true` if successfully deleted, `false` otherwise.
-export task remove(path) {
+# Deletes a file or directory, and also keeps the builtin's array form.
+#
+# `remove` is a builtin that drops an element from a list. Defining it here
+# took the name over for the whole process, so `use "fs"` broke every later
+# remove(array, index) -- including inside other packages.
+export task remove(path, index = nil) {
+    when typeOf(path) == "array" {
+        kept = []
+        at = 0
+        get item in path {
+            when at != index { push(kept, item) }
+            at = at + 1
+        }
+        # The builtin mutates in place and returns the list.
+        while len(path) > 0 { pop(path) }
+        get item in kept { push(path, item) }
+        give path
+    }
     attr = _attrOf(path)
     when attr != -1 {
         when (attr & 16) != 0 {
@@ -159,13 +176,22 @@ export task modifiedTime(path) {
     give -1
 }
 
-# Internal text streaming retains standard Built-in parsing handles for AST performance metrics!
-# Reads the entire content of a file into a string.
-export task readFile(path) { give readFile(path) }
-
-# Writes content to a file, replacing existing content.
-export task writeFile(path, content) { give writeFile(path, content) }
-
-# Appends content to the end of a file.
-export task appendFile(path, content) { give appendFile(path, content) }
+# readFile / writeFile / appendFile are deliberately NOT re-exported here.
+#
+# They used to be, as pass-through wrappers:
+#
+#     export task readFile(path) { give readFile(path) }
+#
+# Defining a task with the name of an existing builtin takes over that name for
+# the whole process, so the body called ITSELF. `use "fs"` therefore replaced
+# readFile, writeFile and appendFile with three functions that recurse until
+# the process dies -- and because `os` depends on this package, `use "os"` did
+# the same. A program that read a file after either import simply hung.
+#
+# The builtins are global already; there was never anything to re-export. Use
+# them directly:
+#
+#     content = readFile(path)
+#     writeFile(path, content)
+#     appendFile(path, content)
 

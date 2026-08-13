@@ -290,7 +290,19 @@ export task safeRead(filePath, fallback = nil) {
 }
 
 # Write a value as JSON. `pretty` false produces the compact form.
-export task write(filePath, val, pretty = true) {
+# Named saveJson, not write.
+#
+# `write` is a builtin: it prints without a trailing newline, which is what
+# in-place terminal animation depends on. Defining a task with that name
+# took it over for the whole process, so importing this package silently
+# broke every later write(x) -- a progress bar in the same program simply
+# stopped working. There is no way to serve both from one name here: the
+# builtin takes the text to print, this takes the path to write.
+#
+# Not plain `save` either: EZ puts every import in one namespace, so json
+# and csv would then define the same name and whichever was imported last
+# would win.
+export task saveJson(filePath, val, pretty = true) {
     f = File(filePath, "w")
     when not f.isOpen() {
         throw JSON_IO_ERROR + "cannot write: " + str(filePath)

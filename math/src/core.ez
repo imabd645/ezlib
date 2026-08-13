@@ -53,18 +53,40 @@ export task product(values) {
     give total
 }
 
-export task min(values) {
+# Accepts either form.
+#
+# Defining a task called `min` takes over that name for the whole process, so
+# `use "math"` used to break the builtin min(a, b) for every later caller --
+# it would be handed two numbers and try to take len() of the first. Handling
+# both shapes keeps this package's list form and leaves the builtin's pairwise
+# form working.
+export task min(values, second = nil) {
+    when second != nil { give minPair(values, second) }
+    when typeOf(values) != "array" { give values }
     when len(values) == 0 { throw "min(): values must not be empty" }
     result = values[0]
     get value in values { when value < result { result = value } }
     give result
 }
 
-export task max(values) {
+task minPair(a, b) {
+    when a < b { give a }
+    give b
+}
+
+# Both forms, for the same reason as min above.
+export task max(values, second = nil) {
+    when second != nil { give maxPair(values, second) }
+    when typeOf(values) != "array" { give values }
     when len(values) == 0 { throw "max(): values must not be empty" }
     result = values[0]
     get value in values { when value > result { result = value } }
     give result
+}
+
+task maxPair(a, b) {
+    when a > b { give a }
+    give b
 }
 
 export task minMax(values) {
@@ -77,7 +99,21 @@ export task average(values) {
     give sum(values) / len(values)
 }
 
-export task range(values) {
+# The statistical range of a list, and also the builtin's sequence form.
+#
+# This name takes over the global `range` for the whole process, so `use "math"`
+# used to break range(n) for every later caller. Dispatching on the argument
+# keeps both.
+export task range(values, stop = nil) {
+    when typeOf(values) != "array" {
+        first = 0
+        last = values
+        when stop != nil { first = values  last = stop }
+        sequence = []
+        i = first
+        while i < last { push(sequence, i)  i = i + 1 }
+        give sequence
+    }
     bounds = minMax(values)
     give bounds["max"] - bounds["min"]
 }

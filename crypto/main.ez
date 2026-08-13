@@ -234,19 +234,37 @@ export model SecureRandom {
         give result
     }
 
-    # Secure random integer in [minV, maxV]
+    # Secure random integer in [minV, maxV], inclusive at both ends.
+    #
+    # Drawn by rejection, not by a bare modulo. 2^31 is not a multiple of most
+    # ranges, so `raw % range` hands the low values one extra chance each: for
+    # a range of 10 the first 8 outcomes are more likely than the last 2, and
+    # for a range of a million, 483,648 of the values are favoured. The bias is
+    # small but it is a bias, and this function's name promises there isn't one.
+    #
+    # Discarding the short tail above the last whole multiple removes it. The
+    # expected number of extra draws is under one.
     static task randInt(minV, maxV) {
         range = maxV - minV + 1
-        bs    = SecureRandom.bytes(4)
-        raw   = (bs[0] | (bs[1] << 8) | (bs[2] << 16) | (bs[3] << 24)) & 2147483647
+        when range <= 1 { give minV }
+        limit = 2147483648 - (2147483648 % range)
+        raw = SecureRandom._raw31()
+        while raw >= limit { raw = SecureRandom._raw31() }
         give minV + (raw % range)
     }
 
     # Secure random float in [0.0, 1.0)
     static task randFloat() {
-        bs  = SecureRandom.bytes(4)
-        raw = (bs[0] | (bs[1] << 8) | (bs[2] << 16) | (bs[3] << 24)) & 2147483647
-        give raw / 2147483647.0
+        # Divided by 2^31, not by 2^31 - 1. With the smaller divisor the top
+        # draw came out as exactly 1.0, which the half-open range this promises
+        # does not include.
+        give SecureRandom._raw31() / 2147483648.0
+    }
+
+    # 31 uniform bits.
+    static task _raw31() {
+        bs = SecureRandom.bytes(4)
+        give (bs[0] | (bs[1] << 8) | (bs[2] << 16) | (bs[3] << 24)) & 2147483647
     }
 
     # Generate a UUID v4 string (RFC 4122)
