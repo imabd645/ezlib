@@ -16,6 +16,8 @@
 # a long-running server cannot grow without limit.
 # ============================================================================
 
+MS_PER_SECOND = 1000
+
 export model Cache {
 
     # ttlSeconds: default lifetime, 0 for no expiry.
@@ -83,7 +85,12 @@ export model Cache {
     # Store with a per-entry TTL in seconds; 0 means it never expires.
     task setFor(key, value, ttlSeconds) {
         expires = 0
-        when ttlSeconds > 0 { expires = clock() + ttlSeconds }
+        # clock() is MILLISECONDS since the epoch, so the TTL has to be scaled.
+        # Without this every lifetime was a thousand times too short: Cache(60)
+        # expired after 60 ms, and a one-hour cache lasted 3.6 seconds. The
+        # entries were still returned once, so it read as a cache with a
+        # miserable hit rate rather than as a bug.
+        when ttlSeconds > 0 { expires = clock() + ttlSeconds * MS_PER_SECOND }
         self.store[str(key)] = { "value": value, "expires": expires }
         self.touch(str(key))
         self.evictOverflow()

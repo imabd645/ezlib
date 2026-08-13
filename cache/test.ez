@@ -20,8 +20,14 @@ task check(label, actual, expected) {
 
 # Busy-wait: expiry is measured against clock(), so the test has to let real
 # time pass. Kept to a few hundredths of a second.
+#
+# The * 1000 matters. clock() is in milliseconds, and this helper used to add
+# `seconds` to it directly -- so pause(0.08) waited eighty MICROseconds. The
+# cache had the same slip in setFor(), so the two agreed with each other and
+# every expiry assertion below passed while real TTLs were a thousand times
+# too short. A test that shares the bug it is checking for proves nothing.
 task pause(seconds) {
-    until = clock() + seconds
+    until = clock() + seconds * 1000
     while clock() < until { }
     give nil
 }
@@ -66,6 +72,22 @@ check("dict value", c.get("dict")["k"], "v")
 check("bool value", c.get("bool"), true)
 
 # ── expiry ──────────────────────────────────────────────────────────────────
+
+# This one first, because it is the only assertion here that can tell seconds
+# from milliseconds. Everything below uses a TTL of a few hundredths and then
+# waits LONGER than it, so it passes whether the unit is right or wrong -- with
+# the millisecond bug the entry simply expired sooner than intended and the
+# "gone after expiry" checks still held.
+#
+# A TTL well above the pause is what pins the unit down: two seconds must
+# survive a fifth of a second. Under the old code two "seconds" was two
+# milliseconds and this fails.
+live = Cache(2)
+live.set("alive", "yes")
+pause(0.2)
+check("a 2-second entry survives a 0.2-second wait", live.get("alive"), "yes")
+check("and is still counted", live.size(), 1)
+
 t = Cache(0.05)
 t.set("soon", "here")
 check("present before expiry", t.get("soon"), "here")

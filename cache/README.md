@@ -134,6 +134,23 @@ ez test.ez
 50 tests covering storage, real-time expiry, per-entry TTLs, LRU ordering,
 fetch semantics, statistics and memoisation.
 
+## Changes in 1.0.1
+
+**Every TTL was a thousand times too short.** `setFor` added the lifetime to
+`clock()`, which is in milliseconds, without scaling it — so `Cache(60)`
+expired after 60 ms and a one-hour cache lasted 3.6 seconds. Entries were
+still returned once, so it presented as a cache with a terrible hit rate
+rather than as a bug.
+
+The documented behaviour on this page was correct throughout; only the code
+disagreed with it. No API changed, and stored values are unaffected — but if
+you tuned a TTL to compensate, that tuning is now wrong by the same factor.
+
+The test suite missed it because its own `pause()` helper made the identical
+mistake, so the two agreed with each other. Both are fixed, and the suite now
+asserts that a two-second entry survives a fifth of a second — the only shape
+of assertion here that can tell the units apart.
+
 ## License
 
 MIT
