@@ -31,6 +31,16 @@ task textOf(octets) {
 
 out "totp tests"
 
+# ── FIRST, before anything else draws randomness ────────────────────────────
+# An unseeded C rand() opens with this exact sequence in every process. 1.0.0
+# used it for 2FA secrets, so every user enrolled on a freshly started server
+# got the same one. Only valid as the very first draw: rand() advances within
+# a run, so any earlier consumer hides the signature.
+check("the secret does not come from an unseeded rand()",
+      to_json(slice(base32Decode(TOTP.generateSecret()), 0, 8)) !=
+      to_json([41, 35, 190, 132, 225, 108, 214, 174]), true)
+
+
 # ── base32 (RFC 4648 vectors) ───────────────────────────────────────────────
 check("encode f", base32Encode(bytesOf("f")), "MY")
 check("encode fo", base32Encode(bytesOf("fo")), "MZXQ")
@@ -150,6 +160,7 @@ check("uri escapes the account", contains(uri, "%40"), true)
 
 check("seconds remaining in range",
       TOTP.secondsRemaining() > 0 and TOTP.secondsRemaining() <= 30, true)
+
 
 out ""
 out `  passed {PASS}   failed {FAIL}`

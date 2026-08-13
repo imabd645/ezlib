@@ -25,6 +25,13 @@ task checkVal(label, actual, expected) { check(label, to_json(actual), to_json(e
 
 out "websocket tests"
 
+# ── FIRST, before anything else draws randomness ────────────────────────────
+# RFC 6455 requires an unpredictable mask. An unseeded C rand() opens with
+# these bytes in every process; only the first draw reveals it.
+check("the mask key does not come from an unseeded rand()",
+      to_json(wsMaskKey()) != to_json([41, 35, 190, 132]), true)
+
+
 # ── byte helpers ────────────────────────────────────────────────────────────
 # EZ strings are UTF-8, so this is the property everything else depends on:
 # a byte over 127 must survive as one byte.
@@ -153,6 +160,7 @@ task throws(label, fn) {
 throws("send before connect", || ws.send("x"))
 # wss:// is refused with an explanation rather than failing obscurely later.
 throws("wss refused", || WebSocket("wss://a.co").connect())
+
 
 out ""
 out `  passed {PASS}   failed {FAIL}`

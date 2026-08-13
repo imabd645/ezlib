@@ -1,11 +1,21 @@
 {
   "name": "websocket",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "RFC 6455 WebSocket client for EZ over pure TCP. Handshake, masking, fragmentation, ping/pong and close handling.",
   "author": "Abdullah Masood",
   "main": "main.ez",
   "license": "MIT",
-  "keywords": ["websocket", "ws", "realtime", "rfc6455", "socket", "push"],
+  "keywords": [
+    "websocket",
+    "ws",
+    "realtime",
+    "rfc6455",
+    "socket",
+    "push"
+  ],
   "repository": "https://github.com/imabd645/EZ",
-  "dependencies": { "socket": "^1.0.0", "crypto": "^1.0.0" }
+  "dependencies": {
+    "socket": "^1.0.0",
+    "crypto": "^1.0.0"
+  }
 }

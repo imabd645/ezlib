@@ -1,7 +1,11 @@
 {
-    "name": "orm",
-    "version": "1.1.0",
-    "description": "Production-grade SQLAlchemy-style ORM for EZ",
-    "author": "EZ Team",
-    "entry": "main.ez"
+  "name": "orm",
+  "version": "1.2.0",
+  "description": "Production-grade SQLAlchemy-style ORM for EZ. SQLite and PostgreSQL drivers over the sqlite and postgres packages.",
+  "author": "EZ Team",
+  "dependencies": {
+    "sqlite": "^1.0.0",
+    "postgres": "^1.0.0"
+  },
+  "main": "main.ez"
 }

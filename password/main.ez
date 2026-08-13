@@ -179,11 +179,18 @@ export task deriveKey(plaintext, salt, iterations) {
     give PBKDF2.derive(plaintext, salt, iterations, DEFAULT_KEY_BYTES)
 }
 
-export task randomBytes(count) {
-    octets = []
-    repeat i = 1 to count { push(octets, randint(0, 255)) }
-    give octets
-}
+# Salts come from here, so this must be a CSPRNG.
+#
+# It used to be randint(), which is the C library's rand(): an unseeded linear
+# congruential generator. Every fresh process therefore produced the SAME byte
+# sequence, so the first salt on every machine running this package was
+# 2923be84e16cd6ae529049f1f1bbe9eb -- identical passwords hashed to identical
+# values across unrelated applications, and one precomputed table defeated all
+# of them. A salt does not have to be secret, but it does have to be unique.
+#
+# crypto's SecureRandom is backed by the OS CSPRNG, and crypto was already a
+# dependency of this package.
+export task randomBytes(count) { give SecureRandom.bytes(count) }
 
 export task bytesToHex(octets) {
     digits = "0123456789abcdef"

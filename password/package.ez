@@ -1,11 +1,20 @@
 {
   "name": "password",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Password hashing for EZ. PBKDF2-HMAC-SHA256 with per-hash salts and parameters, timing-safe verification and rehash detection.",
   "author": "Abdullah Masood",
   "main": "main.ez",
   "license": "MIT",
-  "keywords": ["password", "hash", "pbkdf2", "auth", "login", "security"],
+  "keywords": [
+    "password",
+    "hash",
+    "pbkdf2",
+    "auth",
+    "login",
+    "security"
+  ],
   "repository": "https://github.com/imabd645/EZ",
-  "dependencies": { "crypto": "^1.0.0" }
+  "dependencies": {
+    "crypto": "^1.0.0"
+  }
 }

@@ -1,11 +1,19 @@
 {
   "name": "db",
-  "version": "1.0.0",
-  "description": "A clean, easy-to-use database framework for EZ Language. Provides SQLite database operations with CRUD helpers, query builders, transactions, and more.",
+  "version": "1.1.0",
+  "description": "SQLite for EZ with CRUD helpers, query building and transactions, over the sqlite package.",
   "author": "Abdullah Masood",
-  "main": "DB.ez",
+  "main": "main.ez",
   "repository": "https://github.com/imabd645/EZ",
-  "keywords": ["database", "sqlite", "orm", "crud", "query"],
+  "keywords": [
+    "database",
+    "sqlite",
+    "orm",
+    "crud",
+    "query"
+  ],
   "license": "MIT",
-  "dependencies": {}
+  "dependencies": {
+    "sqlite": "^1.0.0"
+  }
 }

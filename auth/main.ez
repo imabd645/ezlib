@@ -12,12 +12,22 @@
 
 use "web"
 
+# The DLL path used to be the literal "C:/ezlib/auth/dlls/auth_accel.dll", so
+# this package simply did not load for anyone whose library root was anywhere
+# else -- a portable checkout, another drive, or EZLIB_PATH pointing at a
+# working copy. `web` already exports the resolver that honours EZLIB_PATH and
+# falls back to C:\ezlib; reuse it rather than hardcoding the path again.
+#
+# Forward slashes are deliberate: an EZ string literal DROPS a doubled
+# backslash ("\a" becomes "a"), so a Windows path written that way collapses
+# into nonsense. LoadLibrary accepts forward slashes.
+__auth_dll_dir = __ezlib_root() + "/auth/dlls"
 __auth_accel = os_load_lib("auth_accel.dll")
 when typeOf(__auth_accel) == "nil" or __auth_accel == 0 {
-    __auth_accel = os_load_lib("C:/ezlib/auth/dlls/auth_accel.dll")
+    __auth_accel = os_load_lib(__auth_dll_dir + "/auth_accel.dll")
 }
 when typeOf(__auth_accel) == "nil" or __auth_accel == 0 {
-    throw "ezauth: could not load auth_accel.dll (build it with src/build.bat)"
+    throw "ezauth: cannot load auth_accel.dll from '" + __auth_dll_dir + "'. Set EZLIB_PATH to your ezlib root if it is not C:/ezlib, or build it with src/build.bat."
 }
 
 export model AuthFFI {

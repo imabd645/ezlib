@@ -158,10 +158,13 @@ export model TOTP {
     # recommendation for SHA-1 and what authenticator apps expect.
     static task generateSecret() { give TOTP.generateSecretOf(20) }
 
+    # SecureRandom, not randint: randint is the C library's rand(), an unseeded
+    # linear congruential generator, so every fresh process produced the SAME
+    # sequence -- every user enrolled on a freshly started server would have
+    # received the same 2FA secret, and anyone who knew it could generate their
+    # codes. This is the shared key the whole scheme rests on.
     static task generateSecretOf(byteCount) {
-        octets = []
-        repeat i = 1 to byteCount { push(octets, randint(0, 255)) }
-        give base32Encode(octets)
+        give base32Encode(SecureRandom.bytes(byteCount))
     }
 
     static task isValidSecret(secret) {

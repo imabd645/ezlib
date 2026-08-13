@@ -1,11 +1,20 @@
 {
   "name": "ulid",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Sortable unique identifiers for EZ. 48-bit timestamp plus 80 bits of randomness in Crockford base32, monotonic within a millisecond.",
   "author": "Abdullah Masood",
   "main": "main.ez",
   "license": "MIT",
-  "keywords": ["ulid", "id", "uuid", "sortable", "identifier", "primary-key"],
+  "keywords": [
+    "ulid",
+    "id",
+    "uuid",
+    "sortable",
+    "identifier",
+    "primary-key"
+  ],
   "repository": "https://github.com/imabd645/EZ",
-  "dependencies": {}
+  "dependencies": {
+    "crypto": "^1.0.0"
+  }
 }

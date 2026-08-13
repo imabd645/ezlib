@@ -12,6 +12,7 @@
 # scatters inserts across a B-tree index and fragments it; a ULID appends.
 # ============================================================================
 
+use "crypto"
 use "ulid/crockford.ez"
 
 TIME_CHARS = 10
@@ -31,10 +32,16 @@ lastHigh = 0
 lastLow = 0
 
 task randomHalf() {
-    # randint covers a smaller range than 2^40, so the half is assembled from
-    # several draws rather than trusting one call to fill it.
+    # Five bytes make up each 40-bit half.
+    #
+    # From a CSPRNG, not randint: the ULID specification calls for a
+    # cryptographically secure source, and randint is the C library's unseeded
+    # rand(), which repeats the same sequence in every fresh process. Two
+    # servers started independently would mint colliding ULIDs within the same
+    # millisecond, and an id meant to be unguessable in a URL would be trivially
+    # predictable.
     value = 0
-    repeat i = 1 to 5 { value = value * 256 + randint(0, 255) }
+    get b in SecureRandom.bytes(5) { value = value * 256 + b }
     give value
 }
 

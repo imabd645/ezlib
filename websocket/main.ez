@@ -263,15 +263,20 @@ export task wsParseUrl(url) {
 
 # 16 random bytes, base64'd, as the RFC requires.
 export task wsNonce() {
-    octets = []
-    repeat i = 1 to 16 { push(octets, randint(0, 255)) }
-    give Crypto.base64Encode(bytesToStr(octets))
+    // RFC 6455 requires this be a randomly SELECTED nonce; it is what the
+    // server echoes back hashed, and it is how a client tells a genuine
+    // WebSocket handshake from a cached or replayed HTTP response.
+    give Crypto.base64Encode(bytesToStr(SecureRandom.bytes(16)))
 }
 
 export task wsMaskKey() {
-    octets = []
-    repeat i = 1 to 4 { push(octets, randint(0, 255)) }
-    give octets
+    // SecureRandom, not randint: randint is backed by the C library's rand(),
+    // a linear congruential generator whose next output follows from the last.
+    // RFC 6455 requires the masking key be UNPREDICTABLE -- a predictable mask
+    // lets someone who can influence the payload choose the bytes that appear
+    // on the wire, which is how a cache or proxy that does not understand
+    // WebSocket framing gets poisoned. crypto was already a dependency here.
+    give SecureRandom.bytes(4)
 }
 
 # base64(sha1(key + MAGIC)) -- what the server is required to send back.

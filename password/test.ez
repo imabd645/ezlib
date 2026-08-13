@@ -34,6 +34,14 @@ task throws(label, fn) {
 
 out "password tests"
 
+# ── FIRST, before anything else draws randomness ────────────────────────────
+# An unseeded C rand() opens with this exact sequence in every process, which
+# is what 1.0.0 used for salts. This check only works as the very first draw:
+# rand() advances within a run, so any earlier consumer hides the signature.
+check("randomness does not come from an unseeded rand()",
+      to_json(randomBytes(8)) != to_json([41, 35, 190, 132, 225, 108, 214, 174]), true)
+
+
 # ── hashing and verifying ───────────────────────────────────────────────────
 h = Password.hashWith("correct horse battery staple", FAST)
 check("verifies the right password", Password.verify("correct horse battery staple", h), true)
@@ -122,6 +130,7 @@ check("hex of zero", bytesToHex([0]), "00")
 check("hex pads single digits", bytesToHex([5]), "05")
 check("random bytes length", len(randomBytes(8)), 8)
 check("random bytes differ", to_json(randomBytes(16)) != to_json(randomBytes(16)), true)
+
 r = randomBytes(64)
 inRange = true
 get v in r { when v < 0 or v > 255 { inRange = false } }
