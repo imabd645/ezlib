@@ -1,0 +1,906 @@
+# ============================================================================
+# mysql — MySQL and MariaDB for EZ, over pure TCP
+#
+#   use "mysql"
+#
+#   db = connect({ "host": "localhost", "user": "app", "password": "…",
+#                  "database": "shop" })
+#
+#   db.execute("INSERT INTO users (name) VALUES (?)", ["ana"])
+#   rows = db.query("SELECT * FROM users WHERE name = ?", ["ana"])
+#   db.close()
+#
+# No client library to install. This speaks the MySQL wire protocol directly
+# over `socket`, the same way `redis` and `websocket` do -- MySQL's own
+# libmysql/libmariadb DLL is not needed and does not have to be found.
+#
+# Parameters are BOUND, through real prepared statements (COM_STMT_PREPARE and
+# COM_STMT_EXECUTE), not escaped into the SQL text. Escaping is a weaker
+# guarantee: it depends on getting every type, charset and edge case right,
+# and it is the mechanism behind most injection that survives a "we escape our
+# inputs" review. A bound value travels beside the statement and is never
+# parsed as SQL.
+# ============================================================================
+
+use "socket"
+use "mysql/protocol.ez"
+use "mysql/auth.ez"
+
+export DEFAULT_PORT = 3306
+
+export model MysqlError {
+    init(message, code, sqlstate) {
+        self.message = message
+        self.code = code
+        self.sqlstate = sqlstate
+    }
+    task toString() { give `MysqlError({self.code}/{self.sqlstate}): {self.message}` }
+}
+
+# The failures worth recognising without matching on message text.
+export task isDuplicateKey(e) { give errorCode(e) == 1062 }
+export task isDeadlock(e) { give errorCode(e) == 1213 }
+export task isLockTimeout(e) { give errorCode(e) == 1205 }
+export task isMissingTable(e) { give errorCode(e) == 1146 }
+export task isAccessDenied(e) { give errorCode(e) == 1045 }
+
+task errorCode(e) {
+    when e == nil { give 0 }
+    when hasattr(e, "code") { give getattr(e, "code") }
+    give 0
+}
+
+export model Result {
+    init(rows, affected, insertId, columns) {
+        self.rows = rows
+        self.affected = affected
+        self.insertId = insertId
+        self.columns = columns
+    }
+    task count() { give len(self.rows) }
+    task isEmpty() { give len(self.rows) == 0 }
+    task first() {
+        when len(self.rows) == 0 { give nil }
+        give self.rows[0]
+    }
+    task scalar() {
+        row = self.first()
+        when row == nil { give nil }
+        get name in self.columns { give row[name] }
+        give nil
+    }
+    task toString() { give `Result({len(self.rows)} rows, {self.affected} affected)` }
+}
+
+export model MySQL {
+
+    # settings: host, port, user, password, database, timeoutMs
+    init(settings) {
+        s = settings
+        when s == nil { s = {} }
+        self.host = orElse(s["host"], "localhost")
+        self.port = orElse(s["port"], DEFAULT_PORT)
+        self.user = orElse(s["user"], "root")
+        self.password = orElse(s["password"], "")
+        self.database = s["database"]
+        self.timeoutMs = orElse(s["timeoutMs"], 15000)
+        self.conn = nil
+        self.sequence = 0
+        self.connected = false
+        self.serverVersion = ""
+        self.capabilities = 0
+        self.buffered = ""
+        self.queryCount = 0
+    }
+
+    # ── connection ──────────────────────────────────────────────────────────
+
+    task open() {
+        when self.connected { give self }
+        self.conn = tcp_connect(self.host, self.port, self.timeoutMs)
+        self.buffered = ""
+        self.sequence = 0
+
+        greeting = self.readPacket()
+        when isError(greeting["payload"]) {
+            info = readError(greeting["payload"])
+            self.hardClose()
+            throw MysqlError("mysql: the server refused the connection -- " + info["message"],
+                             info["code"], info["sqlstate"])
+        }
+        handshake = self.parseGreeting(greeting["payload"])
+        self.serverVersion = handshake["version"]
+
+        response = scrambleFor(handshake["plugin"], self.password, handshake["nonce"])
+        self.sendPacket(self.buildHandshakeResponse(handshake, response), greeting["sequence"] + 1)
+
+        reply = self.readPacket()
+        self.finishAuth(reply, handshake)
+        self.connected = true
+        give self
+    }
+
+    task parseGreeting(payload) {
+        # payload[0] is the protocol version, which must be 10.
+        when payload[0] != 10 {
+            throw MysqlError(`mysql: unsupported protocol version {payload[0]} (expected 10)`, 0, "")
+        }
+        cursor = readNullString(payload, 1)
+        version = cursor["value"]
+        offset = cursor["next"] + 4              # skip the connection id
+        nonce = sliceBytes(payload, offset, 8)   # auth-plugin-data part 1
+        offset = offset + 8 + 1                  # and the filler byte
+        capabilityLower = readUint(payload, offset, 2)
+        offset = offset + 2
+
+        plugin = "mysql_native_password"
+        capabilityUpper = 0
+        when offset + 1 < len(payload) {
+            offset = offset + 1                  # character set
+            offset = offset + 2                  # status flags
+            capabilityUpper = readUint(payload, offset, 2)
+            offset = offset + 2
+            authDataLength = payload[offset]
+            offset = offset + 1
+            offset = offset + 10                 # reserved
+            # Part 2 of the nonce is at least 13 bytes, of which the last is a
+            # NUL that is NOT part of the nonce. Including it produces a
+            # scramble the server rejects with "access denied", which sends
+            # everyone hunting for a password problem that does not exist.
+            part2Length = authDataLength - 8 - 1
+            when part2Length < 12 { part2Length = 12 }
+            get b in sliceBytes(payload, offset, part2Length) { push(nonce, b) }
+            offset = offset + part2Length + 1
+            when offset < len(payload) {
+                cursor = readNullString(payload, offset)
+                when cursor["value"] != "" { plugin = cursor["value"] }
+            }
+        }
+        give {
+            "version": version,
+            "nonce": nonce,
+            "plugin": plugin,
+            "capabilities": capabilityLower + capabilityUpper * 65536
+        }
+    }
+
+    task buildHandshakeResponse(handshake, scramble) {
+        flags = CLIENT_LONG_PASSWORD + CLIENT_LONG_FLAG + CLIENT_PROTOCOL_41 +
+                CLIENT_TRANSACTIONS + CLIENT_SECURE_CONNECTION + CLIENT_PLUGIN_AUTH +
+                CLIENT_MULTI_RESULTS
+        when self.database != nil { flags = flags + CLIENT_CONNECT_WITH_DB }
+        self.capabilities = flags
+
+        payload = []
+        writeUint(payload, flags, 4)
+        writeUint(payload, 16777216, 4)          # max packet size
+        push(payload, 45)                        # utf8mb4_general_ci
+        repeat i = 1 to 23 { push(payload, 0) }  # reserved
+        writeNullString(payload, self.user)
+        push(payload, len(scramble))
+        get b in scramble { push(payload, b) }
+        when self.database != nil { writeNullString(payload, self.database) }
+        writeNullString(payload, handshake["plugin"])
+        give payload
+    }
+
+    task finishAuth(reply, handshake) {
+        payload = reply["payload"]
+        when isOk(payload) { give true }
+        when isError(payload) {
+            info = readError(payload)
+            self.hardClose()
+            throw MysqlError("mysql: " + info["message"], info["code"], info["sqlstate"])
+        }
+        # 0xfe here is an AuthSwitchRequest: the server wants a different
+        # plugin than the one it advertised.
+        when payload[0] == 254 {
+            cursor = readNullString(payload, 1)
+            plugin = cursor["value"]
+            nonce = sliceBytes(payload, cursor["next"], 20)
+            self.sendPacket(scrambleFor(plugin, self.password, nonce), reply["sequence"] + 1)
+            give self.finishAuth(self.readPacket(), handshake)
+        }
+        # 0x01 is an AuthMoreData packet. For caching_sha2_password, 0x03 means
+        # the fast path worked and 0x04 means it did not.
+        when payload[0] == 1 {
+            when len(payload) > 1 and payload[1] == 3 {
+                give self.finishAuth(self.readPacket(), handshake)
+            }
+            when len(payload) > 1 and payload[1] == 4 {
+                self.hardClose()
+                throw MysqlError("mysql: the server requires full caching_sha2_password authentication, which needs either TLS or an RSA key exchange this client does not implement. Switch the account to mysql_native_password: ALTER USER '" + str(self.user) + "'@'%' IDENTIFIED WITH mysql_native_password BY '<password>';", 0, "")
+            }
+            give self.finishAuth(self.readPacket(), handshake)
+        }
+        self.hardClose()
+        throw MysqlError("mysql: unexpected packet during authentication", 0, "")
+    }
+
+    task isOpen() { give self.connected }
+
+    task ping() {
+        self.ensureOpen()
+        self.sendPacket([COM_PING], 0)
+        packet = self.readPacket()
+        give isOk(packet["payload"])
+    }
+
+    task ensureOpen() {
+        when self.connected == false { self.open() }
+        give self
+    }
+
+    task close() {
+        when self.connected {
+            try {
+                self.sendPacket([COM_QUIT], 0)
+            }
+            catch (e) { }
+        }
+        self.hardClose()
+        give nil
+    }
+
+    task hardClose() {
+        when self.conn != nil {
+            try { self.conn.close() } catch (e) { }
+        }
+        self.conn = nil
+        self.connected = false
+        give nil
+    }
+
+    # ── packet plumbing ─────────────────────────────────────────────────────
+
+    task sendPacket(payloadBytes, sequence) {
+        self.sequence = sequence
+        self.conn.sendAll(framePacket(payloadBytes, sequence))
+        give nil
+    }
+
+    # Reads exactly `count` bytes, buffering whatever arrives beyond them.
+    # recv() returns whatever the network chose to deliver, which for a large
+    # result set is nothing like one packet per call.
+    task readBytes(count) {
+        while len(self.buffered) < count {
+            chunk = self.conn.recv(16384)
+            when chunk == nil or len(chunk) == 0 {
+                throw MysqlError("mysql: the connection closed while reading a packet", 0, "")
+            }
+            self.buffered = self.buffered + chunk
+        }
+        taken = substr(self.buffered, 0, count)
+        self.buffered = substr(self.buffered, count, len(self.buffered) - count)
+        give taken
+    }
+
+    task readPacket() {
+        header = stringToBytes(self.readBytes(4))
+        length = readUint(header, 0, 3)
+        sequence = header[3]
+        payload = []
+        when length > 0 { payload = stringToBytes(self.readBytes(length)) }
+        self.sequence = sequence
+        give { "payload": payload, "sequence": sequence }
+    }
+
+    task expectOk(what) {
+        packet = self.readPacket()
+        when isError(packet["payload"]) { self.raiseFrom(packet["payload"], what) }
+        give readOk(packet["payload"])
+    }
+
+    task raiseFrom(payload, what) {
+        info = readError(payload)
+        throw MysqlError(`mysql: {what} failed -- {info["message"]}`, info["code"], info["sqlstate"])
+    }
+
+    # ── queries ─────────────────────────────────────────────────────────────
+
+    # With parameters this prepares and executes a statement; without them it
+    # sends the text directly, which is what DDL and utility statements need.
+    task run(sql, params = nil) {
+        self.ensureOpen()
+        self.queryCount = self.queryCount + 1
+        when params == nil or len(params) == 0 { give self.runText(sql) }
+        give self.runPrepared(sql, params)
+    }
+
+    task query(sql, params = nil) { give self.run(sql, params).rows }
+    task queryOne(sql, params = nil) { give self.run(sql, params).first() }
+    task queryValue(sql, params = nil) { give self.run(sql, params).scalar() }
+    task execute(sql, params = nil) { give self.run(sql, params).affected }
+
+    task exists(sql, params = nil) { give len(self.run(sql, params).rows) > 0 }
+
+    task runText(sql) {
+        payload = [COM_QUERY]
+        get b in stringToBytes(str(sql)) { push(payload, b) }
+        self.sendPacket(payload, 0)
+
+        first = self.readPacket()
+        when isError(first["payload"]) { self.raiseFrom(first["payload"], "query") }
+        when isOk(first["payload"]) {
+            summary = readOk(first["payload"])
+            give Result([], summary["affected"], summary["insertId"], [])
+        }
+        when isLocalInfile(first["payload"]) {
+            throw MysqlError("mysql: the server asked for a local file (LOAD DATA LOCAL INFILE), which this client does not send", 0, "")
+        }
+        columnCount = readLenencInt(first["payload"], 0)["value"]
+        columns = self.readColumns(columnCount)
+        rows = self.readTextRows(columns)
+        give Result(rows, len(rows), 0, columnNames(columns))
+    }
+
+    task readColumns(count) {
+        columns = []
+        repeat i = 1 to count {
+            packet = self.readPacket()
+            push(columns, parseColumn(packet["payload"]))
+        }
+        # The column block is closed by an EOF packet unless the server is
+        # using the deprecated-EOF capability, which this client does not ask
+        # for.
+        packet = self.readPacket()
+        when isEof(packet["payload"]) == false and isOk(packet["payload"]) == false {
+            when isError(packet["payload"]) { self.raiseFrom(packet["payload"], "reading columns") }
+        }
+        give columns
+    }
+
+    task readTextRows(columns) {
+        rows = []
+        while true {
+            packet = self.readPacket()
+            payload = packet["payload"]
+            when isError(payload) { self.raiseFrom(payload, "reading rows") }
+            when isEof(payload) { give rows }
+            row = {}
+            offset = 0
+            get column in columns {
+                cell = readLenencString(payload, offset)
+                offset = cell["next"]
+                row[column["name"]] = coerceText(cell["value"], column["type"])
+            }
+            push(rows, row)
+        }
+        give rows
+    }
+
+    # ── prepared statements ─────────────────────────────────────────────────
+
+    task runPrepared(sql, params) {
+        payload = [COM_STMT_PREPARE]
+        get b in stringToBytes(str(sql)) { push(payload, b) }
+        self.sendPacket(payload, 0)
+
+        packet = self.readPacket()
+        when isError(packet["payload"]) { self.raiseFrom(packet["payload"], "preparing") }
+        head = packet["payload"]
+        statementId = readUint(head, 1, 4)
+        columnCount = readUint(head, 5, 2)
+        paramCount = readUint(head, 7, 2)
+
+        # The metadata the server has ALREADY sent must be read off the socket
+        # before anything else happens -- including before rejecting the call.
+        #
+        # Bailing out here without draining it left those packets in the
+        # buffer, so the next command read a parameter definition where it
+        # expected its own reply and every later query on the connection was
+        # wrong. One mistyped call poisoned the whole session.
+        when paramCount > 0 { self.drainUntilEof() }
+        columns = []
+        when columnCount > 0 { columns = self.readColumnsForPrepare(columnCount) }
+
+        # An unbound placeholder is not an error to MySQL; it simply refuses
+        # the execute with a message that names no counts. Checking here says
+        # which side is wrong.
+        when paramCount != len(params) {
+            self.closeStatement(statementId)
+            throw MysqlError(`mysql: the statement takes {paramCount} parameter(s) but {len(params)} were supplied`, 0, "")
+        }
+
+        result = nil
+        try { result = self.executeStatement(statementId, params, columns, columnCount) }
+        catch (e) {
+            # Closed on the failure path too, or a rejected statement is
+            # leaked on the server for the life of the connection.
+            self.closeStatement(statementId)
+            throw e
+        }
+        self.closeStatement(statementId)
+        give result
+    }
+
+    task readColumnsForPrepare(count) {
+        columns = []
+        repeat i = 1 to count {
+            packet = self.readPacket()
+            push(columns, parseColumn(packet["payload"]))
+        }
+        self.drainUntilEof()
+        give columns
+    }
+
+    task drainUntilEof() {
+        while true {
+            packet = self.readPacket()
+            when isEof(packet["payload"]) { give nil }
+            when isOk(packet["payload"]) { give nil }
+            when isError(packet["payload"]) { self.raiseFrom(packet["payload"], "reading metadata") }
+        }
+        give nil
+    }
+
+    task executeStatement(statementId, params, columns, columnCount) {
+        payload = [COM_STMT_EXECUTE]
+        writeUint(payload, statementId, 4)
+        push(payload, 0)                    # CURSOR_TYPE_NO_CURSOR
+        writeUint(payload, 1, 4)            # iteration count, always 1
+
+        when len(params) > 0 {
+            # NULL bitmap, one bit per parameter, least significant bit first.
+            bitmapSize = floor((len(params) + 7) / 8)
+            bitmap = []
+            repeat i = 1 to bitmapSize { push(bitmap, 0) }
+            index = 0
+            get value in params {
+                when value == nil {
+                    slot = floor(index / 8)
+                    bitmap[slot] = bitmap[slot] | powerOfTwo(index % 8)
+                }
+                index = index + 1
+            }
+            get b in bitmap { push(payload, b) }
+            push(payload, 1)                # new-params-bound flag
+
+            # Every parameter's type, then every parameter's value.
+            get value in params {
+                spec = typeOf_(value)
+                push(payload, spec["code"])
+                push(payload, spec["unsigned"])
+            }
+            get value in params { encodeBinary(payload, value) }
+        }
+
+        self.sendPacket(payload, 0)
+        first = self.readPacket()
+        when isError(first["payload"]) { self.raiseFrom(first["payload"], "executing") }
+        when isOk(first["payload"]) {
+            summary = readOk(first["payload"])
+            give Result([], summary["affected"], summary["insertId"], [])
+        }
+
+        # EXECUTE sends its OWN column-count packet and column definitions,
+        # even though PREPARE already described them. Reusing the prepare-time
+        # list and skipping this block leaves the reader positioned inside the
+        # metadata, and the first "row" is parsed out of a column definition.
+        count = readLenencInt(first["payload"], 0)["value"]
+        resultColumns = self.readColumnsForPrepare(count)
+        rows = self.readBinaryRows(resultColumns)
+        give Result(rows, len(rows), 0, columnNames(resultColumns))
+    }
+
+    task readBinaryRows(columns) {
+        rows = []
+        while true {
+            packet = self.readPacket()
+            payload = packet["payload"]
+            when isError(payload) { self.raiseFrom(payload, "reading rows") }
+            when isEof(payload) { give rows }
+            push(rows, decodeBinaryRow(payload, columns))
+        }
+        give rows
+    }
+
+    task closeStatement(statementId) {
+        payload = [COM_STMT_CLOSE]
+        writeUint(payload, statementId, 4)
+        # COM_STMT_CLOSE draws no reply at all, so nothing is read back here.
+        try { self.sendPacket(payload, 0) } catch (e) { }
+        give nil
+    }
+
+    # ── transactions ────────────────────────────────────────────────────────
+
+    task begin() {
+        self.run("START TRANSACTION")
+        give self
+    }
+    task commit() {
+        self.run("COMMIT")
+        give self
+    }
+    task rollback() {
+        self.run("ROLLBACK")
+        give self
+    }
+
+    # Runs fn(db) inside a transaction, rolling back if it throws.
+    task transaction(fn) {
+        self.begin()
+        result = nil
+        try { result = fn(self) }
+        catch (e) {
+            try { self.rollback() } catch (inner) { }
+            throw e
+        }
+        self.commit()
+        give result
+    }
+
+    # ── convenience ─────────────────────────────────────────────────────────
+
+    task tables() {
+        names = []
+        get row in self.query("SHOW TABLES") {
+            get key in keys(row) { push(names, row[key]) }
+        }
+        give names
+    }
+
+    task tableExists(name) {
+        give self.queryValue(
+            "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+            [str(name)]) > 0
+    }
+
+    task insert(table, values) {
+        columns = sort(keys(values))
+        marks = []
+        bound = []
+        get column in columns {
+            push(marks, "?")
+            push(bound, values[column])
+        }
+        sql = "INSERT INTO " + quoteIdentifier(table) + " (" + joinIdentifiers(columns) +
+              ") VALUES (" + join(marks, ", ") + ")"
+        result = self.run(sql, bound)
+        give result.insertId
+    }
+}
+
+# ── column and value decoding ───────────────────────────────────────────────
+
+task parseColumn(payload) {
+    cursor = readLenencString(payload, 0)      # catalog
+    cursor = readLenencString(payload, cursor["next"])   # schema
+    cursor = readLenencString(payload, cursor["next"])   # table
+    cursor = readLenencString(payload, cursor["next"])   # original table
+    cursor = readLenencString(payload, cursor["next"])   # name
+    name = cursor["value"]
+    cursor = readLenencString(payload, cursor["next"])   # original name
+    offset = cursor["next"]
+    offset = offset + 1                        # length of fixed fields
+    offset = offset + 2                        # character set
+    offset = offset + 4                        # column length
+    columnType = payload[offset]
+    offset = offset + 1
+    flags = readUint(payload, offset, 2)
+    give { "name": name, "type": columnType, "flags": flags }
+}
+
+task columnNames(columns) {
+    names = []
+    get column in columns { push(names, column["name"]) }
+    give names
+}
+
+# In the text protocol every value arrives as a string, so numeric columns are
+# converted here. Without it a SUM() comes back as "42" and arithmetic on it
+# silently concatenates.
+task coerceText(value, columnType) {
+    when value == nil { give nil }
+    when isIntegerType(columnType) { give safeNumber(value) }
+    when columnType == TYPE_FLOAT or columnType == TYPE_DOUBLE { give safeNumber(value) }
+    # DECIMAL is deliberately left as text: it is exact, and num() would put it
+    # through a float and lose the exactness that was the point of choosing it.
+    give value
+}
+
+task safeNumber(text) {
+    body = trim(str(text))
+    when body == "" { give nil }
+    digits = true
+    seen = 0
+    get ch in split(body, "") {
+        when indexOf("0123456789", ch) < 0 {
+            when ch == "-" or ch == "+" or ch == "." or ch == "e" or ch == "E" { seen = seen + 1 }
+            other { digits = false }
+        }
+    }
+    when digits == false { give text }
+    try { give num(body) }
+    catch (e) { give text }
+}
+
+task powerOfTwo(bit) {
+    value = 1
+    repeat i = 1 to bit { value = value * 2 }
+    give value
+}
+
+# The binary protocol's own value encoding, used for bound parameters.
+task typeOf_(value) {
+    t = typeOf(value)
+    when t == "nil" { give { "code": TYPE_NULL, "unsigned": 0 } }
+    when t == "integer" { give { "code": TYPE_LONGLONG, "unsigned": 0 } }
+    when t == "bool" { give { "code": TYPE_TINY, "unsigned": 0 } }
+    when t == "float" { give { "code": TYPE_DOUBLE, "unsigned": 0 } }
+    give { "code": TYPE_VAR_STRING, "unsigned": 0 }
+}
+
+task encodeBinary(payload, value) {
+    t = typeOf(value)
+    when t == "nil" { give payload }
+    when t == "bool" {
+        flag = 0
+        when value { flag = 1 }
+        push(payload, flag)
+        give payload
+    }
+    when t == "integer" {
+        when value >= 0 { give writeUint(payload, value, 8) }
+        # Two's complement, computed BYTE BY BYTE.
+        #
+        # The obvious 2^64 + value overflows what a number holds exactly here,
+        # so every byte extracted from it came out zero and -7 was stored as 0.
+        # Inverting each byte of the magnitude and adding one with a carry
+        # never forms a value larger than 255.
+        magnitude = 0 - value
+        carry = 1
+        repeat i = 1 to 8 {
+            b = magnitude % 256
+            magnitude = floor(magnitude / 256)
+            inverted = 255 - b + carry
+            when inverted > 255 {
+                inverted = inverted - 256
+                carry = 1
+            }
+            other { carry = 0 }
+            push(payload, inverted)
+        }
+        give payload
+    }
+    when t == "float" { give writeDouble(payload, value) }
+    give writeLenencString(payload, str(value))
+}
+
+# IEEE 754 binary64, little-endian, assembled by hand -- EZ has no float-to-
+# bits builtin.
+task writeDouble(payload, value) {
+    when value == 0 {
+        repeat i = 1 to 8 { push(payload, 0) }
+        give payload
+    }
+    sign = 0
+    magnitude = value
+    when magnitude < 0 {
+        sign = 1
+        magnitude = 0 - magnitude
+    }
+    exponent = 0
+    while magnitude >= 2 {
+        magnitude = magnitude / 2
+        exponent = exponent + 1
+    }
+    while magnitude < 1 {
+        magnitude = magnitude * 2
+        exponent = exponent - 1
+    }
+    fraction = magnitude - 1
+    mantissa = floor(fraction * 4503599627370496)     # 2^52
+    biased = exponent + 1023
+    high = sign * 2147483648 + biased * 1048576 + floor(mantissa / 4294967296)
+    low = mantissa % 4294967296
+    writeUint(payload, low, 4)
+    give writeUint(payload, high, 4)
+}
+
+task readDouble(bytes, offset) {
+    low = readUint(bytes, offset, 4)
+    high = readUint(bytes, offset + 4, 4)
+    sign = 1
+    when high >= 2147483648 {
+        sign = -1
+        high = high - 2147483648
+    }
+    biased = floor(high / 1048576)
+    mantissa = (high % 1048576) * 4294967296 + low
+    when biased == 0 and mantissa == 0 { give 0 }
+    fraction = 1 + mantissa / 4503599627370496
+    exponent = biased - 1023
+    scale = 1
+    steps = exponent
+    when steps < 0 { steps = 0 - steps }
+    repeat i = 1 to steps { scale = scale * 2 }
+    when exponent < 0 { give sign * fraction / scale }
+    give sign * fraction * scale
+}
+
+task readFloat32(bytes, offset) {
+    raw = readUint(bytes, offset, 4)
+    sign = 1
+    when raw >= 2147483648 {
+        sign = -1
+        raw = raw - 2147483648
+    }
+    biased = floor(raw / 8388608)
+    mantissa = raw % 8388608
+    when biased == 0 and mantissa == 0 { give 0 }
+    fraction = 1 + mantissa / 8388608
+    exponent = biased - 127
+    scale = 1
+    steps = exponent
+    when steps < 0 { steps = 0 - steps }
+    repeat i = 1 to steps { scale = scale * 2 }
+    when exponent < 0 { give sign * fraction / scale }
+    give sign * fraction * scale
+}
+
+# A binary result row: 0x00, then a NULL bitmap offset by two bits, then each
+# non-null value in its type's own encoding.
+task decodeBinaryRow(payload, columns) {
+    row = {}
+    bitmapSize = floor((len(columns) + 9) / 8)
+    offset = 1 + bitmapSize
+    index = 0
+    get column in columns {
+        # The two-bit offset is not decoration: without it every column reads
+        # the wrong null flag and a table with a NULL in it comes back shifted.
+        bit = index + 2
+        slot = 1 + floor(bit / 8)
+        isNull = (payload[slot] / powerOfTwo(bit % 8)) % 2
+        when floor(isNull) == 1 {
+            row[column["name"]] = nil
+        }
+        other {
+            decoded = decodeBinaryValue(payload, offset, column["type"])
+            row[column["name"]] = decoded["value"]
+            offset = decoded["next"]
+        }
+        index = index + 1
+    }
+    give row
+}
+
+task decodeBinaryValue(payload, offset, columnType) {
+    when columnType == TYPE_TINY {
+        give { "value": signed(readUint(payload, offset, 1), 1), "next": offset + 1 }
+    }
+    when columnType == TYPE_SHORT or columnType == TYPE_YEAR {
+        give { "value": signed(readUint(payload, offset, 2), 2), "next": offset + 2 }
+    }
+    when columnType == TYPE_LONG or columnType == TYPE_INT24 {
+        give { "value": signed(readUint(payload, offset, 4), 4), "next": offset + 4 }
+    }
+    when columnType == TYPE_LONGLONG {
+        give { "value": signed(readUint(payload, offset, 8), 8), "next": offset + 8 }
+    }
+    when columnType == TYPE_FLOAT {
+        give { "value": readFloat32(payload, offset), "next": offset + 4 }
+    }
+    when columnType == TYPE_DOUBLE {
+        give { "value": readDouble(payload, offset), "next": offset + 8 }
+    }
+    when columnType == TYPE_DATE or columnType == TYPE_DATETIME or columnType == TYPE_TIMESTAMP {
+        give decodeDate(payload, offset)
+    }
+    when columnType == TYPE_TIME { give decodeTime(payload, offset) }
+    # Everything else -- VARCHAR, BLOB, DECIMAL, JSON, ENUM -- is a
+    # length-encoded string.
+    cell = readLenencString(payload, offset)
+    give { "value": cell["value"], "next": cell["next"] }
+}
+
+# Dates come back as their parts and are rendered as ISO text, which is what
+# anything downstream can actually parse.
+task decodeDate(payload, offset) {
+    length = payload[offset]
+    at = offset + 1
+    when length == 0 { give { "value": nil, "next": at } }
+    year = readUint(payload, at, 2)
+    month = payload[at + 2]
+    day = payload[at + 3]
+    text = pad4(year) + "-" + pad2(month) + "-" + pad2(day)
+    when length >= 7 {
+        text = text + " " + pad2(payload[at + 4]) + ":" + pad2(payload[at + 5]) + ":" + pad2(payload[at + 6])
+    }
+    give { "value": text, "next": at + length }
+}
+
+task decodeTime(payload, offset) {
+    length = payload[offset]
+    at = offset + 1
+    when length == 0 { give { "value": "00:00:00", "next": at } }
+    negative = payload[at]
+    days = readUint(payload, at + 1, 4)
+    hours = payload[at + 5] + days * 24
+    text = pad2(hours) + ":" + pad2(payload[at + 6]) + ":" + pad2(payload[at + 7])
+    when negative == 1 { text = "-" + text }
+    give { "value": text, "next": at + length }
+}
+
+# MySQL sends signed integers in two's complement; read as unsigned they come
+# back as enormous positives.
+task signed(value, width) {
+    limit = 1
+    repeat i = 1 to width * 8 - 1 { limit = limit * 2 }
+    when value >= limit { give value - limit * 2 }
+    give value
+}
+
+task pad2(v) {
+    when v < 10 { give "0" + str(v) }
+    give str(v)
+}
+task pad4(v) {
+    body = str(v)
+    while len(body) < 4 { body = "0" + body }
+    give body
+}
+
+task orElse(value, fallback) {
+    when value == nil { give fallback }
+    give value
+}
+
+# Identifiers cannot be bound, so they are quoted. A backtick inside one is
+# doubled, which is MySQL's own escaping rule for them.
+export task quoteIdentifier(name) {
+    body = str(name)
+    when contains(body, "`") { body = replace(body, "`", "``") }
+    give "`" + body + "`"
+}
+
+task joinIdentifiers(names) {
+    quoted = []
+    get name in names { push(quoted, quoteIdentifier(name)) }
+    give join(quoted, ", ")
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task connect(settings) { give MySQL(settings).open() }
+
+# "mysql://user:password@host:3306/database"
+export task fromUrl(url) {
+    body = str(url)
+    get prefix in ["mysql://", "mariadb://"] {
+        when startsWith(body, prefix) { body = substr(body, len(prefix), len(body) - len(prefix)) }
+    }
+    settings = { "host": "localhost", "port": DEFAULT_PORT, "user": "root", "password": "" }
+    when contains(body, "@") {
+        at = lastIndexOfChar(body, "@")
+        credentials = substr(body, 0, at)
+        body = substr(body, at + 1, len(body) - at - 1)
+        when contains(credentials, ":") {
+            colon = indexOf(credentials, ":")
+            settings["user"] = url_decode(substr(credentials, 0, colon))
+            settings["password"] = url_decode(substr(credentials, colon + 1, len(credentials) - colon - 1))
+        }
+        other { settings["user"] = url_decode(credentials) }
+    }
+    when contains(body, "/") {
+        slash = indexOf(body, "/")
+        settings["database"] = substr(body, slash + 1, len(body) - slash - 1)
+        body = substr(body, 0, slash)
+    }
+    when contains(body, ":") {
+        colon = indexOf(body, ":")
+        settings["host"] = substr(body, 0, colon)
+        settings["port"] = num(substr(body, colon + 1, len(body) - colon - 1))
+    }
+    other when body != "" { settings["host"] = body }
+    give MySQL(settings)
+}
+
+task lastIndexOfChar(text, needle) {
+    found = -1
+    repeat i = 0 to len(text) - 1 {
+        when substr(text, i, 1) == needle { found = i }
+    }
+    give found
+}

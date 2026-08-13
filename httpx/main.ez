@@ -130,6 +130,7 @@ export model Http {
         self.insecure = false
         self.retries = 0
         self.retryDelayMs = 200
+        self.transport = nil
     }
 
     # ── configuration, all chainable ────────────────────────────────────────
@@ -174,6 +175,18 @@ export model Http {
     # with a self-signed certificate. Never for anything that matters.
     task allowInvalidCertificates() {
         self.insecure = true
+        give self
+    }
+
+    # Replace the network entirely. `fn(request)` receives the same dictionary
+    # the WinHTTP layer would (host, port, path, secure, method, headers, body,
+    # …) and returns { ok, status, headers, body, error }.
+    #
+    # This is what makes a client built on httpx testable without a server: an
+    # API wrapper can be checked for the URL it builds, the verb it uses and
+    # the body it sends, which is most of what such a wrapper can get wrong.
+    task useTransport(fn) {
+        self.transport = fn
         give self
     }
 
@@ -233,7 +246,12 @@ export model Http {
         attempt = 0
         started = clock()
         while true {
-            result = perform(request)
+            result = nil
+            when self.transport != nil {
+                handler = self.transport
+                result = handler(request)
+            }
+            other { result = perform(request) }
             when result["ok"] {
                 response = Response(result["status"], parseHeaders(result["headers"]),
                                     result["body"], target, method, clock() - started)

@@ -1,0 +1,435 @@
+# ============================================================================
+# search — full-text search engines for EZ
+#
+#   use "search"
+#
+#   engine = Meili("http://localhost:7700", MASTER_KEY)
+#   books  = engine.index("books")
+#
+#   books.add([{ "id": 1, "title": "The Left Hand of Darkness" }])
+#   books.waitForPending()                    # indexing is asynchronous
+#   hits = books.search("darkness")["hits"]
+#
+# Two engines, kept as two clients rather than one lowest-common-denominator
+# abstraction. Their query languages are genuinely different -- Meilisearch is
+# a typo-tolerant instant-search engine, Elasticsearch is a query DSL over an
+# inverted index -- and pretending otherwise would mean exposing neither well.
+# What IS shared is the shape: `index(name)` gives you something you can add
+# to, search, and delete from.
+#
+# `text` gives you fuzzy matching over a list you already hold in memory. This
+# is for when the corpus does not fit there.
+# ============================================================================
+
+use "httpx"
+use "search/ndjson.ez"
+
+export model SearchError {
+    init(message, status, body) {
+        self.message = message
+        self.status = status
+        self.body = body
+    }
+    task toString() { give `SearchError({self.status}): {self.message}` }
+}
+
+task raise(what, response) {
+    detail = ""
+    parsed = nil
+    try { parsed = parse_json(response.body) } catch (e) { parsed = nil }
+    when parsed != nil and type(parsed) == "dictionary" {
+        # Meilisearch says {message, code, type}; Elasticsearch nests it under
+        # error.reason. Reading both means the message is the server's own.
+        when parsed["message"] != nil { detail = str(parsed["message"]) }
+        other when parsed["error"] != nil {
+            e = parsed["error"]
+            when type(e) == "dictionary" and e["reason"] != nil { detail = str(e["reason"]) }
+            other { detail = str(e) }
+        }
+    }
+    when detail == "" { detail = trim(substr(str(response.body), 0, 200)) }
+    when detail == "" { detail = "no explanation from the server" }
+    throw SearchError(`{what} failed: {detail}`, response.status, response.body)
+}
+
+# ============================================================================
+# Meilisearch
+# ============================================================================
+
+export model Meili {
+
+    # `url` is the base address; `apiKey` is the master key or a scoped key.
+    init(url, apiKey = nil) {
+        self.url = trimSlash(str(url))
+        self.apiKey = apiKey
+        self.http = Http().withTimeout(30000)
+        when apiKey != nil and apiKey != "" { self.http.withBearer(apiKey) }
+    }
+
+    task index(name) { give MeiliIndex(self, str(name)) }
+
+    task request(method, path, body = nil) {
+        options = {}
+        when body != nil { options["json"] = body }
+        give self.http.send(method, self.url + path, options)
+    }
+
+    task health() {
+        response = self.request("GET", "/health")
+        when response.ok == false { raise("health", response) }
+        give response.json()
+    }
+
+    task version() {
+        response = self.request("GET", "/version")
+        when response.ok == false { raise("version", response) }
+        give response.json()
+    }
+
+    task indexes() {
+        response = self.request("GET", "/indexes?limit=1000")
+        when response.ok == false { raise("listing indexes", response) }
+        body = response.json()
+        names = []
+        get item in body["results"] { push(names, item["uid"]) }
+        give names
+    }
+
+    task createIndex(name, primaryKey = nil) {
+        payload = { "uid": str(name) }
+        when primaryKey != nil { payload["primaryKey"] = primaryKey }
+        response = self.request("POST", "/indexes", payload)
+        # 201 means created; a duplicate comes back as an index_already_exists
+        # task, which is not an error worth raising for an idempotent call.
+        when response.ok == false and response.status != 409 { raise("creating an index", response) }
+        give self.taskOf(response)
+    }
+
+    task deleteIndex(name) {
+        response = self.request("DELETE", "/indexes/" + urlPart(name))
+        when response.ok == false and response.status != 404 { raise("deleting an index", response) }
+        give self.taskOf(response)
+    }
+
+    # ── tasks ───────────────────────────────────────────────────────────────
+
+    # Every write returns a task id, because indexing happens after the
+    # response. A test -- or a "show me what I just saved" page -- that reads
+    # immediately will see the old state unless it waits.
+    task taskOf(response) {
+        try {
+            body = response.json()
+            when body["taskUid"] != nil { give body["taskUid"] }
+            when body["uid"] != nil { give body["uid"] }
+        }
+        catch (e) { give nil }
+        give nil
+    }
+
+    task taskStatus(taskUid) {
+        response = self.request("GET", "/tasks/" + str(taskUid))
+        when response.ok == false { raise("reading a task", response) }
+        give response.json()
+    }
+
+    # Blocks until the task finishes. Returns the finished task record, and
+    # throws if it failed -- a silently failed index write is worse than a slow
+    # one.
+    task waitForTask(taskUid, timeoutMs = 10000) {
+        when taskUid == nil { give nil }
+        deadline = clock() + timeoutMs
+        while clock() < deadline {
+            record = self.taskStatus(taskUid)
+            status = record["status"]
+            when status == "succeeded" { give record }
+            when status == "failed" or status == "canceled" {
+                reason = "unknown"
+                when record["error"] != nil and record["error"]["message"] != nil {
+                    reason = str(record["error"]["message"])
+                }
+                throw SearchError(`task {taskUid} {status}: {reason}`, 0, to_json(record))
+            }
+            pauseMs(40)
+        }
+        throw SearchError(`task {taskUid} did not finish within {timeoutMs}ms`, 0, nil)
+    }
+}
+
+export model MeiliIndex {
+    init(client, name) {
+        self.client = client
+        self.name = name
+        self.base = "/indexes/" + urlPart(name)
+        self.lastTask = nil
+    }
+
+    # Adds or replaces documents. Returns the task id; indexing is asynchronous.
+    task add(documents, primaryKey = nil) {
+        path = self.base + "/documents"
+        when primaryKey != nil { path = path + "?primaryKey=" + urlPart(primaryKey) }
+        response = self.client.request("POST", path, documents)
+        when response.ok == false { raise("adding documents", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    # Merges into existing documents rather than replacing them.
+    task update(documents) {
+        response = self.client.request("PUT", self.base + "/documents", documents)
+        when response.ok == false { raise("updating documents", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    # `options` may carry limit, offset, filter, sort, attributesToRetrieve,
+    # attributesToHighlight, facets -- anything Meilisearch accepts.
+    task search(query, options = nil) {
+        payload = { "q": str(query) }
+        when options != nil {
+            get key in keys(options) { payload[key] = options[key] }
+        }
+        response = self.client.request("POST", self.base + "/search", payload)
+        when response.ok == false { raise("searching", response) }
+        give response.json()
+    }
+
+    # Just the documents, for the common case.
+    task find(query, options = nil) { give self.search(query, options)["hits"] }
+
+    task document(id) {
+        response = self.client.request("GET", self.base + "/documents/" + urlPart(id))
+        when response.status == 404 { give nil }
+        when response.ok == false { raise("fetching a document", response) }
+        give response.json()
+    }
+
+    task documents(limit = 20, offset = 0) {
+        response = self.client.request("GET",
+            self.base + `/documents?limit={limit}&offset={offset}`)
+        when response.ok == false { raise("listing documents", response) }
+        give response.json()["results"]
+    }
+
+    task remove(id) {
+        response = self.client.request("DELETE", self.base + "/documents/" + urlPart(id))
+        when response.ok == false { raise("deleting a document", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    task clear() {
+        response = self.client.request("DELETE", self.base + "/documents")
+        when response.ok == false { raise("clearing documents", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    task count() {
+        response = self.client.request("POST", self.base + "/search", { "q": "", "limit": 0 })
+        when response.ok == false { raise("counting", response) }
+        give response.json()["estimatedTotalHits"]
+    }
+
+    # Which fields can be filtered and sorted on. Meilisearch refuses a filter
+    # on a field that has not been declared, which is the first thing everyone
+    # trips over.
+    task setFilterable(fields) {
+        response = self.client.request("PUT", self.base + "/settings/filterable-attributes", fields)
+        when response.ok == false { raise("setting filterable attributes", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    task setSortable(fields) {
+        response = self.client.request("PUT", self.base + "/settings/sortable-attributes", fields)
+        when response.ok == false { raise("setting sortable attributes", response) }
+        self.lastTask = self.client.taskOf(response)
+        give self.lastTask
+    }
+
+    task settings() {
+        response = self.client.request("GET", self.base + "/settings")
+        when response.ok == false { raise("reading settings", response) }
+        give response.json()
+    }
+
+    # Waits for the write this index last made.
+    task waitForPending(timeoutMs = 10000) {
+        when self.lastTask == nil { give nil }
+        give self.client.waitForTask(self.lastTask, timeoutMs)
+    }
+}
+
+# ============================================================================
+# Elasticsearch / OpenSearch
+# ============================================================================
+
+export model Elastic {
+
+    init(url, username = nil, password = nil) {
+        self.url = trimSlash(str(url))
+        self.http = Http().withTimeout(30000)
+        when username != nil { self.http.withBasicAuth(username, password) }
+    }
+
+    # An API key instead of basic auth.
+    task withApiKey(key) {
+        self.http.withHeader("Authorization", "ApiKey " + str(key))
+        give self
+    }
+
+    task index(name) { give ElasticIndex(self, str(name)) }
+
+    task request(method, path, body = nil) {
+        options = {}
+        when body != nil { options["json"] = body }
+        give self.http.send(method, self.url + path, options)
+    }
+
+    task info() {
+        response = self.request("GET", "/")
+        when response.ok == false { raise("info", response) }
+        give response.json()
+    }
+
+    task indexes() {
+        response = self.request("GET", "/_cat/indices?format=json")
+        when response.ok == false { raise("listing indexes", response) }
+        names = []
+        get item in response.json() { push(names, item["index"]) }
+        give names
+    }
+
+    task createIndex(name, mappings = nil) {
+        payload = nil
+        when mappings != nil { payload = { "mappings": mappings } }
+        response = self.request("PUT", "/" + urlPart(name), payload)
+        when response.ok == false and response.status != 400 { raise("creating an index", response) }
+        give response.ok
+    }
+
+    task deleteIndex(name) {
+        response = self.request("DELETE", "/" + urlPart(name))
+        when response.ok == false and response.status != 404 { raise("deleting an index", response) }
+        give response.ok
+    }
+}
+
+export model ElasticIndex {
+    init(client, name) {
+        self.client = client
+        self.name = name
+        self.base = "/" + urlPart(name)
+    }
+
+    task add(document, id = nil) {
+        when id != nil {
+            response = self.client.request("PUT", self.base + "/_doc/" + urlPart(id), document)
+            when response.ok == false { raise("indexing a document", response) }
+            give response.json()
+        }
+        response = self.client.request("POST", self.base + "/_doc", document)
+        when response.ok == false { raise("indexing a document", response) }
+        give response.json()
+    }
+
+    # Several documents in one round trip, as newline-delimited JSON. The
+    # trailing newline is required; without it Elasticsearch rejects the whole
+    # batch with a parse error that does not say why.
+    task addMany(documents, idField = nil) {
+        lines = []
+        get document in documents {
+            action = { "index": { "_index": self.name } }
+            when idField != nil and document[idField] != nil {
+                action["index"]["_id"] = str(document[idField])
+            }
+            # compactJson, not to_json: this format is newline-delimited and
+            # to_json pretty-prints, so a pretty document ends its own line.
+            push(lines, compactJson(action))
+            push(lines, compactJson(document))
+        }
+        payload = join(lines, "\n") + "\n"
+        response = self.client.http.send("POST", self.client.url + "/_bulk", {
+            "body": payload,
+            "headers": { "Content-Type": "application/x-ndjson" }
+        })
+        when response.ok == false { raise("bulk indexing", response) }
+        give response.json()
+    }
+
+    # Elasticsearch indexes asynchronously too, but unlike Meilisearch it
+    # offers a synchronous flush.
+    task refresh() {
+        response = self.client.request("POST", self.base + "/_refresh")
+        when response.ok == false { raise("refreshing", response) }
+        give true
+    }
+
+    # A full query body, for when you want the DSL.
+    task query(body) {
+        response = self.client.request("POST", self.base + "/_search", body)
+        when response.ok == false { raise("searching", response) }
+        give response.json()
+    }
+
+    # The common case: match across every field.
+    task search(text, options = nil) {
+        body = { "query": { "multi_match": { "query": str(text) } } }
+        when options != nil {
+            get key in keys(options) { body[key] = options[key] }
+        }
+        give self.query(body)
+    }
+
+    # Just the documents.
+    task find(text, options = nil) {
+        result = self.search(text, options)
+        documents = []
+        get hit in result["hits"]["hits"] { push(documents, hit["_source"]) }
+        give documents
+    }
+
+    task document(id) {
+        response = self.client.request("GET", self.base + "/_doc/" + urlPart(id))
+        when response.status == 404 { give nil }
+        when response.ok == false { raise("fetching a document", response) }
+        give response.json()["_source"]
+    }
+
+    task remove(id) {
+        response = self.client.request("DELETE", self.base + "/_doc/" + urlPart(id))
+        when response.status == 404 { give false }
+        when response.ok == false { raise("deleting a document", response) }
+        give true
+    }
+
+    task count() {
+        response = self.client.request("GET", self.base + "/_count")
+        when response.ok == false { raise("counting", response) }
+        give response.json()["count"]
+    }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+task trimSlash(url) {
+    body = str(url)
+    while endsWith(body, "/") { body = substr(body, 0, len(body) - 1) }
+    give body
+}
+
+# An index or document id goes into the PATH, so it must be escaped there --
+# an id containing a slash would otherwise silently address a different
+# endpoint.
+task urlPart(value) { give url_encode(str(value)) }
+
+task pauseMs(milliseconds) {
+    until = clock() + milliseconds
+    while clock() < until { }
+    give nil
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task meili(url, apiKey = nil) { give Meili(url, apiKey) }
+export task elastic(url, username = nil, password = nil) { give Elastic(url, username, password) }

@@ -1,0 +1,188 @@
+# ============================================================================
+# webhook — test suite
+#   ez test.ez
+#
+# The signatures below were produced by an independent implementation (.NET's
+# HMACSHA256/HMACSHA1) over the same inputs, not read back out of this code.
+# A verifier tested against its own output will happily accept a scheme that
+# no real provider uses.
+# ============================================================================
+
+use "webhook"
+use "webhook/compare.ez"
+
+PASS = 0
+FAIL = 0
+
+BODY = "{\"id\":\"evt_1\",\"type\":\"invoice.paid\"}"
+TS = 1700000000
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+out "webhook tests"
+
+# ── Stripe ──────────────────────────────────────────────────────────────────
+STRIPE_SIG = "4aa90aa69730f112c87accbf54203d1076675eae3b18a5cb82b5ab9e7f5cd5bc"
+s = Stripe("whsec_test")
+header = `t={TS},v1={STRIPE_SIG}`
+check("accepts a genuine signature", s.check(BODY, header, TS).ok, true)
+check("via the header dictionary",
+      s.verify(BODY, { "Stripe-Signature": header }, TS), true)
+# HTTP header names are case-insensitive and every framework normalises them
+# differently.
+check("header lookup ignores case",
+      s.verify(BODY, { "stripe-signature": header }, TS), true)
+
+check("rejects a wrong secret", Stripe("whsec_other").check(BODY, header, TS).ok, false)
+check("rejects a tampered body", s.check(BODY + " ", header, TS).ok, false)
+# The body is signed byte for byte. Re-serialising the JSON changes the bytes
+# even when the data is identical -- the commonest cause of a failing verifier.
+check("rejects a re-serialised body",
+      s.check("{\"type\":\"invoice.paid\",\"id\":\"evt_1\"}", header, TS).ok, false)
+check("rejects a flipped signature bit",
+      s.check(BODY, `t={TS},v1=5aa90aa69730f112c87accbf54203d1076675eae3b18a5cb82b5ab9e7f5cd5bc`, TS).ok, false)
+check("rejects a missing header", s.check(BODY, nil, TS).ok, false)
+check("rejects a header with no timestamp", s.check(BODY, `v1={STRIPE_SIG}`, TS).ok, false)
+check("rejects a header with no signature", s.check(BODY, `t={TS}`, TS).ok, false)
+check("rejects an empty secret", Stripe("").check(BODY, header, TS).ok, false)
+
+# Replay protection: the signature stays valid forever, so only the timestamp
+# stops a captured request being sent again.
+check("rejects a stale timestamp", s.check(BODY, header, TS + 400).ok, false)
+check("and says why", contains(s.check(BODY, header, TS + 400).reason, "tolerance"), true)
+check("accepts inside the tolerance", s.check(BODY, header, TS + 100).ok, true)
+# Clock skew cuts both ways; a request from slightly in the future is normal.
+check("accepts a slightly future timestamp", s.check(BODY, header, TS - 100).ok, true)
+check("a wider tolerance accepts it", Stripe("whsec_test", 600).check(BODY, header, TS + 400).ok, true)
+check("rejects a non-numeric timestamp", s.check(BODY, `t=abc,v1={STRIPE_SIG}`, TS).ok, false)
+
+# During a secret rotation Stripe sends several v1 signatures; any one
+# matching is a pass. Taking only the first would break every rotation.
+check("accepts when one of several signatures matches",
+      s.check(BODY, `t={TS},v1=deadbeef,v1={STRIPE_SIG}`, TS).ok, true)
+check("rejects when none of several match",
+      s.check(BODY, `t={TS},v1=deadbeef,v1=cafebabe`, TS).ok, false)
+
+# ── GitHub ──────────────────────────────────────────────────────────────────
+GH_SIG = "4d3700c1b858bb58fee399f3c2d95050316279b8791de73e50e142609b7220be"
+g = GitHub("ghsecret")
+check("accepts a genuine signature", g.check(BODY, "sha256=" + GH_SIG).ok, true)
+check("via headers", g.verify(BODY, { "X-Hub-Signature-256": "sha256=" + GH_SIG }), true)
+check("accepts upper-case hex", g.check(BODY, "sha256=" + upper(GH_SIG)).ok, true)
+check("rejects a wrong secret", GitHub("other").check(BODY, "sha256=" + GH_SIG).ok, false)
+check("rejects a bare hex signature", g.check(BODY, GH_SIG).ok, false)
+# GitHub still sends the SHA-1 header. Accepting it would let an attacker pick
+# the weaker algorithm, which is the whole problem with negotiation.
+check("refuses the legacy sha1 header", g.check(BODY, "sha1=" + GH_SIG).ok, false)
+check("and explains", contains(g.check(BODY, "sha1=abc").reason, "SHA-1"), true)
+check("rejects a missing header", g.check(BODY, nil).ok, false)
+
+# ── Slack ───────────────────────────────────────────────────────────────────
+SLACK_SIG = "717130b2f7ee971e82c104d2ff9797906449fa0da8c8333c0803092c2079dd2d"
+sl = Slack("slacksecret")
+check("accepts a genuine signature", sl.check(BODY, "v0=" + SLACK_SIG, TS, TS).ok, true)
+check("via headers", sl.verify(BODY, {
+    "X-Slack-Signature": "v0=" + SLACK_SIG,
+    "X-Slack-Request-Timestamp": str(TS)
+}, TS), true)
+check("rejects a wrong secret", Slack("other").check(BODY, "v0=" + SLACK_SIG, TS, TS).ok, false)
+check("rejects a missing v0 prefix", sl.check(BODY, SLACK_SIG, TS, TS).ok, false)
+check("rejects a stale timestamp", sl.check(BODY, "v0=" + SLACK_SIG, TS, TS + 400).ok, false)
+check("rejects a missing timestamp", sl.check(BODY, "v0=" + SLACK_SIG, nil, TS).ok, false)
+
+# ── Shopify ─────────────────────────────────────────────────────────────────
+# Base64, not hex. A verifier copied from the GitHub one silently rejects
+# everything.
+SHOP_SIG = "H66+FuUrbStua09+C9M4V3RNC/CB4ZRnVnc67SlUhSY="
+sh = Shopify("shopsecret")
+check("accepts a genuine signature", sh.check(BODY, SHOP_SIG).ok, true)
+check("via headers", sh.verify(BODY, { "X-Shopify-Hmac-Sha256": SHOP_SIG }), true)
+check("rejects a wrong secret", Shopify("other").check(BODY, SHOP_SIG).ok, false)
+check("rejects the hex form of the same digest",
+      sh.check(BODY, "1faebe16e52b6d2b6e6b4f7e0bd338577").ok, false)
+check("rejects a missing header", sh.check(BODY, nil).ok, false)
+
+# ── Twilio ──────────────────────────────────────────────────────────────────
+# Signed over the URL with the POST fields appended in key order, not the body.
+TWILIO_SIG = "4p4aDvvbMu6v3+Wrm7z0AiRb/Q8="
+tw = Twilio("authtoken")
+params = { "CallSid": "CA123", "From": "+15551234567" }
+check("accepts a genuine signature",
+      tw.check("https://example.com/hook", params, TWILIO_SIG).ok, true)
+# The fields must be appended in sorted key order; a different insertion order
+# must still verify.
+check("parameter order does not matter",
+      tw.check("https://example.com/hook", { "From": "+15551234567", "CallSid": "CA123" }, TWILIO_SIG).ok, true)
+check("rejects a different url",
+      tw.check("https://example.com/other", params, TWILIO_SIG).ok, false)
+check("rejects a changed parameter",
+      tw.check("https://example.com/hook", { "CallSid": "CA124", "From": "+15551234567" }, TWILIO_SIG).ok, false)
+check("the failure names the usual cause",
+      contains(tw.check("http://example.com/hook", params, TWILIO_SIG).reason, "scheme"), true)
+
+# ── Generic ─────────────────────────────────────────────────────────────────
+gen = Generic("gsecret", "sha256", "hex")
+check("signs", gen.sign(BODY), "1d7220c53c4a6b509d00f0d79e2aa803a2e5145a04ced1e30d45ec9fae287fff")
+check("verifies its own signature", gen.verify(BODY, gen.sign(BODY)), true)
+check("rejects a wrong signature", gen.verify(BODY, "deadbeef"), false)
+b64 = Generic("gsecret", "sha256", "base64")
+check("base64 encoding", b64.sign(BODY), "HXIgxTxKa1CdAPDXniqoA6LlFFoEztHjDUXsn64of/8=")
+check("base64 verifies", b64.verify(BODY, b64.sign(BODY)), true)
+sha1gen = Generic("gsecret", "sha1", "hex")
+check("sha1 encoding", sha1gen.sign(BODY), "ad529bd3028f792af1e873dd2c874a09139095c2")
+check("tolerates an algorithm prefix", gen.verify(BODY, "sha256=" + gen.sign(BODY)), true)
+throws("an unknown algorithm is refused", || Generic("s", "md4", "hex").sign("x"))
+throws("an unknown encoding is refused", || Generic("s", "sha256", "base32").sign("x"))
+
+# ── constant-time comparison ────────────────────────────────────────────────
+check("equal", constantTimeEquals("abc", "abc"), true)
+check("different", constantTimeEquals("abc", "abd"), false)
+check("different lengths", constantTimeEquals("ab", "abc"), false)
+check("both empty", constantTimeEquals("", ""), true)
+check("nil is never equal", constantTimeEquals(nil, "abc"), false)
+# The property that matters: a mismatch in the FIRST byte must be no cheaper
+# to detect than one in the last. An early return there is what leaks a
+# signature one byte at a time.
+check("first byte differs", constantTimeEquals("xbc", "abc"), false)
+check("last byte differs", constantTimeEquals("abx", "abc"), false)
+
+# ── header helpers ──────────────────────────────────────────────────────────
+check("finds a header", headerValue({ "X-Test": "v" }, "x-test"), "v")
+check("case-insensitive both ways", headerValue({ "x-test": "v" }, "X-Test"), "v")
+check("missing header", headerValue({ "a": "b" }, "x-test"), nil)
+check("nil headers", headerValue(nil, "x"), nil)
+# A repeated header arrives as a list; the first is the one that was signed.
+check("a repeated header takes the first", headerValue({ "X-Test": ["one", "two"] }, "X-Test"), "one")
+
+parsed = parseCompound("t=123,v1=aaa,v1=bbb")
+check("parses the timestamp", parsed["t"], "123")
+check("collects every v1", to_json(parsed["v1list"]), to_json(["aaa", "bbb"]))
+check("tolerates spaces", parseCompound(" t=1 , v1=x ")["t"], "1")
+
+check("drift for a matching timestamp", timestampDrift(100, 100), 0)
+check("drift is absolute", timestampDrift(100, 150), 50)
+check("drift for a future timestamp", timestampDrift(150, 100), 50)
+check("drift of a non-number", timestampDrift("abc", 100), nil)
+
+check("hex to bytes", to_json(hexToBytes("000f10ff")), to_json([0, 15, 16, 255]))
+check("odd-length hex stops cleanly", to_json(hexToBytes("0f0")), to_json([15]))
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

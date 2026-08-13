@@ -1,0 +1,431 @@
+# ============================================================================
+# google — Google Workspace APIs for EZ
+#
+#   use "google"
+#   use "oauth"
+#
+#   token = OAuth2.provider("google", ID, SECRET, REDIRECT).complete(query, session)
+#   g = Google(token)
+#
+#   g.sheets().values("1AbC…", "Sheet1!A1:C10")
+#   g.drive().upload("report.csv", csvText, "text/csv")
+#   g.calendar().events("primary")
+#   g.gmail().send("them@example.com", "Subject", "Body")
+#
+# `oauth` gets you the token; this is what to do with it. Everything here is
+# REST over `httpx`, so the whole package is request shaping and response
+# reading -- there is no protocol work, which is why it can cover four APIs.
+#
+# The token is a `Token` from `oauth`, or a bare access-token string. Passing
+# the Token is better: it knows when it expires, and refresh() below can renew
+# it in place rather than failing a request at an awkward moment.
+# ============================================================================
+
+use "httpx"
+
+export SHEETS_BASE = "https://sheets.googleapis.com/v4"
+export DRIVE_BASE = "https://www.googleapis.com/drive/v3"
+export DRIVE_UPLOAD_BASE = "https://www.googleapis.com/upload/drive/v3"
+export CALENDAR_BASE = "https://www.googleapis.com/calendar/v3"
+export GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1"
+
+export model GoogleError {
+    init(message, status, reason) {
+        self.message = message
+        self.status = status
+        self.reason = reason
+    }
+    task toString() { give `GoogleError({self.status}): {self.message}` }
+}
+
+export model Google {
+
+    # `token` is an oauth Token or an access-token string.
+    init(token) {
+        self.token = token
+        self.http = Http().withTimeout(30000)
+        self.oauthClient = nil
+    }
+
+    # Give it the oauth client and the token is refreshed automatically when it
+    # has expired, instead of the next call failing with a 401.
+    task withRefresh(client) {
+        self.oauthClient = client
+        give self
+    }
+
+    task accessToken() {
+        when typeOf(self.token) == "string" { give self.token }
+        when self.oauthClient != nil and self.token.isExpired() {
+            self.token = self.oauthClient.ensureFresh(self.token)
+        }
+        give self.token.accessToken
+    }
+
+    task request(method, url, options = nil) {
+        opts = options
+        when opts == nil { opts = {} }
+        headers = { "Authorization": "Bearer " + str(self.accessToken()) }
+        when opts["headers"] != nil {
+            get name in keys(opts["headers"]) { headers[name] = opts["headers"][name] }
+        }
+        opts["headers"] = headers
+        response = self.http.send(method, url, opts)
+        when response.ok == false { raiseFrom(response, method, url) }
+        when response.contentLength() == 0 { give {} }
+        give response.jsonOr({})
+    }
+
+    task sheets() { give Sheets(self) }
+    task drive() { give Drive(self) }
+    task calendar() { give Calendar(self) }
+    task gmail() { give Gmail(self) }
+}
+
+# Google reports failures as { error: { code, message, errors: [{ reason }] } }.
+# The `reason` is the part worth branching on -- "insufficientPermissions" and
+# "notFound" are both refusals and mean entirely different things.
+task raiseFrom(response, method, url) {
+    body = response.jsonOr(nil)
+    message = ""
+    reason = ""
+    when body != nil and type(body) == "dictionary" and body["error"] != nil {
+        e = body["error"]
+        when type(e) == "dictionary" {
+            when e["message"] != nil { message = str(e["message"]) }
+            when type(e["errors"]) == "array" and len(e["errors"]) > 0 {
+                first = e["errors"][0]
+                when type(first) == "dictionary" and first["reason"] != nil {
+                    reason = str(first["reason"])
+                }
+            }
+        }
+        other { message = str(e) }
+    }
+    when message == "" { message = trim(substr(str(response.body), 0, 200)) }
+    hint = ""
+    when reason == "insufficientPermissions" {
+        hint = " (the token is valid but was not granted the scope this call needs -- add it and have the user consent again)"
+    }
+    other when response.status == 401 {
+        hint = " (the access token has expired or been revoked; refresh it)"
+    }
+    throw GoogleError(`google: {method} failed with {response.status} -- {message}{hint}`,
+                      response.status, reason)
+}
+
+task encodePart(value) { give url_encode(str(value)) }
+
+task queryString(params) {
+    when params == nil { give "" }
+    parts = []
+    get name in keys(params) {
+        value = params[name]
+        when value != nil { push(parts, encodePart(name) + "=" + encodePart(value)) }
+    }
+    when len(parts) == 0 { give "" }
+    give "?" + join(parts, "&")
+}
+
+# ============================================================================
+# Sheets
+# ============================================================================
+
+export model Sheets {
+    init(client) { self.client = client }
+
+    # A range in A1 notation, e.g. "Sheet1!A1:C10". Returns rows as lists.
+    #
+    # Google OMITS trailing empty cells rather than padding, so rows come back
+    # ragged: a row whose last two cells are blank is shorter than its
+    # neighbours. Indexing blindly into row[4] is the usual bug, so `rows`
+    # pads to the widest row.
+    task values(spreadsheetId, range1) {
+        body = self.client.request("GET",
+            SHEETS_BASE + "/spreadsheets/" + encodePart(spreadsheetId) +
+            "/values/" + encodePart(range1))
+        when body["values"] == nil { give [] }
+        give body["values"]
+    }
+
+    # The same, padded to a rectangle.
+    task rows(spreadsheetId, range1) {
+        raw = self.values(spreadsheetId, range1)
+        widest = 0
+        get row in raw {
+            when len(row) > widest { widest = len(row) }
+        }
+        padded = []
+        get row in raw {
+            copy = []
+            get cell in row { push(copy, cell) }
+            while len(copy) < widest { push(copy, "") }
+            push(padded, copy)
+        }
+        give padded
+    }
+
+    # The first row as headers, every later row as a dictionary.
+    task records(spreadsheetId, range1) {
+        all1 = self.rows(spreadsheetId, range1)
+        when len(all1) < 2 { give [] }
+        headers = all1[0]
+        result = []
+        index = 1
+        while index < len(all1) {
+            row = all1[index]
+            record = {}
+            column = 0
+            get name in headers {
+                value = ""
+                when column < len(row) { value = row[column] }
+                record[str(name)] = value
+                column = column + 1
+            }
+            push(result, record)
+            index = index + 1
+        }
+        give result
+    }
+
+    # Overwrites a range. USER_ENTERED means Google parses what you write the
+    # way it would parse typing -- "1/2" becomes a date, "=A1+1" a formula.
+    # Pass "RAW" to store text exactly as given.
+    task update(spreadsheetId, range1, rows, valueInput = "USER_ENTERED") {
+        give self.client.request("PUT",
+            SHEETS_BASE + "/spreadsheets/" + encodePart(spreadsheetId) +
+            "/values/" + encodePart(range1) +
+            queryString({ "valueInputOption": valueInput }),
+            { "json": { "values": rows } })
+    }
+
+    task append(spreadsheetId, range1, rows, valueInput = "USER_ENTERED") {
+        give self.client.request("POST",
+            SHEETS_BASE + "/spreadsheets/" + encodePart(spreadsheetId) +
+            "/values/" + encodePart(range1) + ":append" +
+            queryString({ "valueInputOption": valueInput, "insertDataOption": "INSERT_ROWS" }),
+            { "json": { "values": rows } })
+    }
+
+    task clear(spreadsheetId, range1) {
+        give self.client.request("POST",
+            SHEETS_BASE + "/spreadsheets/" + encodePart(spreadsheetId) +
+            "/values/" + encodePart(range1) + ":clear", { "json": {} })
+    }
+
+    task info(spreadsheetId) {
+        give self.client.request("GET",
+            SHEETS_BASE + "/spreadsheets/" + encodePart(spreadsheetId))
+    }
+
+    task create(title) {
+        give self.client.request("POST", SHEETS_BASE + "/spreadsheets",
+            { "json": { "properties": { "title": str(title) } } })
+    }
+
+    task sheetNames(spreadsheetId) {
+        names = []
+        body = self.info(spreadsheetId)
+        when type(body["sheets"]) == "array" {
+            get sheet in body["sheets"] { push(names, sheet["properties"]["title"]) }
+        }
+        give names
+    }
+}
+
+# ============================================================================
+# Drive
+# ============================================================================
+
+export model Drive {
+    init(client) { self.client = client }
+
+    # `query` is Drive's own search syntax, e.g. "name = 'report.csv'".
+    task list(query = nil, pageSize = 100) {
+        params = { "pageSize": pageSize, "fields": "files(id,name,mimeType,size,modifiedTime),nextPageToken" }
+        when query != nil { params["q"] = query }
+        body = self.client.request("GET", DRIVE_BASE + "/files" + queryString(params))
+        when body["files"] == nil { give [] }
+        give body["files"]
+    }
+
+    task get(fileId) {
+        give self.client.request("GET", DRIVE_BASE + "/files/" + encodePart(fileId) +
+            queryString({ "fields": "id,name,mimeType,size,modifiedTime,parents" }))
+    }
+
+    # The file's CONTENT, not its metadata. alt=media is what distinguishes
+    # them, and forgetting it returns the metadata with a 200 -- so the caller
+    # gets JSON where it expected a document and nothing looks like an error.
+    task download(fileId) {
+        url = DRIVE_BASE + "/files/" + encodePart(fileId) + queryString({ "alt": "media" })
+        response = self.client.http.send("GET", url, {
+            "headers": { "Authorization": "Bearer " + str(self.client.accessToken()) }
+        })
+        when response.ok == false { raiseFrom(response, "GET", url) }
+        give response.body
+    }
+
+    task downloadToFile(fileId, path) {
+        writeFile(path, self.download(fileId))
+        give true
+    }
+
+    # A multipart upload: the metadata and the bytes in one request. Simple
+    # upload (uploadType=media) cannot carry a filename, so the file lands
+    # called "Untitled" -- which is why this is the multipart form.
+    task upload(name, content, mimeType = "application/octet-stream", parentId = nil) {
+        metadata = { "name": str(name) }
+        when parentId != nil { metadata["parents"] = [parentId] }
+
+        boundary = "ezboundary" + str(floor(clock()))
+        body = "--" + boundary + "\r\n" +
+               "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+               to_json(metadata) + "\r\n" +
+               "--" + boundary + "\r\n" +
+               "Content-Type: " + str(mimeType) + "\r\n\r\n" +
+               str(content) + "\r\n" +
+               "--" + boundary + "--"
+
+        url = DRIVE_UPLOAD_BASE + "/files" + queryString({ "uploadType": "multipart" })
+        response = self.client.http.send("POST", url, {
+            "body": body,
+            "headers": {
+                "Authorization": "Bearer " + str(self.client.accessToken()),
+                "Content-Type": "multipart/related; boundary=" + boundary
+            }
+        })
+        when response.ok == false { raiseFrom(response, "POST", url) }
+        give response.jsonOr({})
+    }
+
+    task uploadFile(path, name = nil, mimeType = "application/octet-stream", parentId = nil) {
+        chosen = name
+        when chosen == nil { chosen = baseName(path) }
+        give self.upload(chosen, readFile(path), mimeType, parentId)
+    }
+
+    task remove(fileId) {
+        self.client.request("DELETE", DRIVE_BASE + "/files/" + encodePart(fileId))
+        give true
+    }
+
+    task createFolder(name, parentId = nil) {
+        metadata = { "name": str(name), "mimeType": "application/vnd.google-apps.folder" }
+        when parentId != nil { metadata["parents"] = [parentId] }
+        give self.client.request("POST", DRIVE_BASE + "/files", { "json": metadata })
+    }
+
+    # Anyone with the link can read it. This makes the file PUBLIC; it is not
+    # a subtle setting and is named to say so.
+    task shareWithAnyone(fileId) {
+        give self.client.request("POST",
+            DRIVE_BASE + "/files/" + encodePart(fileId) + "/permissions",
+            { "json": { "role": "reader", "type": "anyone" } })
+    }
+}
+
+task baseName(path) {
+    body = replace(str(path), "\\", "/")
+    when contains(body, "/") == false { give body }
+    pieces = split(body, "/")
+    give pieces[len(pieces) - 1]
+}
+
+# ============================================================================
+# Calendar
+# ============================================================================
+
+export model Calendar {
+    init(client) { self.client = client }
+
+    task calendars() {
+        body = self.client.request("GET", CALENDAR_BASE + "/users/me/calendarList")
+        when body["items"] == nil { give [] }
+        give body["items"]
+    }
+
+    # `options` may carry timeMin, timeMax, q, maxResults, orderBy. Times are
+    # RFC 3339, which `datetime`'s toIso() produces.
+    task events(calendarId = "primary", options = nil) {
+        params = { "singleEvents": "true", "orderBy": "startTime", "maxResults": 100 }
+        when options != nil {
+            get name in keys(options) { params[name] = options[name] }
+        }
+        body = self.client.request("GET",
+            CALENDAR_BASE + "/calendars/" + encodePart(calendarId) + "/events" + queryString(params))
+        when body["items"] == nil { give [] }
+        give body["items"]
+    }
+
+    # `start` and `end` are RFC 3339 timestamps.
+    task createEvent(calendarId, summary, start, end, options = nil) {
+        event = {
+            "summary": str(summary),
+            "start": { "dateTime": str(start) },
+            "end": { "dateTime": str(end) }
+        }
+        when options != nil {
+            get name in keys(options) { event[name] = options[name] }
+        }
+        give self.client.request("POST",
+            CALENDAR_BASE + "/calendars/" + encodePart(calendarId) + "/events",
+            { "json": event })
+    }
+
+    task deleteEvent(calendarId, eventId) {
+        self.client.request("DELETE",
+            CALENDAR_BASE + "/calendars/" + encodePart(calendarId) +
+            "/events/" + encodePart(eventId))
+        give true
+    }
+}
+
+# ============================================================================
+# Gmail
+# ============================================================================
+
+export model Gmail {
+    init(client) { self.client = client }
+
+    task profile() { give self.client.request("GET", GMAIL_BASE + "/users/me/profile") }
+
+    # `query` is Gmail's search syntax, e.g. "from:someone is:unread".
+    task messages(query = nil, maxResults = 25) {
+        params = { "maxResults": maxResults }
+        when query != nil { params["q"] = query }
+        body = self.client.request("GET", GMAIL_BASE + "/users/me/messages" + queryString(params))
+        when body["messages"] == nil { give [] }
+        give body["messages"]
+    }
+
+    task message(messageId) {
+        give self.client.request("GET",
+            GMAIL_BASE + "/users/me/messages/" + encodePart(messageId))
+    }
+
+    # Gmail takes the whole RFC 5322 message, base64url encoded. Not base64:
+    # the standard alphabet's + and / are not URL-safe and Gmail rejects them.
+    # `recipient`, not `to`: `to` is a keyword here (repeat i = 1 to n).
+    task send(recipient, subject, body, options = nil) {
+        lines = []
+        push(lines, "To: " + str(recipient))
+        when options != nil and options["cc"] != nil { push(lines, "Cc: " + str(options["cc"])) }
+        when options != nil and options["from"] != nil { push(lines, "From: " + str(options["from"])) }
+        push(lines, "Subject: " + str(subject))
+        contentType = "text/plain; charset=UTF-8"
+        when options != nil and options["html"] == true { contentType = "text/html; charset=UTF-8" }
+        push(lines, "MIME-Version: 1.0")
+        push(lines, "Content-Type: " + contentType)
+        push(lines, "")
+        push(lines, str(body))
+        raw = join(lines, "\r\n")
+
+        give self.client.request("POST", GMAIL_BASE + "/users/me/messages/send",
+            { "json": { "raw": b64url_encode(raw) } })
+    }
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task google(token) { give Google(token) }

@@ -245,12 +245,12 @@ export model SecureRandom {
     # Discarding the short tail above the last whole multiple removes it. The
     # expected number of extra draws is under one.
     static task randInt(minV, maxV) {
-        range = maxV - minV + 1
-        when range <= 1 { give minV }
-        limit = 2147483648 - (2147483648 % range)
+        span = maxV - minV + 1
+        when span <= 1 { give minV }
+        limit = 2147483648 - (2147483648 % span)
         raw = SecureRandom._raw31()
         while raw >= limit { raw = SecureRandom._raw31() }
-        give minV + (raw % range)
+        give minV + (raw % span)
     }
 
     # Secure random float in [0.0, 1.0)
@@ -370,7 +370,106 @@ export model HMAC {
 # PBKDF2 — Password-Based Key Derivation Function 2 (RFC 2898)
 # Uses HMAC-SHA256 as its PRF. Pure EZ implementation.
 # ============================================================================
+# ── native PBKDF2 ───────────────────────────────────────────────────────────
+#
+# The pure-EZ derivation below is correct but crosses the FFI boundary twice
+# per iteration, at roughly 1.5 ms each. At the iteration counts PBKDF2 exists
+# to require -- 15,000 for MongoDB's SCRAM, 600,000 for a password hash --
+# that is twenty seconds to twenty minutes.
+#
+# BCryptDeriveKeyPBKDF2 does the whole derivation inside one call. bcrypt.dll
+# is already loaded here for SecureRandom, so this costs nothing to offer.
+_fBCryptOpenAlg = os_get_func(__bcrypt, "BCryptOpenAlgorithmProvider")
+_fBCryptDerive  = os_get_func(__bcrypt, "BCryptDeriveKeyPBKDF2")
+_fBCryptCloseAlg = os_get_func(__bcrypt, "BCryptCloseAlgorithmProvider")
+
+_BCRYPT_ALG_HANDLE_HMAC_FLAG = 8
+
+# BCrypt names algorithms in UTF-16. Built byte by byte because an EZ string is
+# UTF-8, and handing the API one directly gives it a name it cannot match.
+task _wideString(text) {
+    body = str(text)
+    total = len(body)
+    buf = os_alloc((total + 1) * 2)
+    repeat i = 0 to total - 1 {
+        os_write_byte(buf, i * 2, ord(substr(body, i, 1)))
+        os_write_byte(buf, i * 2 + 1, 0)
+    }
+    os_write_byte(buf, total * 2, 0)
+    os_write_byte(buf, total * 2 + 1, 0)
+    give buf
+}
+
+task _bytesToBuffer(octets) {
+    size = len(octets)
+    when size == 0 { size = 1 }
+    buf = os_alloc(size)
+    index = 0
+    get b in octets {
+        os_write_byte(buf, index, b % 256)
+        index = index + 1
+    }
+    give buf
+}
+
+# Derives keyLen bytes from byte arrays, or nil when the native path is
+# unavailable. Never a partial or zeroed key: a silently weak result would be
+# worse than falling back.
+export task pbkdf2Native(passwordBytes, saltBytes, iterations, keyLen) {
+    when _fBCryptDerive == 0 or typeOf(_fBCryptDerive) == "nil" { give nil }
+    algName = nil
+    algHandle = nil
+    pwBuf = nil
+    saltBuf = nil
+    outBuf = nil
+    result = nil
+    try {
+        algName = _wideString("SHA256")
+        algHandle = os_alloc(8)
+        repeat i = 0 to 7 { os_write_byte(algHandle, i, 0) }
+        status = os_call(_fBCryptOpenAlg, "int", algHandle, algName, 0, _BCRYPT_ALG_HANDLE_HMAC_FLAG)
+        when status == 0 {
+            handle = os_read_int64(algHandle, 0)
+            pwBuf = _bytesToBuffer(passwordBytes)
+            saltBuf = _bytesToBuffer(saltBytes)
+            outBuf = os_alloc(keyLen)
+            status = os_call(_fBCryptDerive, "int", handle, pwBuf, len(passwordBytes),
+                             saltBuf, len(saltBytes), iterations, outBuf, keyLen, 0)
+            when status == 0 {
+                result = []
+                repeat i = 0 to keyLen - 1 { push(result, os_read_byte(outBuf, i)) }
+            }
+            os_call(_fBCryptCloseAlg, "int", handle, 0)
+        }
+    }
+    catch (e) { result = nil }
+    get p in [algName, algHandle, pwBuf, saltBuf, outBuf] {
+        when p != nil {
+            try { os_free(p) } catch (inner) { }
+        }
+    }
+    give result
+}
+
 export model PBKDF2 {
+    # Raw derived BYTES, native where possible. This is what SCRAM and any
+    # other protocol that feeds the key into further HMACs needs -- going
+    # through hex and back would be lossy busywork.
+    static task deriveBytes(passwordBytes, saltBytes, iterations, keyLen) {
+        fast = pbkdf2Native(passwordBytes, saltBytes, iterations, keyLen)
+        when fast != nil { give fast }
+        hex = PBKDF2.derive(bytesToString(passwordBytes), bytesToString(saltBytes), iterations, keyLen)
+        octets = []
+        index = 0
+        while index + 1 < len(hex) {
+            high = indexOf("0123456789abcdef", substr(hex, index, 1))
+            low = indexOf("0123456789abcdef", substr(hex, index + 1, 1))
+            push(octets, high * 16 + low)
+            index = index + 2
+        }
+        give octets
+    }
+
     # Derive a key from password + salt.
     # iterations: ≥100000 recommended  |  keyLen: bytes to output
     # Returns: lowercase hex string of keyLen bytes

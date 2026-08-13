@@ -1,0 +1,142 @@
+# ============================================================================
+# archive — test suite
+#   ez test.ez
+#
+# The two fixtures below are real files produced by a real compressor (Python's
+# gzip and zipfile, both DEFLATED), embedded as bytes so the suite needs
+# nothing installed. Decompressing something this package compressed would
+# only prove it agrees with itself; the point is to agree with everyone else.
+# ============================================================================
+
+use "archive"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+# A real gzip member holding "hello hello hello world world".
+GZ = [31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 203, 72, 205, 201, 201, 87, 200, 64, 34, 203, 243, 139, 114, 82, 32, 36, 0, 238, 8, 29, 120, 29, 0, 0, 0]
+# A real zip holding a.txt = "aaaaaaaaaabbbbbbbbbb", DEFLATED.
+ZP = [80, 75, 3, 4, 20, 0, 0, 0, 8, 0, 201, 99, 13, 93, 198, 10, 81, 40, 8, 0, 0, 0, 20, 0, 0, 0, 5, 0, 0, 0, 97, 46, 116, 120, 116, 75, 76, 132, 129, 36, 56, 0, 0, 80, 75, 1, 2, 20, 0, 20, 0, 0, 0, 8, 0, 201, 99, 13, 93, 198, 10, 81, 40, 8, 0, 0, 0, 20, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 1, 0, 0, 0, 0, 97, 46, 116, 120, 116, 80, 75, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0, 51, 0, 0, 0, 43, 0, 0, 0, 0, 0]
+
+out "archive tests"
+
+# ── CRC32, against published values ─────────────────────────────────────────
+check("crc32 of the empty string", crc32Text(""), 0)
+check("crc32(\"a\")", crc32Text("a"), 3904355907)
+# The check value every CRC-32 implementation is measured by.
+check("crc32(\"123456789\")", crc32Text("123456789"), 3421780262)
+check("crc32 of the pangram", crc32Text("The quick brown fox jumps over the lazy dog"), 1095738169)
+check("bytes and text agree", crc32Bytes(toBytes("abc")), crc32Text("abc"))
+
+# ── bytes ───────────────────────────────────────────────────────────────────
+check("round-trips low bytes", to_json(toBytes(fromBytes([0, 1, 2]))), to_json([0, 1, 2]))
+# The bytes above 127 are the ones a UTF-8 conversion would corrupt.
+check("round-trips high bytes", to_json(toBytes(fromBytes([200, 255, 128]))), to_json([200, 255, 128]))
+
+# ── decompressing a real gzip ───────────────────────────────────────────────
+check("recognised as gzip", Gzip.isGzip(GZ), true)
+check("not mistaken for zip", Zip.isZip(GZ), false)
+check("decompresses to the original", fromBytes(Gzip.decompress(GZ)), "hello hello hello world world")
+check("and to the right length", len(Gzip.decompress(GZ)), 29)
+
+# The trailer is a length and a checksum, and both are enforced. A truncated
+# download is the case this catches.
+truncated = []
+repeat i = 0 to len(GZ) - 2 { push(truncated, GZ[i]) }
+throws("a truncated gzip is rejected", || Gzip.decompress(truncated))
+
+corrupted = []
+get b in GZ { push(corrupted, b) }
+corrupted[len(corrupted) - 5] = (corrupted[len(corrupted) - 5] + 1) % 256
+throws("a corrupted checksum is rejected", || Gzip.decompress(corrupted))
+
+throws("a non-gzip is rejected", || Gzip.decompress([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                                    13, 14, 15, 16, 17, 18, 19, 20]))
+throws("something far too short", || Gzip.decompress([31, 139]))
+
+# ── decompressing a real zip ────────────────────────────────────────────────
+check("recognised as zip", Zip.isZip(ZP), true)
+entries = Zip.readBytes(ZP)
+check("one entry", len(entries), 1)
+check("its name", entries[0].name, "a.txt")
+# Method 8 is deflate -- this fixture really is compressed, not stored.
+check("it is deflated", entries[0].method, 8)
+check("its contents", entries[0].text(), "aaaaaaaaaabbbbbbbbbb")
+check("its size", entries[0].size(), 20)
+check("and the compressed form was smaller", entries[0].compressedSize < 20, true)
+
+throws("a non-zip is rejected", || Zip.readBytes([1, 2, 3, 4, 5]))
+
+# ── writing ─────────────────────────────────────────────────────────────────
+built = Zip.writeBytes({ "one.txt": "first", "dir/two.txt": "second" })
+check("what we write is a zip", Zip.isZip(built), true)
+readBack = Zip.readBytes(built)
+check("two entries", len(readBack), 2)
+names = []
+get e in readBack { push(names, e.name) }
+check("names survive", contains(to_json(names), "dir/two.txt"), true)
+byName = {}
+get e in readBack { byName[e.name] = e.text() }
+check("first entry", byName["one.txt"], "first")
+check("nested entry", byName["dir/two.txt"], "second")
+
+check("an empty archive is still valid", len(Zip.readBytes(Zip.writeBytes({}))), 0)
+check("an empty entry round-trips", Zip.readBytes(Zip.writeBytes({ "e.txt": "" }))[0].text(), "")
+
+# Every byte value has to survive, or the package is text-only.
+allBytes = []
+repeat i = 0 to 255 { push(allBytes, i) }
+binary = Zip.readBytes(Zip.writeBytes({ "bin": allBytes }))[0].bytes
+same = len(binary) == 256
+repeat i = 0 to 255 { when binary[i] != i { same = false } }
+check("all 256 byte values survive a zip", same, true)
+
+# The checksum this package writes must be the one it validates on the way in,
+# or its own files would fail to reopen.
+check("a written entry passes its own checksum", Zip.readBytes(Zip.writeBytes({ "x": "y" }))[0].text(), "y")
+
+gzRound = Gzip.compress(allBytes)
+check("what we write is gzip", Gzip.isGzip(gzRound), true)
+recovered = Gzip.decompress(gzRound)
+sameGz = len(recovered) == 256
+repeat i = 0 to 255 { when recovered[i] != i { sameGz = false } }
+check("all 256 byte values survive gzip", sameGz, true)
+check("text round-trips", Gzip.decompressText(Gzip.compressText("hello")), "hello")
+check("an empty payload round-trips", Gzip.decompressText(Gzip.compressText("")), "")
+
+long1 = ""
+repeat i = 1 to 400 { long1 = long1 + "the quick brown fox. " }
+check("a payload past one stored block round-trips",
+      Gzip.decompressText(Gzip.compressText(long1)), long1)
+
+# ── inflate itself ──────────────────────────────────────────────────────────
+# A stored DEFLATE block: header 1 (final, type 00), LEN 3, NLEN, then bytes.
+check("a stored block inflates",
+      fromBytes(inflateBytes([1, 3, 0, 252, 255, 97, 98, 99])), "abc")
+# The NLEN field is the one's complement of LEN and exists to catch corruption.
+throws("a bad stored length check is rejected",
+       || inflateBytes([1, 3, 0, 0, 0, 97, 98, 99]))
+throws("block type 3 is reserved", || inflateBytes([7, 0, 0, 0]))
+throws("a truncated stream is rejected", || inflateBytes([1, 10, 0]))
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

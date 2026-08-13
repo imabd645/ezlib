@@ -1,0 +1,28 @@
+# ============================================================================
+# webhook/compare.ez — comparing two secrets without leaking how they differ
+# ============================================================================
+
+# Constant-time string comparison.
+#
+# `a == b` stops at the first differing byte, so how long it takes reveals how
+# many leading bytes were right. Against an endpoint an attacker can call
+# repeatedly, that is enough to recover a valid signature one byte at a time --
+# the classic reason signature checks are written this way rather than the
+# obvious way.
+#
+# Every byte is examined and the differences are accumulated, so the work does
+# not depend on WHERE the mismatch is. The length check does still short-circuit;
+# a signature of the wrong length is not a secret worth protecting, and every
+# implementation of this does the same.
+export task constantTimeEquals(a, b) {
+    when a == nil or b == nil { give false }
+    left = str(a)
+    right = str(b)
+    when len(left) != len(right) { give false }
+    when len(left) == 0 { give true }
+    difference = 0
+    repeat i = 0 to len(left) - 1 {
+        difference = difference | (ord(substr(left, i, 1)) ^ ord(substr(right, i, 1)))
+    }
+    give difference == 0
+}

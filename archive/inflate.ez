@@ -1,0 +1,298 @@
+# ============================================================================
+# archive/inflate.ez — DEFLATE decompression, in EZ
+#
+# Windows ships no raw DEFLATE. The Compression API in Cabinet.dll does MSZIP,
+# XPRESS and LZMS; ntdll's RtlDecompressBuffer does LZNT1 and XPRESS. None of
+# them is the format inside a .zip or a .gz, so reading either means
+# implementing RFC 1951 here.
+#
+# zlib is used instead when it happens to be present (see zlib.ez) -- it is
+# far faster. This is the fallback that makes the package work with nothing
+# installed, which is the difference between "reads any zip" and "reads a zip
+# if you first install a DLL".
+#
+# The format, briefly, because the code is hard to follow without it:
+#
+#   A stream is a sequence of blocks. Each block starts with a final-block bit
+#   and a two-bit type: stored (raw bytes), fixed Huffman (a built-in code
+#   table), or dynamic Huffman (a code table the block carries itself).
+#   Compressed blocks emit either a literal byte or a (length, distance) pair
+#   meaning "copy length bytes from distance back in what you have already
+#   produced".
+#
+# Bits are read least-significant-first within each byte, which is the
+# opposite of the bit order used by the Huffman codes themselves.
+# ============================================================================
+
+# Length codes 257..285: the base length each represents, and how many extra
+# bits follow to refine it.
+LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+               35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+                3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+
+DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+             257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+             8193, 12289, 16385, 24577]
+DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+              7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+
+# The order the dynamic-block header lists code lengths in. It is not 0..18;
+# the awkward order puts the lengths most likely to be zero last so they can
+# be omitted.
+CODE_LENGTH_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+# ── bit reader ──────────────────────────────────────────────────────────────
+
+export model BitReader {
+    init(bytes) {
+        self.bytes = bytes
+        self.position = 0        # byte index
+        self.bit = 0             # bit index within that byte, 0 = least significant
+    }
+
+    task readBit() {
+        when self.position >= len(self.bytes) {
+            throw Exception("archive: the compressed stream ended in the middle of a block")
+        }
+        value = floor(self.bytes[self.position] / powerOfTwo(self.bit)) % 2
+        self.bit = self.bit + 1
+        when self.bit == 8 {
+            self.bit = 0
+            self.position = self.position + 1
+        }
+        give value
+    }
+
+    # `count` bits, least significant first.
+    task readBits(count) {
+        value = 0
+        multiplier = 1
+        repeat i = 1 to count {
+            value = value + self.readBit() * multiplier
+            multiplier = multiplier * 2
+        }
+        give value
+    }
+
+    # Stored blocks are byte-aligned, so any partial byte is discarded.
+    task alignToByte() {
+        when self.bit != 0 {
+            self.bit = 0
+            self.position = self.position + 1
+        }
+        give nil
+    }
+
+    task readByte() {
+        when self.position >= len(self.bytes) {
+            throw Exception("archive: the compressed stream ended early")
+        }
+        value = self.bytes[self.position]
+        self.position = self.position + 1
+        give value
+    }
+}
+
+task powerOfTwo(n) {
+    value = 1
+    repeat i = 1 to n { value = value * 2 }
+    give value
+}
+
+# ── Huffman ─────────────────────────────────────────────────────────────────
+
+# Builds a decoding table from a list of code lengths, one per symbol.
+#
+# The codes are CANONICAL: given only the lengths, both sides can derive the
+# same codes by assigning them in increasing order of length and, within a
+# length, in increasing symbol order. That is why a block only has to send the
+# lengths.
+export task buildHuffman(lengths) {
+    maxLength = 0
+    get l in lengths {
+        when l > maxLength { maxLength = l }
+    }
+    countPerLength = []
+    repeat i = 0 to maxLength { push(countPerLength, 0) }
+    get l in lengths {
+        when l > 0 { countPerLength[l] = countPerLength[l] + 1 }
+    }
+
+    firstCode = []
+    repeat i = 0 to maxLength { push(firstCode, 0) }
+    code = 0
+    repeat length = 1 to maxLength {
+        code = (code + countPerLength[length - 1]) * 2
+        firstCode[length] = code
+    }
+
+    # Keyed "length:code" so decoding can look up as it accumulates bits.
+    table = {}
+    nextCode = []
+    repeat i = 0 to maxLength { push(nextCode, firstCode[i]) }
+    symbol = 0
+    get l in lengths {
+        when l > 0 {
+            table[str(l) + ":" + str(nextCode[l])] = symbol
+            nextCode[l] = nextCode[l] + 1
+        }
+        symbol = symbol + 1
+    }
+    give { "table": table, "maxLength": maxLength }
+}
+
+# Reads one symbol. Huffman codes are stored most-significant-bit first, which
+# is the opposite of how the bit reader hands bits over, so the accumulated
+# code shifts left as each new bit arrives.
+export task decodeSymbol(reader, huffman) {
+    code = 0
+    length = 0
+    while length <= huffman["maxLength"] {
+        code = code * 2 + reader.readBit()
+        length = length + 1
+        key = str(length) + ":" + str(code)
+        when has_key(huffman["table"], key) { give huffman["table"][key] }
+    }
+    throw Exception("archive: an invalid Huffman code was found -- the data is corrupt or not DEFLATE")
+}
+
+# The fixed table from RFC 1951 section 3.2.6, used by BTYPE 01.
+task fixedLiteralLengths() {
+    lengths = []
+    repeat i = 0 to 143 { push(lengths, 8) }
+    repeat i = 144 to 255 { push(lengths, 9) }
+    repeat i = 256 to 279 { push(lengths, 7) }
+    repeat i = 280 to 287 { push(lengths, 8) }
+    give lengths
+}
+
+task fixedDistanceLengths() {
+    lengths = []
+    repeat i = 0 to 29 { push(lengths, 5) }
+    give lengths
+}
+
+# ── the main loop ───────────────────────────────────────────────────────────
+
+# Raw DEFLATE (RFC 1951) to a byte array.
+export task inflateBytes(bytes) {
+    reader = BitReader(bytes)
+    result = []
+    finished = false
+
+    while finished == false {
+        isFinal = reader.readBit()
+        blockType = reader.readBits(2)
+
+        when blockType == 0 { inflateStored(reader, result) }
+        other when blockType == 1 {
+            inflateBlock(reader, result, buildHuffman(fixedLiteralLengths()),
+                         buildHuffman(fixedDistanceLengths()))
+        }
+        other when blockType == 2 {
+            tables = readDynamicTables(reader)
+            inflateBlock(reader, result, tables["literal"], tables["distance"])
+        }
+        other {
+            throw Exception("archive: block type 3 is reserved -- the data is corrupt or not DEFLATE")
+        }
+        when isFinal == 1 { finished = true }
+    }
+    give result
+}
+
+task inflateStored(reader, result) {
+    reader.alignToByte()
+    low = reader.readByte()
+    high = reader.readByte()
+    length = low + high * 256
+    # NLEN is the one's complement of LEN and exists purely as a check.
+    nlow = reader.readByte()
+    nhigh = reader.readByte()
+    check = nlow + nhigh * 256
+    when length + check != 65535 {
+        throw Exception("archive: a stored block's length check failed -- the data is corrupt")
+    }
+    repeat i = 1 to length { push(result, reader.readByte()) }
+    give nil
+}
+
+task readDynamicTables(reader) {
+    literalCount = reader.readBits(5) + 257
+    distanceCount = reader.readBits(5) + 1
+    codeLengthCount = reader.readBits(4) + 4
+
+    codeLengths = []
+    repeat i = 0 to 18 { push(codeLengths, 0) }
+    repeat i = 0 to codeLengthCount - 1 {
+        codeLengths[CODE_LENGTH_ORDER[i]] = reader.readBits(3)
+    }
+    codeLengthHuffman = buildHuffman(codeLengths)
+
+    # The literal and distance lengths are themselves Huffman-coded, with
+    # three symbols meaning "repeat".
+    combined = []
+    total = literalCount + distanceCount
+    while len(combined) < total {
+        symbol = decodeSymbol(reader, codeLengthHuffman)
+        when symbol < 16 { push(combined, symbol) }
+        other when symbol == 16 {
+            when len(combined) == 0 {
+                throw Exception("archive: a repeat code appeared before any length to repeat")
+            }
+            previous = combined[len(combined) - 1]
+            repeat i = 1 to reader.readBits(2) + 3 { push(combined, previous) }
+        }
+        other when symbol == 17 {
+            repeat i = 1 to reader.readBits(3) + 3 { push(combined, 0) }
+        }
+        other {
+            repeat i = 1 to reader.readBits(7) + 11 { push(combined, 0) }
+        }
+    }
+
+    literalLengths = []
+    repeat i = 0 to literalCount - 1 { push(literalLengths, combined[i]) }
+    distanceLengths = []
+    repeat i = literalCount to total - 1 { push(distanceLengths, combined[i]) }
+
+    give {
+        "literal": buildHuffman(literalLengths),
+        "distance": buildHuffman(distanceLengths)
+    }
+}
+
+task inflateBlock(reader, result, literalHuffman, distanceHuffman) {
+    while true {
+        symbol = decodeSymbol(reader, literalHuffman)
+        when symbol < 256 {
+            push(result, symbol)
+        }
+        other when symbol == 256 { give nil }
+        other {
+            index = symbol - 257
+            when index >= len(LENGTH_BASE) {
+                throw Exception("archive: an invalid length code was found")
+            }
+            length = LENGTH_BASE[index] + reader.readBits(LENGTH_EXTRA[index])
+
+            distanceSymbol = decodeSymbol(reader, distanceHuffman)
+            when distanceSymbol >= len(DIST_BASE) {
+                throw Exception("archive: an invalid distance code was found")
+            }
+            distance = DIST_BASE[distanceSymbol] + reader.readBits(DIST_EXTRA[distanceSymbol])
+            when distance > len(result) {
+                throw Exception("archive: a back-reference points before the start of the data")
+            }
+
+            # Copied one byte at a time ON PURPOSE. The source can overlap the
+            # destination -- a run of the same byte is encoded as distance 1
+            # and a long length -- so a bulk copy of the original bytes would
+            # produce the wrong output.
+            start = len(result) - distance
+            repeat i = 0 to length - 1 { push(result, result[start + i]) }
+        }
+    }
+    give nil
+}

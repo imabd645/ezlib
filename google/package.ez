@@ -1,0 +1,11 @@
+{
+  "name": "google",
+  "version": "1.0.0",
+  "description": "Google Workspace APIs for EZ. Sheets, Drive, Calendar and Gmail over an OAuth access token.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["google", "sheets", "drive", "gmail", "calendar", "workspace", "api"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "httpx": "^1.0.0" }
+}

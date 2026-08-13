@@ -1,0 +1,11 @@
+{
+  "name": "mysql",
+  "version": "1.0.0",
+  "description": "MySQL and MariaDB for EZ over pure TCP. Real prepared statements, transactions, type mapping and error codes. No client library to install.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["mysql", "mariadb", "database", "sql", "prepared-statements", "tcp"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "socket": "^1.0.0", "crypto": "^1.0.0" }
+}

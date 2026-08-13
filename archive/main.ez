@@ -1,0 +1,406 @@
+# ============================================================================
+# archive — zip and gzip for EZ
+#
+#   use "archive"
+#
+#   entries = Zip.read("export.zip")          # every entry, decompressed
+#   Zip.write("out.zip", { "notes.txt": "hello" })
+#
+#   text = Gzip.decompressText(readFile("page.html.gz"))
+#   writeFile("out.gz", Gzip.compressText("hello"))
+#
+# Windows ships no raw DEFLATE -- the Compression API does MSZIP, XPRESS and
+# LZMS, none of which is what a .zip or .gz contains -- so this package brings
+# its own (see inflate.ez). Nothing needs installing.
+#
+# What that means in practice:
+#
+#   READING is complete. Stored and deflated entries both work, which covers
+#   every zip and gzip you are likely to be handed.
+#
+#   WRITING produces valid, universally readable files, but does not compress:
+#   entries are stored, and a gzip member is written as stored DEFLATE blocks.
+#   The output is bigger than the input by a few bytes per 64KB. Compressing
+#   as well needs an encoder this package does not have yet, and writing a
+#   file that claims to be deflated but is not would be worse than saying so.
+#
+#   Decompression is EZ, not C, so it is not fast. Fine for a config bundle,
+#   a data export, an uploaded document; not for a multi-gigabyte archive.
+# ============================================================================
+
+use "archive/inflate.ez"
+use "archive/crc32.ez"
+
+export METHOD_STORED = 0
+export METHOD_DEFLATE = 8
+
+export model ArchiveError {
+    init(message) { self.message = message }
+    task toString() { give "ArchiveError: " + self.message }
+}
+
+# ── bytes ───────────────────────────────────────────────────────────────────
+
+export task toBytes(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+export task fromBytes(octets) { give bytesToString(octets) }
+
+task readU16(bytes, offset) { give bytes[offset] + bytes[offset + 1] * 256 }
+
+task readU32(bytes, offset) {
+    give bytes[offset] + bytes[offset + 1] * 256 +
+         bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216
+}
+
+task writeU16(target, value) {
+    push(target, value % 256)
+    push(target, floor(value / 256) % 256)
+    give target
+}
+
+task writeU32(target, value) {
+    remaining = value
+    repeat i = 1 to 4 {
+        push(target, remaining % 256)
+        remaining = floor(remaining / 256)
+    }
+    give target
+}
+
+task pushBytes(target, source) {
+    get b in source { push(target, b) }
+    give target
+}
+
+# Stored DEFLATE blocks: a 3-bit header, then byte-aligned LEN, ~LEN and the
+# raw bytes. Valid DEFLATE that any decompressor reads, just not compressed.
+task storedDeflate(bytes) {
+    result = []
+    total = len(bytes)
+    when total == 0 {
+        push(result, 1)          # BFINAL = 1, BTYPE = 00
+        writeU16(result, 0)
+        writeU16(result, 65535)
+        give result
+    }
+    offset = 0
+    while offset < total {
+        chunk = 65535
+        when total - offset < chunk { chunk = total - offset }
+        isFinal = 0
+        when offset + chunk >= total { isFinal = 1 }
+        push(result, isFinal)
+        writeU16(result, chunk)
+        writeU16(result, 65535 - chunk)
+        repeat i = 0 to chunk - 1 { push(result, bytes[offset + i]) }
+        offset = offset + chunk
+    }
+    give result
+}
+
+# ============================================================================
+# gzip (RFC 1952)
+# ============================================================================
+
+export model Gzip {
+
+    # Raw bytes in, raw bytes out.
+    static task decompress(bytes) {
+        when len(bytes) < 18 {
+            throw ArchiveError("not a gzip file: too short to hold a header and trailer")
+        }
+        when bytes[0] != 31 or bytes[1] != 139 {
+            throw ArchiveError("not a gzip file: the magic bytes are missing")
+        }
+        when bytes[2] != 8 {
+            throw ArchiveError(`unsupported gzip compression method {bytes[2]} (only deflate is defined)`)
+        }
+        flags = bytes[3]
+        offset = 10
+
+        # FEXTRA
+        when floor(flags / 4) % 2 == 1 {
+            extraLength = readU16(bytes, offset)
+            offset = offset + 2 + extraLength
+        }
+        # FNAME, a null-terminated original filename
+        when floor(flags / 8) % 2 == 1 {
+            while offset < len(bytes) and bytes[offset] != 0 { offset = offset + 1 }
+            offset = offset + 1
+        }
+        # FCOMMENT
+        when floor(flags / 16) % 2 == 1 {
+            while offset < len(bytes) and bytes[offset] != 0 { offset = offset + 1 }
+            offset = offset + 1
+        }
+        # FHCRC
+        when floor(flags / 2) % 2 == 1 { offset = offset + 2 }
+
+        # The last eight bytes are the CRC and the uncompressed size.
+        compressed = []
+        limit = len(bytes) - 8
+        i = offset
+        while i < limit {
+            push(compressed, bytes[i])
+            i = i + 1
+        }
+        result = inflateBytes(compressed)
+
+        expectedCrc = readU32(bytes, len(bytes) - 8)
+        expectedSize = readU32(bytes, len(bytes) - 4)
+        when len(result) != expectedSize {
+            throw ArchiveError(`gzip length check failed: the trailer says {expectedSize} bytes but {len(result)} came out`)
+        }
+        # The checksum is the whole reason gzip carries a trailer; skipping it
+        # would let a truncated or corrupted file pass silently.
+        actualCrc = crc32Bytes(result)
+        when actualCrc != expectedCrc {
+            throw ArchiveError("gzip checksum failed: the data is corrupt")
+        }
+        give result
+    }
+
+    static task decompressText(text) { give fromBytes(Gzip.decompress(toBytes(text))) }
+
+    # Valid gzip, stored rather than compressed. See the note at the top.
+    static task compress(bytes, filename = nil) {
+        result = []
+        push(result, 31)
+        push(result, 139)
+        push(result, 8)                       # deflate
+        flags = 0
+        when filename != nil { flags = 8 }
+        push(result, flags)
+        writeU32(result, 0)                   # mtime, left unset
+        push(result, 0)                       # extra flags
+        push(result, 255)                     # unknown OS
+        when filename != nil {
+            pushBytes(result, toBytes(filename))
+            push(result, 0)
+        }
+        pushBytes(result, storedDeflate(bytes))
+        writeU32(result, crc32Bytes(bytes))
+        writeU32(result, len(bytes))
+        give result
+    }
+
+    static task compressText(text) { give fromBytes(Gzip.compress(toBytes(text))) }
+
+    static task isGzip(bytes) {
+        give len(bytes) > 2 and bytes[0] == 31 and bytes[1] == 139
+    }
+}
+
+# ============================================================================
+# zip
+# ============================================================================
+
+export model ZipEntry {
+    init(name, bytes, method, crc, compressedSize) {
+        self.name = name
+        self.bytes = bytes
+        self.method = method
+        self.crc = crc
+        self.compressedSize = compressedSize
+    }
+    task size() { give len(self.bytes) }
+    task text() { give fromBytes(self.bytes) }
+    task isDirectory() { give endsWith(self.name, "/") }
+    task toString() { give `ZipEntry({self.name}, {len(self.bytes)} bytes)` }
+}
+
+export model Zip {
+
+    # Every entry in an archive, decompressed, keyed by name.
+    #
+    # Read through the CENTRAL DIRECTORY at the end of the file rather than by
+    # walking local headers from the front. That is what the format intends:
+    # the directory is authoritative, it is how a zip with a prepended
+    # self-extractor still reads, and a local header may not know its own
+    # sizes when the entry was written as a stream.
+    static task readBytes(bytes) {
+        eocd = Zip.findEndOfCentralDirectory(bytes)
+        when eocd < 0 {
+            throw ArchiveError("not a zip file: no end-of-central-directory record found")
+        }
+        count = readU16(bytes, eocd + 10)
+        directoryOffset = readU32(bytes, eocd + 16)
+
+        entries = []
+        offset = directoryOffset
+        repeat i = 1 to count {
+            when readU32(bytes, offset) != 33639248 {
+                throw ArchiveError("the central directory is corrupt")
+            }
+            method = readU16(bytes, offset + 10)
+            crc = readU32(bytes, offset + 16)
+            compressedSize = readU32(bytes, offset + 20)
+            uncompressedSize = readU32(bytes, offset + 24)
+            nameLength = readU16(bytes, offset + 28)
+            extraLength = readU16(bytes, offset + 30)
+            commentLength = readU16(bytes, offset + 32)
+            localOffset = readU32(bytes, offset + 42)
+
+            nameBytes = []
+            repeat k = 0 to nameLength - 1 { push(nameBytes, bytes[offset + 46 + k]) }
+            name = fromBytes(nameBytes)
+
+            data = Zip.readLocalEntry(bytes, localOffset, method, compressedSize, uncompressedSize, name, crc)
+            push(entries, ZipEntry(name, data, method, crc, compressedSize))
+            offset = offset + 46 + nameLength + extraLength + commentLength
+        }
+        give entries
+    }
+
+    static task readLocalEntry(bytes, localOffset, method, compressedSize, uncompressedSize, name, crc) {
+        when readU32(bytes, localOffset) != 67324752 {
+            throw ArchiveError(`the local header for '{name}' is corrupt`)
+        }
+        # The local header's own name and extra lengths are used, because they
+        # can legitimately differ from the central directory's.
+        nameLength = readU16(bytes, localOffset + 26)
+        extraLength = readU16(bytes, localOffset + 28)
+        start = localOffset + 30 + nameLength + extraLength
+
+        raw = []
+        repeat i = 0 to compressedSize - 1 { push(raw, bytes[start + i]) }
+
+        when method == METHOD_STORED { give Zip.verify(raw, crc, name) }
+        when method == METHOD_DEFLATE { give Zip.verify(inflateBytes(raw), crc, name) }
+        throw ArchiveError(`entry '{name}' uses compression method {method}, which this package does not implement (only stored and deflate)`)
+    }
+
+    # A directory entry has a zero CRC and no data; everything else is checked.
+    static task verify(data, crc, name) {
+        when crc == 0 and len(data) == 0 { give data }
+        actual = crc32Bytes(data)
+        when actual != crc {
+            throw ArchiveError(`entry '{name}' failed its checksum -- the archive is corrupt`)
+        }
+        give data
+    }
+
+    # The EOCD is at the end, but a trailing comment can push it back by up to
+    # 64KB, so it is searched for backwards rather than assumed to be last.
+    static task findEndOfCentralDirectory(bytes) {
+        start = len(bytes) - 22
+        limit = start - 65536
+        when limit < 0 { limit = 0 }
+        i = start
+        while i >= limit {
+            when i >= 0 and readU32(bytes, i) == 101010256 { give i }
+            i = i - 1
+        }
+        give -1
+    }
+
+    static task read(path) { give Zip.readBytes(toBytes(readFile(path))) }
+
+    # Name to text, for the common case.
+    static task readAll(path) {
+        contents = {}
+        get entry in Zip.read(path) {
+            when entry.isDirectory() == false { contents[entry.name] = entry.text() }
+        }
+        give contents
+    }
+
+    static task names(path) {
+        found = []
+        get entry in Zip.read(path) { push(found, entry.name) }
+        give found
+    }
+
+    # `files` maps name to text or to a byte array. Entries are STORED.
+    static task writeBytes(files) {
+        localParts = []
+        directory = []
+        offset = 0
+        count = 0
+
+        get name in keys(files) {
+            content = files[name]
+            data = content
+            when typeOf(content) != "array" { data = toBytes(str(content)) }
+            crc = crc32Bytes(data)
+            nameBytes = toBytes(str(name))
+
+            local = []
+            writeU32(local, 67324752)          # local file header signature
+            writeU16(local, 20)                # version needed
+            writeU16(local, 0)                 # flags
+            writeU16(local, METHOD_STORED)
+            writeU16(local, 0)                 # mod time
+            writeU16(local, 0)                 # mod date
+            writeU32(local, crc)
+            writeU32(local, len(data))         # compressed size
+            writeU32(local, len(data))         # uncompressed size
+            writeU16(local, len(nameBytes))
+            writeU16(local, 0)                 # extra length
+            pushBytes(local, nameBytes)
+            pushBytes(local, data)
+            push(localParts, local)
+
+            central = []
+            writeU32(central, 33639248)        # central directory signature
+            writeU16(central, 20)              # version made by
+            writeU16(central, 20)              # version needed
+            writeU16(central, 0)               # flags
+            writeU16(central, METHOD_STORED)
+            writeU16(central, 0)
+            writeU16(central, 0)
+            writeU32(central, crc)
+            writeU32(central, len(data))
+            writeU32(central, len(data))
+            writeU16(central, len(nameBytes))
+            writeU16(central, 0)               # extra
+            writeU16(central, 0)               # comment
+            writeU16(central, 0)               # disk number
+            writeU16(central, 0)               # internal attributes
+            writeU32(central, 0)               # external attributes
+            writeU32(central, offset)          # offset of the local header
+            pushBytes(central, nameBytes)
+            push(directory, central)
+
+            offset = offset + len(local)
+            count = count + 1
+        }
+
+        result = []
+        get part in localParts { pushBytes(result, part) }
+        directoryStart = len(result)
+        get part in directory { pushBytes(result, part) }
+        directorySize = len(result) - directoryStart
+
+        writeU32(result, 101010256)            # end of central directory
+        writeU16(result, 0)                    # disk number
+        writeU16(result, 0)                    # disk with the directory
+        writeU16(result, count)
+        writeU16(result, count)
+        writeU32(result, directorySize)
+        writeU32(result, directoryStart)
+        writeU16(result, 0)                    # comment length
+        give result
+    }
+
+    static task write(path, files) {
+        writeFile(path, fromBytes(Zip.writeBytes(files)))
+        give true
+    }
+
+    static task isZip(bytes) {
+        give len(bytes) > 4 and bytes[0] == 80 and bytes[1] == 75
+    }
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task unzip(path) { give Zip.readAll(path) }
+export task zipFiles(path, files) { give Zip.write(path, files) }
+export task gunzipText(text) { give Gzip.decompressText(text) }
+export task gzipText(text) { give Gzip.compressText(text) }

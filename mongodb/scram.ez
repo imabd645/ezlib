@@ -1,0 +1,116 @@
+# ============================================================================
+# mongodb/scram.ez — SCRAM-SHA-256 authentication (RFC 5802)
+#
+# The password never crosses the connection, in any form. Both sides derive a
+# key from it with PBKDF2 and then prove they know that key by exchanging
+# HMACs over a transcript of the conversation so far. The transcript includes
+# nonces from both parties, so a captured exchange cannot be replayed, and the
+# server stores only a derived value -- a stolen database does not yield
+# passwords.
+# ============================================================================
+
+use "crypto"
+
+task toBytes(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+task hmacBytes(keyBytes, messageBytes) {
+    give HMAC.raw(keyBytes, messageBytes, 32780, 32, 64)
+}
+
+task sha256Bytes(byteArray) { give Hash.sha256Bytes(bytesToString(byteArray)) }
+
+task xorBytes(a, b) {
+    result = []
+    repeat i = 0 to len(a) - 1 { push(result, a[i] ^ b[i]) }
+    give result
+}
+
+export task base64Of(byteArray) { give Base64.encode(byteArray) }
+export task base64ToBytes(text) { give Base64.decodeToBytes(text) }
+
+# A fresh nonce per conversation, from a CSPRNG. A predictable one lets an
+# observer replay the exchange, which is the whole thing the nonce prevents.
+export task makeNonce() {
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    result = ""
+    get b in SecureRandom.bytes(24) { result = result + substr(alphabet, b % 62, 1) }
+    give result
+}
+
+# "r=<nonce>,s=<salt>,i=<iterations>" and friends.
+export task parseFields(text) {
+    fields = {}
+    get piece in split(str(text), ",") {
+        when contains(piece, "=") {
+            at = indexOf(piece, "=")
+            fields[substr(piece, 0, at)] = substr(piece, at + 1, len(piece) - at - 1)
+        }
+    }
+    give fields
+}
+
+export task clientFirstBare(username) { give "n=" + escapeName(username) + ",r=" + makeNonce() }
+
+# A username may contain "=" or ",", which are the field separators, so SCRAM
+# defines its own escapes for them.
+task escapeName(username) {
+    body = replace(str(username), "=", "=3D")
+    give replace(body, ",", "=2C")
+}
+
+# Given the server's first message, produce the client's final message and the
+# signature needed to verify the server's reply.
+export task clientFinal(password, clientFirstBareText, serverFirstText) {
+    fields = parseFields(serverFirstText)
+    combinedNonce = fields["r"]
+    salt = base64ToBytes(fields["s"])
+    iterations = num(fields["i"])
+
+    when combinedNonce == nil or salt == nil {
+        throw Exception("mongodb: the server's SCRAM reply was malformed")
+    }
+    # The server must extend the client's nonce, not replace it. Skipping this
+    # check is what lets an attacker in the middle choose the whole nonce.
+    when startsWith(combinedNonce, substr(clientFirstBareText, indexOf(clientFirstBareText, ",r=") + 3,
+                                          len(clientFirstBareText))) == false {
+        throw Exception("mongodb: the server's nonce does not extend the client's -- the exchange has been tampered with")
+    }
+
+    saltedPassword = PBKDF2.deriveBytes(toBytes(password), salt, iterations, 32)
+    clientKey = hmacBytes(saltedPassword, toBytes("Client Key"))
+    storedKey = sha256Bytes(clientKey)
+
+    withoutProof = "c=biws,r=" + combinedNonce
+    authMessage = clientFirstBareText + "," + serverFirstText + "," + withoutProof
+
+    clientSignature = hmacBytes(storedKey, toBytes(authMessage))
+    clientProof = xorBytes(clientKey, clientSignature)
+
+    serverKey = hmacBytes(saltedPassword, toBytes("Server Key"))
+    serverSignature = hmacBytes(serverKey, toBytes(authMessage))
+
+    give {
+        "message": withoutProof + ",p=" + base64Of(clientProof),
+        "serverSignature": base64Of(serverSignature)
+    }
+}
+
+# The server proves it knew the stored key too. Skipping this means
+# authenticating TO an impostor, which is the half of mutual authentication
+# everyone forgets.
+export task verifyServer(serverFinalText, expectedSignature) {
+    fields = parseFields(serverFinalText)
+    when fields["v"] == nil { give false }
+    given = fields["v"]
+    when len(given) != len(expectedSignature) { give false }
+    difference = 0
+    repeat i = 0 to len(given) - 1 {
+        difference = difference | (ord(substr(given, i, 1)) ^ ord(substr(expectedSignature, i, 1)))
+    }
+    give difference == 0
+}

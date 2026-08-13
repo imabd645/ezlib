@@ -1,0 +1,77 @@
+# ============================================================================
+# search/ndjson.ez — compact JSON, for Elasticsearch's bulk endpoint
+#
+# EZ's to_json() always pretty-prints, with newlines and indentation. The bulk
+# API is newline-DELIMITED: one document per line, and a newline inside a
+# document ends it early. Pretty-printed JSON therefore produces a body the
+# server rejects with a parse error that does not say why.
+#
+# So this emits the same JSON on a single line. It is not a general
+# replacement for to_json -- it exists because the wire format demands it.
+# ============================================================================
+
+# One line, no newlines anywhere inside.
+export task compactJson(value) {
+    t = typeOf(value)
+    when t == "nil" { give "null" }
+    when t == "bool" {
+        when value { give "true" }
+        give "false"
+    }
+    when t == "integer" { give str(value) }
+    when t == "float" { give str(value) }
+    when t == "array" {
+        pieces = []
+        get item in value { push(pieces, compactJson(item)) }
+        give "[" + join(pieces, ",") + "]"
+    }
+    when t == "dictionary" {
+        pieces = []
+        get key in keys(value) {
+            push(pieces, jsonString(str(key)) + ":" + compactJson(value[key]))
+        }
+        give "{" + join(pieces, ",") + "}"
+    }
+    give jsonString(str(value))
+}
+
+# A JSON string literal. The escapes are not optional: an unescaped quote or
+# backslash produces invalid JSON, and a raw newline inside a bulk document
+# splits it in two.
+export task jsonString(text) {
+    # BACKSLASH is chr(92), not a literal.
+    #
+    # An EZ string literal cannot express one: "\n" collapses to a single
+    # newline byte, exactly like "\n". So the JSON escape sequence -- a
+    # backslash followed by the letter n, two characters -- has to be built
+    # from the code point. Written the obvious way every escape below emitted
+    # the RAW control character instead, which is invalid JSON and splits a
+    # bulk document in two.
+    BS = chr(92)
+    QUOTE = chr(34)
+    result = QUOTE
+    body = str(text)
+    repeat i = 0 to len(body) - 1 {
+        ch = substr(body, i, 1)
+        code = ord(ch)
+        when code == 34 { result = result + BS + QUOTE }
+        other when code == 92 { result = result + BS + BS }
+        other when code == 10 { result = result + BS + "n" }
+        other when code == 13 { result = result + BS + "r" }
+        other when code == 9 { result = result + BS + "t" }
+        other when code == 8 { result = result + BS + "b" }
+        other when code == 12 { result = result + BS + "f" }
+        # Other control characters have no short escape and must go as a
+        # \u00XX sequence; sent raw they are invalid JSON.
+        other when code < 32 { result = result + BS + "u00" + hexPair(code) }
+        # Bytes above 127 are already the UTF-8 encoding of the character,
+        # which JSON accepts directly.
+        other { result = result + ch }
+    }
+    give result + QUOTE
+}
+
+task hexPair(code) {
+    digits = "0123456789abcdef"
+    give substr(digits, floor(code / 16), 1) + substr(digits, code % 16, 1)
+}

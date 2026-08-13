@@ -1,0 +1,11 @@
+{
+  "name": "webhook",
+  "version": "1.0.0",
+  "description": "Inbound webhook signature verification for EZ. Stripe, GitHub, Slack, Shopify and Twilio schemes, with constant-time comparison and replay protection.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["webhook", "signature", "hmac", "stripe", "github", "slack", "security"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "crypto": "^1.0.0" }
+}

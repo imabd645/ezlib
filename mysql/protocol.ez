@@ -1,0 +1,220 @@
+# ============================================================================
+# mysql/protocol.ez — the wire format
+#
+# MySQL speaks a binary protocol, not a text one, so everything here works in
+# BYTE ARRAYS and converts to a string only at the moment of sending.
+#
+# That is deliberate. An EZ string is UTF-8, and chr(200) produces a two-byte
+# sequence rather than the single byte 200 -- build a packet with chr() and
+# every byte above 127 is silently doubled, which corrupts the length prefix
+# and desynchronises the connection. bytesToString() copies bytes verbatim and
+# is the only safe way out. Coming back the other way, ord(substr(s, i, 1)) IS
+# byte-exact, because substr indexes bytes.
+# ============================================================================
+
+# ── little-endian integers ──────────────────────────────────────────────────
+
+export task readUint(bytes, offset, width) {
+    value = 0
+    multiplier = 1
+    repeat i = 0 to width - 1 {
+        value = value + bytes[offset + i] * multiplier
+        multiplier = multiplier * 256
+    }
+    give value
+}
+
+export task writeUint(target, value, width) {
+    remaining = value
+    repeat i = 1 to width {
+        push(target, remaining % 256)
+        remaining = floor(remaining / 256)
+    }
+    give target
+}
+
+# ── length-encoded integers ─────────────────────────────────────────────────
+#
+# One byte under 251, otherwise a marker byte and 2, 3 or 8 more. 0xfb is NULL
+# in a result row and 0xff is an error packet, neither of which is a number.
+
+export task readLenencInt(bytes, offset) {
+    first = bytes[offset]
+    when first < 251 { give { "value": first, "next": offset + 1 } }
+    when first == 252 { give { "value": readUint(bytes, offset + 1, 2), "next": offset + 3 } }
+    when first == 253 { give { "value": readUint(bytes, offset + 1, 3), "next": offset + 4 } }
+    when first == 254 { give { "value": readUint(bytes, offset + 1, 8), "next": offset + 9 } }
+    # 251 marks SQL NULL.
+    give { "value": nil, "next": offset + 1 }
+}
+
+export task writeLenencInt(target, value) {
+    when value < 251 {
+        push(target, value)
+        give target
+    }
+    when value < 65536 {
+        push(target, 252)
+        give writeUint(target, value, 2)
+    }
+    when value < 16777216 {
+        push(target, 253)
+        give writeUint(target, value, 3)
+    }
+    push(target, 254)
+    give writeUint(target, value, 8)
+}
+
+export task readLenencString(bytes, offset) {
+    header = readLenencInt(bytes, offset)
+    when header["value"] == nil { give { "value": nil, "next": header["next"] } }
+    start = header["next"]
+    length = header["value"]
+    piece = []
+    repeat i = 0 to length - 1 { push(piece, bytes[start + i]) }
+    give { "value": bytesToString(piece), "next": start + length }
+}
+
+export task writeLenencString(target, text) {
+    body = str(text)
+    writeLenencInt(target, len(body))
+    repeat i = 0 to len(body) - 1 { push(target, ord(substr(body, i, 1))) }
+    give target
+}
+
+export task writeNullString(target, text) {
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(target, ord(substr(body, i, 1))) }
+    push(target, 0)
+    give target
+}
+
+export task readNullString(bytes, offset) {
+    piece = []
+    i = offset
+    while i < len(bytes) and bytes[i] != 0 {
+        push(piece, bytes[i])
+        i = i + 1
+    }
+    give { "value": bytesToString(piece), "next": i + 1 }
+}
+
+export task stringToBytes(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+# ── packet framing ──────────────────────────────────────────────────────────
+#
+# Every packet is a 3-byte little-endian payload length, a 1-byte sequence
+# number, then the payload. The sequence number has to be echoed back and
+# incremented or the server drops the connection.
+
+export MAX_PAYLOAD = 16777215
+
+export task framePacket(payloadBytes, sequence) {
+    result = []
+    writeUint(result, len(payloadBytes), 3)
+    push(result, sequence % 256)
+    get b in payloadBytes { push(result, b) }
+    give bytesToString(result)
+}
+
+# ── packet types ────────────────────────────────────────────────────────────
+
+export task isError(payload) { give len(payload) > 0 and payload[0] == 255 }
+export task isOk(payload) { give len(payload) > 0 and payload[0] == 0 }
+# An EOF packet is 0xfe with a payload under 9 bytes. The length test matters:
+# 0xfe also introduces an 8-byte length-encoded integer, and a row whose first
+# column happens to be that long would otherwise be read as end-of-results.
+export task isEof(payload) { give len(payload) > 0 and payload[0] == 254 and len(payload) < 9 }
+export task isLocalInfile(payload) { give len(payload) > 0 and payload[0] == 251 }
+
+# ERR packet: 0xff, 2-byte code, '#', 5-byte SQLSTATE, then the message.
+export task readError(payload) {
+    code = readUint(payload, 1, 2)
+    offset = 3
+    state = ""
+    when len(payload) > 3 and payload[3] == 35 {
+        state = bytesToString(sliceBytes(payload, 4, 5))
+        offset = 9
+    }
+    message = bytesToString(sliceBytes(payload, offset, len(payload) - offset))
+    give { "code": code, "sqlstate": state, "message": message }
+}
+
+# OK packet: 0x00, affected rows, last insert id, status flags, warnings.
+export task readOk(payload) {
+    cursor = readLenencInt(payload, 1)
+    affected = cursor["value"]
+    cursor = readLenencInt(payload, cursor["next"])
+    insertId = cursor["value"]
+    status = 0
+    when cursor["next"] + 1 < len(payload) { status = readUint(payload, cursor["next"], 2) }
+    give { "affected": affected, "insertId": insertId, "status": status }
+}
+
+export task sliceBytes(bytes, offset, length) {
+    piece = []
+    limit = offset + length
+    when limit > len(bytes) { limit = len(bytes) }
+    i = offset
+    while i < limit {
+        push(piece, bytes[i])
+        i = i + 1
+    }
+    give piece
+}
+
+# ── column types ────────────────────────────────────────────────────────────
+
+export TYPE_DECIMAL = 0
+export TYPE_TINY = 1
+export TYPE_SHORT = 2
+export TYPE_LONG = 3
+export TYPE_FLOAT = 4
+export TYPE_DOUBLE = 5
+export TYPE_NULL = 6
+export TYPE_TIMESTAMP = 7
+export TYPE_LONGLONG = 8
+export TYPE_INT24 = 9
+export TYPE_DATE = 10
+export TYPE_TIME = 11
+export TYPE_DATETIME = 12
+export TYPE_YEAR = 13
+export TYPE_NEWDATE = 14
+export TYPE_VARCHAR = 15
+export TYPE_BIT = 16
+export TYPE_NEWDECIMAL = 246
+export TYPE_BLOB = 252
+export TYPE_VAR_STRING = 253
+export TYPE_STRING = 254
+
+export task isIntegerType(t) {
+    give t == TYPE_TINY or t == TYPE_SHORT or t == TYPE_LONG or
+         t == TYPE_LONGLONG or t == TYPE_INT24 or t == TYPE_YEAR
+}
+
+# ── capability flags ────────────────────────────────────────────────────────
+
+export CLIENT_LONG_PASSWORD = 1
+export CLIENT_FOUND_ROWS = 2
+export CLIENT_LONG_FLAG = 4
+export CLIENT_CONNECT_WITH_DB = 8
+export CLIENT_PROTOCOL_41 = 512
+export CLIENT_TRANSACTIONS = 8192
+export CLIENT_SECURE_CONNECTION = 32768
+export CLIENT_MULTI_RESULTS = 131072
+export CLIENT_PLUGIN_AUTH = 524288
+export CLIENT_PLUGIN_AUTH_LENENC_DATA = 2097152
+
+# ── commands ────────────────────────────────────────────────────────────────
+
+export COM_QUIT = 1
+export COM_QUERY = 3
+export COM_PING = 14
+export COM_STMT_PREPARE = 22
+export COM_STMT_EXECUTE = 23
+export COM_STMT_CLOSE = 25

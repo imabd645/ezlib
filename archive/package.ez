@@ -1,0 +1,11 @@
+{
+  "name": "archive",
+  "version": "1.0.0",
+  "description": "Zip and gzip for EZ. Reads stored and deflated entries with its own DEFLATE decompressor, writes valid archives, verifies CRC32. No DLL required.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["archive", "zip", "gzip", "deflate", "compression", "crc32"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

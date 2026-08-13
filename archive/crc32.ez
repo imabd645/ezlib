@@ -1,0 +1,46 @@
+# ============================================================================
+# archive/crc32.ez — the integrity check both gzip and zip carry
+#
+# Not a hash for security -- it is a checksum, and a deliberate change can be
+# made to keep it. It catches accidental corruption, which is what a truncated
+# download or a bad disk produces, and both formats REQUIRE it: a gzip member
+# ends with one, and every zip entry stores one. Writing a wrong value
+# produces a file other tools refuse.
+# ============================================================================
+
+_table = nil
+
+# Built once, lazily. The table is the standard reflected CRC-32 with the
+# polynomial 0xEDB88320.
+task table() {
+    when _table != nil { give _table }
+    _table = []
+    repeat n = 0 to 255 {
+        c = n
+        repeat k = 1 to 8 {
+            when c % 2 == 1 { c = 3988292384 ^ floor(c / 2) }
+            other { c = floor(c / 2) }
+        }
+        push(_table, c)
+    }
+    give _table
+}
+
+export task crc32Bytes(bytes) {
+    t = table()
+    crc = 4294967295
+    get b in bytes {
+        crc = t[(crc ^ b) % 256] ^ floor(crc / 256)
+    }
+    give crc ^ 4294967295
+}
+
+export task crc32Text(text) {
+    t = table()
+    crc = 4294967295
+    body = str(text)
+    repeat i = 0 to len(body) - 1 {
+        crc = t[(crc ^ ord(substr(body, i, 1))) % 256] ^ floor(crc / 256)
+    }
+    give crc ^ 4294967295
+}

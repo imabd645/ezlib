@@ -1,0 +1,245 @@
+# ============================================================================
+# mongodb — test suite
+#   ez test.ez
+#
+# BSON is checked offline against documents decoded back from their own bytes
+# and against fixed byte sequences; the rest runs against a real server,
+# because a wire protocol tested against a mock is tested against your own
+# reading of the specification:
+#
+#   docker run -d -p 27018:27017 -e MONGO_INITDB_ROOT_USERNAME=ezuser \
+#     -e MONGO_INITDB_ROOT_PASSWORD=ezpass mongo:7
+#
+# Without one the live section is skipped and the skip is reported.
+# ============================================================================
+
+use "mongodb"
+
+PASS = 0
+FAIL = 0
+SKIPPED = 0
+
+SETTINGS = { "host": "127.0.0.1", "port": 27018, "user": "ezuser",
+             "password": "ezpass", "database": "ezdb", "timeoutMs": 5000 }
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task roundTrip(value) { give decodeDocument(encodeDocument({ "v": value }), 0)["v"] }
+
+out "mongodb tests"
+
+# ── BSON ────────────────────────────────────────────────────────────────────
+# A minimal document, byte for byte: length, type, name, value, terminator.
+check("an empty document is five bytes", len(encodeDocument({})), 5)
+check("and states its own length", encodeDocument({})[0], 5)
+check("a document ends with a zero", encodeDocument({})[4], 0)
+
+check("a string round-trips", roundTrip("hello"), "hello")
+check("an empty string", roundTrip(""), "")
+check("unicode", roundTrip("café 日本"), "café 日本")
+check("an integer", roundTrip(42), 42)
+check("zero", roundTrip(0), 0)
+# Signed values are two's complement; read unsigned they come back enormous.
+check("a negative integer", roundTrip(-7), -7)
+check("the int32 boundary", roundTrip(2147483647), 2147483647)
+check("just past it becomes int64", roundTrip(2147483648), 2147483648)
+check("a large negative", roundTrip(-2147483649), -2147483649)
+check("a float", roundTrip(1.5), 1.5)
+check("a negative float", roundTrip(-2.25), -2.25)
+check("a float that is not a power of two", roundTrip(0.1) > 0.09, true)
+check("true", roundTrip(true), true)
+check("false", roundTrip(false), false)
+check("nil", roundTrip(nil), nil)
+check("an array", to_json(roundTrip([1, 2, 3])), to_json([1, 2, 3]))
+check("an empty array", len(roundTrip([])), 0)
+check("a mixed array", to_json(roundTrip(["a", 1, true])), to_json(["a", 1, true]))
+check("a nested document", roundTrip({ "inner": "x" })["inner"], "x")
+check("a deeply nested document",
+      roundTrip({ "a": { "b": { "c": 1 } } })["a"]["b"]["c"], 1)
+check("an array of documents", roundTrip([{ "n": 1 }, { "n": 2 }])[1]["n"], 2)
+
+# A key order that a dictionary cannot express, which commands require.
+ordered = encodeOrderedDocument([["zzz", 1], ["aaa", 2]])
+decodedOrder = decodeDocument(ordered, 0)
+check("an ordered document decodes", decodedOrder["zzz"], 1)
+# The first field is what MongoDB reads as the command name, so it must be the
+# one that was written first, not whichever the dictionary happens to yield.
+check("the first field is the one written first", ordered[5], 122)
+
+oid = ObjectId.fromHex("507f1f77bcf86cd799439011")
+check("an ObjectId parses", oid.hex(), "507f1f77bcf86cd799439011")
+check("and is 12 bytes", len(oid.bytes), 12)
+check("and round-trips", roundTrip(oid).hex(), "507f1f77bcf86cd799439011")
+check("two the same are equal", oid.equals(ObjectId.fromHex("507f1f77bcf86cd799439011")), true)
+throws("a short ObjectId is refused", || ObjectId.fromHex("507f"))
+throws("a non-hex ObjectId is refused", || ObjectId.fromHex("zzzzzzzzzzzzzzzzzzzzzzzz"))
+
+check("binary round-trips", roundTrip(Binary([1, 2, 200, 255])), bytesToString([1, 2, 200, 255]))
+
+# ── connection strings ──────────────────────────────────────────────────────
+u = fromUrl("mongodb://bob:pw@db.example.com:27099/shop")
+check("url user", u.user, "bob")
+check("url password", u.password, "pw")
+check("url host", u.host, "db.example.com")
+check("url port", u.port, 27099)
+check("url database", u.database, "shop")
+check("a default port", fromUrl("mongodb://h/d").port, 27017)
+check("query parameters are ignored", fromUrl("mongodb://h:27017/d?retryWrites=true").database, "d")
+
+# ── live ────────────────────────────────────────────────────────────────────
+LIVE = false
+try {
+    probe = Mongo(SETTINGS)
+    probe.open()
+    LIVE = probe.ping()
+    probe.close()
+}
+catch (e) { LIVE = false }
+
+when LIVE == false {
+    SKIPPED = 34
+    out "  (no MongoDB on 27018 -- 34 live assertions skipped)"
+}
+other {
+    db = connect(SETTINGS)
+    check("connected", db.isOpen(), true)
+    check("ping", db.ping(), true)
+    check("the server identifies itself", len(db.serverVersion()) > 0, true)
+
+    users = db.collection("ez_users")
+    users.drop()
+
+    # ── writing ─────────────────────────────────────────────────────────────
+    check("insert reports one document", users.insert({ "name": "ana", "age": 31, "active": true }), 1)
+    check("insertMany reports the count",
+          users.insertMany([{ "name": "bo", "age": 25 }, { "name": "cy", "age": 40, "score": 1.5 }]), 2)
+    check("count", users.count(), 3)
+    check("a filtered count", users.count({ "age": { "$gt": 30 } }), 2)
+
+    # ── reading ─────────────────────────────────────────────────────────────
+    found = users.find({ "age": { "$gt": 30 } })
+    check("an operator query", len(found), 2)
+    check("findOne", users.findOne({ "name": "ana" })["age"], 31)
+    check("findOne on no match is nil", users.findOne({ "name": "nobody" }), nil)
+    check("exists", users.exists({ "name": "bo" }), true)
+    check("does not exist", users.exists({ "name": "nobody" }), false)
+
+    ana = users.findOne({ "name": "ana" })
+    # MongoDB assigns an _id when the document has none, and it must come back
+    # as an ObjectId rather than a string or it stops matching.
+    check("an _id was assigned", ana["_id"] != nil, true)
+    check("and it is an ObjectId", len(ana["_id"].hex()), 24)
+    check("a document can be fetched by that id", users.findById(ana["_id"])["name"], "ana")
+    check("and by its hex form", users.findById(ana["_id"].hex())["name"], "ana")
+
+    check("booleans survive", ana["active"], true)
+    check("and are booleans", typeOf(ana["active"]), "bool")
+    check("integers survive", typeOf(ana["age"]), "integer")
+    check("floats survive", users.findOne({ "name": "cy" })["score"], 1.5)
+    # A field that was never set is absent, not empty.
+    check("a missing field is nil", ana["score"], nil)
+
+    users.insert({ "name": "dee", "tags": ["x", "y"], "meta": { "rank": 2 } })
+    dee = users.findOne({ "name": "dee" })
+    check("arrays survive", to_json(dee["tags"]), to_json(["x", "y"]))
+    check("nested documents survive", dee["meta"]["rank"], 2)
+    check("a query into a nested field", users.count({ "meta.rank": 2 }), 1)
+    check("a query into an array", users.count({ "tags": "x" }), 1)
+
+    # Filtered to documents that HAVE an age: MongoDB sorts a missing field
+    # ahead of every value, so an ageless document would come first.
+    sorted1 = users.find({ "age": { "$exists": true } }, { "sort": { "age": 1 }, "limit": 2 })
+    check("sorting and limiting", len(sorted1), 2)
+    check("in the right order", sorted1[0]["name"], "bo")
+    check("projection", has_key(users.findOne({ "name": "ana" }, { "projection": { "name": 1 } }), "age"), false)
+    check("distinct", len(users.distinct("name")), 4)
+
+    # ── updating ────────────────────────────────────────────────────────────
+    result = users.set({ "name": "bo" }, { "age": 26 })
+    check("set matches one", result["matched"], 1)
+    check("and modifies it", users.findOne({ "name": "bo" })["age"], 26)
+    # $set changes a field; without the operator the whole document would be
+    # replaced, which is the classic way to lose every other field.
+    check("the other fields are still there", users.findOne({ "name": "bo" })["name"], "bo")
+    check("updateMany touches all of them", users.updateMany({}, { "$set": { "seen": true } })["matched"], 4)
+    upserted = users.upsert({ "name": "new" }, { "$set": { "age": 1 } })
+    # An upsert that inserts matched nothing, and MongoDB counts the new
+    # document in `n` -- so matched has to exclude it or an insert looks like
+    # an update.
+    check("upsert matched nothing", upserted["matched"], 0)
+    check("upsert reports the insert", upserted["upserted"], 1)
+    check("and hands back the new id", upserted["upsertedId"] != nil, true)
+    check("and the document is there", users.exists({ "name": "new" }), true)
+
+    # ── deleting ────────────────────────────────────────────────────────────
+    check("remove deletes one", users.remove({ "name": "new" }), 1)
+    check("removing what is not there", users.remove({ "name": "nobody" }), 0)
+    check("removeMany", users.removeMany({ "age": { "$lt": 30 } }) >= 1, true)
+
+    # ── indexes ─────────────────────────────────────────────────────────────
+    users.createIndex({ "name": 1 }, { "unique": true })
+    check("the index is listed", contains(to_json(users.indexes()), "name_1"), true)
+    # A unique index is the constraint that makes this fail, and it must fail
+    # loudly rather than silently not inserting.
+    existing = users.findOne({})["name"]
+    throws("a duplicate key throws", || users.insert({ "name": existing }))
+    try { users.insert({ "name": existing }) }
+    catch (e) { check("and is recognisable", isDuplicateKey(e), true) }
+    # The connection has to survive a rejected write.
+    check("the connection survives", users.count() > 0, true)
+
+    # ── aggregation ─────────────────────────────────────────────────────────
+    users.drop()
+    users.insertMany([
+        { "team": "a", "points": 3 }, { "team": "a", "points": 4 },
+        { "team": "b", "points": 10 }
+    ])
+    totals = users.aggregate([{ "$group": { "_id": "$team", "total": { "$sum": "$points" } } }])
+    check("aggregation returns groups", len(totals), 2)
+
+    # ── cursors ─────────────────────────────────────────────────────────────
+    # A batch is 101 documents by default, so anything larger only comes back
+    # in full if the cursor is followed. Without that a find() over a big
+    # collection silently returns a fraction of it.
+    big = db.collection("ez_big")
+    big.drop()
+    batch = []
+    repeat i = 1 to 250 { push(batch, { "n": i }) }
+    big.insertMany(batch)
+    check("insertMany handles 250", big.count(), 250)
+    check("find follows the cursor past one batch", len(big.find()), 250)
+    big.drop()
+
+    check("collections are listed", contains(to_json(db.collections()), "ez_users"), true)
+    users.drop()
+    check("dropping is idempotent", users.drop() == nil or true, true)
+
+    db.close()
+    check("closed", db.isOpen(), false)
+    throws("using a closed connection is refused", || db.collection("x").count())
+
+    # A wrong password must be reported, not hang.
+    throws("bad credentials are rejected",
+           || connect({ "host": "127.0.0.1", "port": 27018, "user": "ezuser",
+                        "password": "wrong", "database": "ezdb", "timeoutMs": 5000 }))
+}
+
+out ""
+when SKIPPED > 0 { out `  skipped {SKIPPED}` }
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

@@ -1,0 +1,414 @@
+# ============================================================================
+# mongodb/bson.ez — BSON, the format MongoDB speaks
+#
+# BSON is JSON's data model in a binary framing: a document is a length, a
+# sequence of typed elements, and a terminating zero. Unlike JSON it
+# distinguishes 32-bit from 64-bit integers, carries a native date and a
+# binary type, and stores its own length so a reader can skip a value without
+# parsing it.
+#
+# Everything works in BYTE ARRAYS. An EZ string is UTF-8, so chr(200) is two
+# bytes rather than one -- building a document with chr() corrupts every length
+# prefix in it. bytesToString() copies bytes verbatim; ord(substr(s, i, 1))
+# reads them back exactly.
+# ============================================================================
+
+export TYPE_DOUBLE = 1
+export TYPE_STRING = 2
+export TYPE_DOCUMENT = 3
+export TYPE_ARRAY = 4
+export TYPE_BINARY = 5
+export TYPE_OBJECTID = 7
+export TYPE_BOOL = 8
+export TYPE_DATE = 9
+export TYPE_NULL = 10
+export TYPE_INT32 = 16
+export TYPE_INT64 = 18
+
+# An ObjectId is 12 bytes; MongoDB generates one for any document without an
+# _id. Kept as its own model so a round trip does not silently turn it into a
+# string that no longer matches anything.
+export model ObjectId {
+    init(bytes) { self.bytes = bytes }
+
+    static task fromHex(text) {
+        octets = []
+        body = lower(str(text))
+        index = 0
+        while index + 1 < len(body) {
+            high = indexOf("0123456789abcdef", substr(body, index, 1))
+            low = indexOf("0123456789abcdef", substr(body, index + 1, 1))
+            when high < 0 or low < 0 {
+                throw Exception(`mongodb: '{text}' is not a valid ObjectId`)
+            }
+            push(octets, high * 16 + low)
+            index = index + 2
+        }
+        when len(octets) != 12 {
+            throw Exception(`mongodb: an ObjectId is 12 bytes; '{text}' decodes to {len(octets)}`)
+        }
+        give ObjectId(octets)
+    }
+
+    task hex() {
+        digits = "0123456789abcdef"
+        result = ""
+        get b in self.bytes {
+            result = result + substr(digits, floor(b / 16), 1) + substr(digits, b % 16, 1)
+        }
+        give result
+    }
+    task toString() { give "ObjectId(" + self.hex() + ")" }
+    task equals(another) { give self.hex() == another.hex() }
+}
+
+
+# Marks a value as BSON BINARY rather than a string.
+#
+# The two are not interchangeable on the wire. MongoDB's SASL payload field is
+# BinData; sent as a string the server tries to base64-decode the text and
+# reports "Failed decoding SASL payload: invalid base64", which reads like a
+# bug in the client's encoding rather than a wrong BSON type.
+export model Binary {
+    init(bytes, subtype = 0) {
+        self.bytes = bytes
+        self.subtype = subtype
+    }
+    task text() { give bytesToString(self.bytes) }
+    task size() { give len(self.bytes) }
+}
+
+# ── writing ─────────────────────────────────────────────────────────────────
+
+task writeInt32(target, value) {
+    n = value
+    when n < 0 { n = 4294967296 + n }
+    repeat i = 1 to 4 {
+        push(target, n % 256)
+        n = floor(n / 256)
+    }
+    give target
+}
+
+# 64-bit two's complement, byte by byte. Forming 2^64 + value first would
+# exceed what a number holds exactly and every byte would come out zero.
+task writeInt64(target, value) {
+    when value >= 0 {
+        n = value
+        repeat i = 1 to 8 {
+            push(target, n % 256)
+            n = floor(n / 256)
+        }
+        give target
+    }
+    magnitude = 0 - value
+    carry = 1
+    repeat i = 1 to 8 {
+        b = magnitude % 256
+        magnitude = floor(magnitude / 256)
+        inverted = 255 - b + carry
+        when inverted > 255 {
+            inverted = inverted - 256
+            carry = 1
+        }
+        other { carry = 0 }
+        push(target, inverted)
+    }
+    give target
+}
+
+# IEEE 754 binary64, assembled by hand: EZ has no float-to-bits builtin.
+task writeDouble(target, value) {
+    when value == 0 {
+        repeat i = 1 to 8 { push(target, 0) }
+        give target
+    }
+    sign = 0
+    magnitude = value
+    when magnitude < 0 {
+        sign = 1
+        magnitude = 0 - magnitude
+    }
+    exponent = 0
+    while magnitude >= 2 {
+        magnitude = magnitude / 2
+        exponent = exponent + 1
+    }
+    while magnitude < 1 {
+        magnitude = magnitude * 2
+        exponent = exponent - 1
+    }
+    mantissa = floor((magnitude - 1) * 4503599627370496)
+    high = sign * 2147483648 + (exponent + 1023) * 1048576 + floor(mantissa / 4294967296)
+    writeInt32(target, mantissa % 4294967296)
+    give writeInt32(target, high)
+}
+
+task writeCString(target, text) {
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(target, ord(substr(body, i, 1))) }
+    push(target, 0)
+    give target
+}
+
+task writeString(target, text) {
+    body = str(text)
+    writeInt32(target, len(body) + 1)
+    repeat i = 0 to len(body) - 1 { push(target, ord(substr(body, i, 1))) }
+    push(target, 0)
+    give target
+}
+
+# A document, as bytes. Arrays are documents whose keys are "0", "1", "2" ...
+export task encodeDocument(document) {
+    body = []
+    get name in keys(document) { encodeElement(body, str(name), document[name]) }
+    result = []
+    # The length counts itself and the terminator.
+    writeInt32(result, len(body) + 5)
+    get b in body { push(result, b) }
+    push(result, 0)
+    give result
+}
+
+
+# A document from an ORDERED list of [name, value] pairs.
+#
+# BSON is order-sensitive where a dictionary is not: a command document must
+# name the command in its FIRST field, and MongoDB reads whatever comes first
+# as the command name. EZ's keys() returns neither insertion nor alphabetical
+# order, so building a command from a dictionary put "$db" in front and every
+# call came back as `no such command: '$db'`.
+#
+# Only commands need this. Filters, updates and nested documents are unordered
+# by definition, and encodeDocument handles those.
+export task encodeOrderedDocument(pairs) {
+    body = []
+    get pair in pairs { encodeElement(body, str(pair[0]), pair[1]) }
+    result = []
+    writeInt32(result, len(body) + 5)
+    get b in body { push(result, b) }
+    push(result, 0)
+    give result
+}
+
+task encodeArray(items) {
+    body = []
+    index = 0
+    get item in items {
+        encodeElement(body, str(index), item)
+        index = index + 1
+    }
+    result = []
+    writeInt32(result, len(body) + 5)
+    get b in body { push(result, b) }
+    push(result, 0)
+    give result
+}
+
+task encodeElement(target, name, value) {
+    t = typeOf(value)
+
+    when t == "nil" {
+        push(target, TYPE_NULL)
+        give writeCString(target, name)
+    }
+    when t == "bool" {
+        push(target, TYPE_BOOL)
+        writeCString(target, name)
+        flag = 0
+        when value { flag = 1 }
+        push(target, flag)
+        give target
+    }
+    when t == "integer" {
+        # 32 bits where it fits, 64 where it does not. Sending everything as
+        # int64 works but makes every stored number wider than it needs to be,
+        # and comparisons against int32 fields in existing data behave oddly.
+        when value >= -2147483648 and value <= 2147483647 {
+            push(target, TYPE_INT32)
+            writeCString(target, name)
+            give writeInt32(target, value)
+        }
+        push(target, TYPE_INT64)
+        writeCString(target, name)
+        give writeInt64(target, value)
+    }
+    when t == "float" {
+        push(target, TYPE_DOUBLE)
+        writeCString(target, name)
+        give writeDouble(target, value)
+    }
+    when t == "string" {
+        push(target, TYPE_STRING)
+        writeCString(target, name)
+        give writeString(target, value)
+    }
+    when t == "array" {
+        push(target, TYPE_ARRAY)
+        writeCString(target, name)
+        get b in encodeArray(value) { push(target, b) }
+        give target
+    }
+    when t == "dictionary" {
+        push(target, TYPE_DOCUMENT)
+        writeCString(target, name)
+        get b in encodeDocument(value) { push(target, b) }
+        give target
+    }
+    when t == "instance" {
+        # Told apart by a FIELD, not by a method: hasattr() sees fields only,
+        # so testing for hex() -- which ObjectId has and Binary does not --
+        # silently matched neither and every ObjectId failed to encode.
+        # `subtype` is the field only Binary carries.
+        when hasattr(value, "subtype") {
+            push(target, TYPE_BINARY)
+            writeCString(target, name)
+            writeInt32(target, len(value.bytes))
+            push(target, value.subtype)
+            get b in value.bytes { push(target, b) }
+            give target
+        }
+        # An ObjectId keeps its own type; turned into a string it would stop
+        # matching the _id it came from.
+        when hasattr(value, "bytes") {
+            push(target, TYPE_OBJECTID)
+            writeCString(target, name)
+            get b in value.bytes { push(target, b) }
+            give target
+        }
+    }
+    throw Exception(`mongodb: cannot encode a value of type '{t}' for field '{name}'`)
+}
+
+# ── reading ─────────────────────────────────────────────────────────────────
+
+task readInt32(bytes, offset) {
+    value = bytes[offset] + bytes[offset + 1] * 256 +
+            bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216
+    when value >= 2147483648 { give value - 4294967296 }
+    give value
+}
+
+task readUint32(bytes, offset) {
+    give bytes[offset] + bytes[offset + 1] * 256 +
+         bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216
+}
+
+task readInt64(bytes, offset) {
+    low = readUint32(bytes, offset)
+    high = readUint32(bytes, offset + 4)
+    when high >= 2147483648 {
+        # Negative: undo the two's complement without forming 2^64.
+        give 0 - ((4294967295 - low) + (4294967295 - high) * 4294967296 + 1)
+    }
+    give low + high * 4294967296
+}
+
+task readDouble(bytes, offset) {
+    low = readUint32(bytes, offset)
+    high = readUint32(bytes, offset + 4)
+    sign = 1
+    when high >= 2147483648 {
+        sign = -1
+        high = high - 2147483648
+    }
+    biased = floor(high / 1048576)
+    mantissa = (high % 1048576) * 4294967296 + low
+    when biased == 0 and mantissa == 0 { give 0 }
+    fraction = 1 + mantissa / 4503599627370496
+    exponent = biased - 1023
+    scale = 1
+    steps = exponent
+    when steps < 0 { steps = 0 - steps }
+    repeat i = 1 to steps { scale = scale * 2 }
+    when exponent < 0 { give sign * fraction / scale }
+    give sign * fraction * scale
+}
+
+task readCString(bytes, offset) {
+    piece = []
+    i = offset
+    while i < len(bytes) and bytes[i] != 0 {
+        push(piece, bytes[i])
+        i = i + 1
+    }
+    give { "value": bytesToString(piece), "next": i + 1 }
+}
+
+export task decodeDocument(bytes, offset = 0) {
+    total = readInt32(bytes, offset)
+    document = {}
+    i = offset + 4
+    limit = offset + total - 1
+    while i < limit {
+        elementType = bytes[i]
+        i = i + 1
+        nameCursor = readCString(bytes, i)
+        name = nameCursor["value"]
+        i = nameCursor["next"]
+        decoded = decodeValue(bytes, i, elementType)
+        document[name] = decoded["value"]
+        i = decoded["next"]
+    }
+    give document
+}
+
+task decodeValue(bytes, offset, elementType) {
+    when elementType == TYPE_DOUBLE {
+        give { "value": readDouble(bytes, offset), "next": offset + 8 }
+    }
+    when elementType == TYPE_STRING {
+        length = readInt32(bytes, offset)
+        piece = []
+        repeat i = 0 to length - 2 { push(piece, bytes[offset + 4 + i]) }
+        give { "value": bytesToString(piece), "next": offset + 4 + length }
+    }
+    when elementType == TYPE_DOCUMENT {
+        size = readInt32(bytes, offset)
+        give { "value": decodeDocument(bytes, offset), "next": offset + size }
+    }
+    when elementType == TYPE_ARRAY {
+        size = readInt32(bytes, offset)
+        # An array is a document with "0", "1", ... keys; the order of those
+        # keys is the array order, so the values are taken by index rather
+        # than by iterating the dictionary.
+        asDocument = decodeDocument(bytes, offset)
+        items = []
+        index = 0
+        while has_key(asDocument, str(index)) {
+            push(items, asDocument[str(index)])
+            index = index + 1
+        }
+        give { "value": items, "next": offset + size }
+    }
+    when elementType == TYPE_BINARY {
+        length = readInt32(bytes, offset)
+        piece = []
+        repeat i = 0 to length - 1 { push(piece, bytes[offset + 5 + i]) }
+        give { "value": bytesToString(piece), "next": offset + 5 + length }
+    }
+    when elementType == TYPE_OBJECTID {
+        piece = []
+        repeat i = 0 to 11 { push(piece, bytes[offset + i]) }
+        give { "value": ObjectId(piece), "next": offset + 12 }
+    }
+    when elementType == TYPE_BOOL {
+        give { "value": bytes[offset] == 1, "next": offset + 1 }
+    }
+    when elementType == TYPE_DATE {
+        give { "value": readInt64(bytes, offset), "next": offset + 8 }
+    }
+    when elementType == TYPE_NULL {
+        give { "value": nil, "next": offset }
+    }
+    when elementType == TYPE_INT32 {
+        give { "value": readInt32(bytes, offset), "next": offset + 4 }
+    }
+    when elementType == TYPE_INT64 {
+        give { "value": readInt64(bytes, offset), "next": offset + 8 }
+    }
+    throw Exception(`mongodb: BSON type {elementType} is not supported by this driver`)
+}
+
+export task documentSize(bytes, offset) { give readInt32(bytes, offset) }

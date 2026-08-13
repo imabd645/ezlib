@@ -1,0 +1,338 @@
+# ============================================================================
+# webhook — verifying that an inbound webhook really came from who it claims
+#
+#   use "webhook"
+#
+#   ok = Stripe(SIGNING_SECRET).verify(rawBody, req["headers"])
+#   when ok == false { give { "status": 400 } }
+#
+# An endpoint that accepts webhooks without checking the signature accepts
+# them from ANYONE. The URL is the only secret, and URLs leak -- into logs,
+# proxies, browser history, screenshots. "Mark this invoice paid" is a POST
+# away.
+#
+# Every provider signs differently, and each difference matters:
+#
+#   Stripe    HMAC-SHA256 over "{timestamp}.{body}", hex, in a compound header
+#   GitHub    HMAC-SHA256 over the raw body, hex, prefixed "sha256="
+#   Slack     HMAC-SHA256 over "v0:{timestamp}:{body}", hex, prefixed "v0="
+#   Shopify   HMAC-SHA256 over the raw body, BASE64 rather than hex
+#   Twilio    HMAC-SHA1 over the URL with its sorted POST fields appended
+#
+# Two rules run through all of them, and both are easy to get wrong:
+#
+#   * The signature is over the RAW BODY, byte for byte. Parse the JSON and
+#     re-serialise it and the bytes change -- key order, spacing, unicode
+#     escapes -- and every signature fails. Keep the body you received.
+#   * The comparison must be constant-time. A byte-by-byte compare that
+#     returns early tells an attacker how much of a forged signature was
+#     right, which is enough to finish it one byte at a time.
+# ============================================================================
+
+use "crypto"
+use "webhook/compare.ez"
+
+# How far out of date a signed timestamp may be, in seconds. Without this a
+# captured-and-replayed request stays valid forever: the signature is genuine,
+# it is just being sent again by someone else.
+export DEFAULT_TOLERANCE_SECONDS = 300
+
+export model Result {
+    init(ok, reason) {
+        self.ok = ok
+        self.reason = reason
+    }
+    task toString() {
+        when self.ok { give "Result(verified)" }
+        give `Result(rejected: {self.reason})`
+    }
+}
+
+task accept() { give Result(true, nil) }
+task reject(reason) { give Result(false, reason) }
+
+# ── the providers ───────────────────────────────────────────────────────────
+
+# Stripe: "Stripe-Signature: t=1614556800,v1=<hex>,v1=<hex>"
+#
+# The header can carry SEVERAL v1 signatures during a secret rotation, and any
+# one of them matching is a pass. Taking only the first would break every
+# rotation.
+export model Stripe {
+    init(secret, tolerance = nil) {
+        self.secret = secret
+        self.tolerance = tolerance
+        when tolerance == nil { self.tolerance = DEFAULT_TOLERANCE_SECONDS }
+        self.header = "Stripe-Signature"
+    }
+
+    task check(body, signatureHeader, now = nil) {
+        when self.secret == nil or self.secret == "" { give reject("no signing secret configured") }
+        when signatureHeader == nil { give reject("no Stripe-Signature header") }
+
+        parts = parseCompound(str(signatureHeader))
+        timestamp = parts["t"]
+        when timestamp == nil { give reject("the signature header carries no timestamp") }
+        candidates = parts["v1list"]
+        when len(candidates) == 0 { give reject("the signature header carries no v1 signature") }
+
+        drift = timestampDrift(timestamp, now)
+        when drift == nil { give reject("the timestamp is not a number") }
+        when drift > self.tolerance {
+            give reject(`the timestamp is {floor(drift)}s outside the {self.tolerance}s tolerance -- a replayed request, or a clock that is wrong`)
+        }
+
+        expected = HMAC.sha256(self.secret, str(timestamp) + "." + str(body))
+        get candidate in candidates {
+            when constantTimeEquals(lower(candidate), lower(expected)) { give accept() }
+        }
+        give reject("no signature matched")
+    }
+
+    task verify(body, headers, now = nil) {
+        give self.check(body, headerValue(headers, self.header), now).ok
+    }
+}
+
+# GitHub: "X-Hub-Signature-256: sha256=<hex>"
+#
+# GitHub also still sends the SHA-1 X-Hub-Signature. It is not accepted here:
+# offering it lets an attacker choose the weaker algorithm, which is the whole
+# problem with algorithm negotiation.
+export model GitHub {
+    init(secret) {
+        self.secret = secret
+        self.header = "X-Hub-Signature-256"
+    }
+
+    task check(body, signatureHeader) {
+        when self.secret == nil or self.secret == "" { give reject("no signing secret configured") }
+        when signatureHeader == nil { give reject("no X-Hub-Signature-256 header") }
+
+        given = trim(str(signatureHeader))
+        when startsWith(given, "sha1=") {
+            give reject("this is the SHA-1 header; send X-Hub-Signature-256 instead")
+        }
+        when startsWith(given, "sha256=") == false { give reject("the signature is not in sha256=<hex> form") }
+        given = substr(given, 7, len(given) - 7)
+
+        expected = HMAC.sha256(self.secret, str(body))
+        when constantTimeEquals(lower(given), lower(expected)) { give accept() }
+        give reject("the signature does not match")
+    }
+
+    task verify(body, headers) {
+        give self.check(body, headerValue(headers, self.header)).ok
+    }
+}
+
+# Slack: "X-Slack-Signature: v0=<hex>" over "v0:{timestamp}:{body}", with the
+# timestamp in its own header.
+export model Slack {
+    init(secret, tolerance = nil) {
+        self.secret = secret
+        self.tolerance = tolerance
+        when tolerance == nil { self.tolerance = DEFAULT_TOLERANCE_SECONDS }
+        self.header = "X-Slack-Signature"
+        self.timestampHeader = "X-Slack-Request-Timestamp"
+    }
+
+    task check(body, signatureHeader, timestamp, now = nil) {
+        when self.secret == nil or self.secret == "" { give reject("no signing secret configured") }
+        when signatureHeader == nil { give reject("no X-Slack-Signature header") }
+        when timestamp == nil { give reject("no X-Slack-Request-Timestamp header") }
+
+        drift = timestampDrift(timestamp, now)
+        when drift == nil { give reject("the timestamp is not a number") }
+        when drift > self.tolerance {
+            give reject(`the timestamp is {floor(drift)}s outside the {self.tolerance}s tolerance`)
+        }
+
+        given = trim(str(signatureHeader))
+        when startsWith(given, "v0=") == false { give reject("the signature is not in v0=<hex> form") }
+
+        expected = "v0=" + HMAC.sha256(self.secret, "v0:" + str(timestamp) + ":" + str(body))
+        when constantTimeEquals(lower(given), lower(expected)) { give accept() }
+        give reject("the signature does not match")
+    }
+
+    task verify(body, headers, now = nil) {
+        give self.check(body, headerValue(headers, self.header),
+                        headerValue(headers, self.timestampHeader), now).ok
+    }
+}
+
+# Shopify: "X-Shopify-Hmac-Sha256: <base64>".
+#
+# Base64, not hex -- the one difference that makes a copied GitHub verifier
+# silently reject everything.
+export model Shopify {
+    init(secret) {
+        self.secret = secret
+        self.header = "X-Shopify-Hmac-Sha256"
+    }
+
+    task check(body, signatureHeader) {
+        when self.secret == nil or self.secret == "" { give reject("no signing secret configured") }
+        when signatureHeader == nil { give reject("no X-Shopify-Hmac-Sha256 header") }
+
+        expected = Base64.encode(hexToBytes(HMAC.sha256(self.secret, str(body))))
+        when constantTimeEquals(trim(str(signatureHeader)), expected) { give accept() }
+        give reject("the signature does not match")
+    }
+
+    task verify(body, headers) {
+        give self.check(body, headerValue(headers, self.header)).ok
+    }
+}
+
+# Twilio: "X-Twilio-Signature: <base64 HMAC-SHA1>".
+#
+# Signed over the full request URL with the POST fields appended in key order,
+# not over the body. Getting the URL wrong -- http vs https, a missing port, a
+# proxy rewriting the host -- is the usual reason this fails in production.
+export model Twilio {
+    init(authToken) {
+        self.authToken = authToken
+        self.header = "X-Twilio-Signature"
+    }
+
+    task check(url, params, signatureHeader) {
+        when self.authToken == nil or self.authToken == "" { give reject("no auth token configured") }
+        when signatureHeader == nil { give reject("no X-Twilio-Signature header") }
+
+        base = str(url)
+        when params != nil {
+            get name in sort(keys(params)) { base = base + str(name) + str(params[name]) }
+        }
+        expected = Base64.encode(hexToBytes(HMAC.sha1(self.authToken, base)))
+        when constantTimeEquals(trim(str(signatureHeader)), expected) { give accept() }
+        give reject("the signature does not match -- check that the URL is exactly the one Twilio called, scheme and port included")
+    }
+
+    task verify(url, params, headers) {
+        give self.check(url, params, headerValue(headers, self.header)).ok
+    }
+}
+
+# Anything else that signs a body with an HMAC.
+#
+#   Generic(secret, "sha256", "hex")
+#   Generic(secret, "sha256", "base64")
+#   Generic(secret, "sha1", "hex")
+export model Generic {
+    init(secret, algorithm = "sha256", encoding = "hex") {
+        self.secret = secret
+        self.algorithm = lower(str(algorithm))
+        self.encoding = lower(str(encoding))
+    }
+
+    task sign(body) {
+        hex = ""
+        when self.algorithm == "sha256" { hex = HMAC.sha256(self.secret, str(body)) }
+        other when self.algorithm == "sha1" { hex = HMAC.sha1(self.secret, str(body)) }
+        other when self.algorithm == "sha512" { hex = HMAC.sha512(self.secret, str(body)) }
+        other { throw Exception(`webhook: unsupported algorithm '{self.algorithm}' -- use sha1, sha256 or sha512`) }
+        when self.encoding == "base64" { give Base64.encode(hexToBytes(hex)) }
+        when self.encoding == "hex" { give hex }
+        throw Exception(`webhook: unsupported encoding '{self.encoding}' -- use hex or base64`)
+    }
+
+    task check(body, signature) {
+        when self.secret == nil or self.secret == "" { give reject("no signing secret configured") }
+        when signature == nil { give reject("no signature given") }
+        expected = self.sign(body)
+        candidate = trim(str(signature))
+        # Tolerate a "sha256=" style prefix, which several services add.
+        when contains(candidate, "=") and contains(candidate, "==") == false {
+            at = indexOf(candidate, "=")
+            head = substr(candidate, 0, at)
+            when head == self.algorithm or head == "v0" or head == "v1" {
+                candidate = substr(candidate, at + 1, len(candidate) - at - 1)
+            }
+        }
+        when constantTimeEquals(lower(candidate), lower(expected)) { give accept() }
+        give reject("the signature does not match")
+    }
+
+    task verify(body, signature) { give self.check(body, signature).ok }
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+# Header lookup that does not care about case, because HTTP header names are
+# case-insensitive and every framework normalises them differently.
+export task headerValue(headers, name) {
+    when headers == nil { give nil }
+    wanted = lower(str(name))
+    get key in keys(headers) {
+        when lower(str(key)) == wanted {
+            value = headers[key]
+            # A repeated header arrives as a list; the first is the one signed.
+            when typeOf(value) == "array" {
+                when len(value) == 0 { give nil }
+                give value[0]
+            }
+            give value
+        }
+    }
+    give nil
+}
+
+# "t=123,v1=abc,v1=def" -> { "t": "123", "v1list": ["abc", "def"] }
+export task parseCompound(header) {
+    result = { "v1list": [] }
+    get piece in split(str(header), ",") {
+        pair = trim(piece)
+        when contains(pair, "=") {
+            at = indexOf(pair, "=")
+            key = trim(substr(pair, 0, at))
+            value = trim(substr(pair, at + 1, len(pair) - at - 1))
+            when key == "v1" { push(result["v1list"], value) }
+            other { result[key] = value }
+        }
+    }
+    give result
+}
+
+# Absolute difference in seconds between a signed timestamp and now. nil when
+# the timestamp is not a number.
+export task timestampDrift(timestamp, now) {
+    # Checked before converting, not after: num() THROWS on text it cannot
+    # read, it does not hand back a nan to test. A forged header carrying
+    # "t=abc" would otherwise take down the request handler instead of being
+    # rejected -- turning a rejected webhook into an outage.
+    body = trim(str(timestamp))
+    when body == "" { give nil }
+    get ch in split(body, "") {
+        when indexOf("0123456789", ch) < 0 { give nil }
+    }
+    value = num(body)
+    reference = now
+    when reference == nil { reference = floor(clock() / 1000) }
+    difference = reference - value
+    when difference < 0 { give 0 - difference }
+    give difference
+}
+
+export task hexToBytes(hex) {
+    octets = []
+    body = lower(str(hex))
+    index = 0
+    while index + 1 < len(body) {
+        high = indexOf("0123456789abcdef", substr(body, index, 1))
+        low = indexOf("0123456789abcdef", substr(body, index + 1, 1))
+        when high < 0 or low < 0 { give octets }
+        push(octets, high * 16 + low)
+        index = index + 2
+    }
+    give octets
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task stripe(secret) { give Stripe(secret) }
+export task github(secret) { give GitHub(secret) }
+export task slack(secret) { give Slack(secret) }
+export task shopify(secret) { give Shopify(secret) }
+export task twilio(authToken) { give Twilio(authToken) }

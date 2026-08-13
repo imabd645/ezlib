@@ -1,0 +1,533 @@
+# ============================================================================
+# mongodb — MongoDB for EZ, over pure TCP
+#
+#   use "mongodb"
+#
+#   db = connect({ "host": "localhost", "user": "app", "password": "…",
+#                  "database": "shop" })
+#
+#   users = db.collection("users")
+#   users.insert({ "name": "ana", "age": 31 })
+#   found = users.find({ "age": { "$gt": 30 } })
+#   db.close()
+#
+# No driver library to install. This speaks the MongoDB wire protocol directly
+# over `socket`: OP_MSG framing, BSON documents, and SCRAM-SHA-256
+# authentication, the same way `redis` and `mysql` do.
+#
+# Queries are DOCUMENTS, not strings, so there is no query language to inject
+# into -- the structural reason NoSQL injection looks different from SQL
+# injection. The trap that remains is passing a user-supplied VALUE where a
+# document is expected: `{ "user": req["name"] }` is safe, but if req["name"]
+# is itself a dictionary like { "$ne": null } it becomes an operator. Check
+# the type of anything that came from outside before putting it in a filter.
+# ============================================================================
+
+use "socket"
+use "mongodb/bson.ez"
+use "mongodb/scram.ez"
+
+export DEFAULT_PORT = 27017
+OP_MSG = 2013
+
+export model MongoError {
+    init(message, code, codeName) {
+        self.message = message
+        self.code = code
+        self.codeName = codeName
+    }
+    task toString() { give `MongoError({self.code}/{self.codeName}): {self.message}` }
+}
+
+export task isDuplicateKey(e) {
+    when e == nil { give false }
+    when hasattr(e, "code") { give getattr(e, "code") == 11000 }
+    give false
+}
+
+export model Mongo {
+
+    # settings: host, port, user, password, database, authSource, timeoutMs
+    init(settings) {
+        s = settings
+        when s == nil { s = {} }
+        self.host = orElse(s["host"], "localhost")
+        self.port = orElse(s["port"], DEFAULT_PORT)
+        self.user = s["user"]
+        self.password = s["password"]
+        self.database = orElse(s["database"], "test")
+        # Credentials live in a specific database, "admin" by default. Pointing
+        # this at the wrong one is the usual cause of "Authentication failed"
+        # with a password that is definitely right.
+        self.authSource = orElse(s["authSource"], "admin")
+        self.timeoutMs = orElse(s["timeoutMs"], 15000)
+        self.conn = nil
+        self.connected = false
+        self.requestId = 0
+        self.buffered = ""
+    }
+
+    task open() {
+        when self.connected { give self }
+        self.conn = tcp_connect(self.host, self.port, self.timeoutMs)
+        self.buffered = ""
+        self.connected = true
+        try {
+            self.handshake()
+            when self.user != nil and self.user != "" { self.authenticate() }
+        }
+        catch (e) {
+            self.hardClose()
+            throw e
+        }
+        give self
+    }
+
+    task handshake() {
+        give self.command(self.authSource, [
+            ["hello", 1],
+            ["client", { "application": { "name": "ez-mongodb" },
+                         "driver": { "name": "ez-mongodb", "version": "1.0.0" },
+                         "os": { "type": "Windows" } }]
+        ])
+    }
+
+    task authenticate() {
+        first = clientFirstBare(self.user)
+        # "n,," is the GS2 header: no channel binding, no authorisation identity.
+        start = self.command(self.authSource, [
+            ["saslStart", 1],
+            ["mechanism", "SCRAM-SHA-256"],
+            ["payload", Binary(textBytes("n,," + first))],
+            ["options", { "skipEmptyExchange": true }]
+        ])
+        conversationId = start["conversationId"]
+        serverFirst = start["payload"]
+
+        final = clientFinal(self.password, first, serverFirst)
+        continued = self.command(self.authSource, [
+            ["saslContinue", 1],
+            ["conversationId", conversationId],
+            ["payload", Binary(textBytes(final["message"]))]
+        ])
+
+        # The server proves it knew the key too. Without this check the client
+        # has authenticated TO an impostor.
+        when verifyServer(continued["payload"], final["serverSignature"]) == false {
+            throw MongoError("mongodb: the server failed its half of the SCRAM exchange -- this is not the server it claims to be", 0, "AuthenticationFailed")
+        }
+        when continued["done"] != true {
+            self.command(self.authSource, [
+                ["saslContinue", 1],
+                ["conversationId", conversationId],
+                ["payload", Binary([])]
+            ])
+        }
+        give true
+    }
+
+    # ── the wire ────────────────────────────────────────────────────────────
+
+    # Every command is a BSON document with $db naming the database. OP_MSG
+    # replaced the older query-based protocol; MongoDB 5.1 and later speak only
+    # this.
+    # `pairs` is an ORDERED list of [name, value]. It cannot be a dictionary:
+    # MongoDB reads the first field as the command name, and EZ's keys() does
+    # not preserve the order a dictionary was written in.
+    task command(database, pairs) {
+        self.ensureOpen()
+        ordered = []
+        get pair in pairs { push(ordered, pair) }
+        push(ordered, ["$db", str(database)])
+
+        payload = encodeOrderedDocument(ordered)
+        self.requestId = self.requestId + 1
+
+        message = []
+        writeI32(message, 21 + len(payload))   # 16 header + 4 flags + 1 kind
+        writeI32(message, self.requestId)
+        writeI32(message, 0)                   # responseTo
+        writeI32(message, OP_MSG)
+        writeI32(message, 0)                   # flagBits
+        push(message, 0)                       # section kind 0: a single body
+        get b in payload { push(message, b) }
+
+        self.conn.sendAll(bytesToString(message))
+        give self.readReply()
+    }
+
+    task readReply() {
+        header = toByteArray(self.readBytes(16))
+        length = readI32(header, 0)
+        when length < 16 {
+            throw MongoError("mongodb: the server sent a malformed message header", 0, "")
+        }
+        rest = toByteArray(self.readBytes(length - 16))
+        # flagBits (4) then the section kind (1) precede the document.
+        document = decodeDocument(rest, 5)
+
+        when document["ok"] != 1 and document["ok"] != true {
+            code = orElse(document["code"], 0)
+            name = orElse(document["codeName"], "")
+            reason = orElse(document["errmsg"], "the command failed")
+            throw MongoError("mongodb: " + str(reason), code, str(name))
+        }
+        give document
+    }
+
+    # recv() returns whatever the network delivered, which is nothing like one
+    # message per call for a large result set.
+    task readBytes(count) {
+        while len(self.buffered) < count {
+            chunk = self.conn.recv(16384)
+            when chunk == nil or len(chunk) == 0 {
+                throw MongoError("mongodb: the connection closed while reading a reply", 0, "")
+            }
+            self.buffered = self.buffered + chunk
+        }
+        taken = substr(self.buffered, 0, count)
+        self.buffered = substr(self.buffered, count, len(self.buffered) - count)
+        give taken
+    }
+
+    task ensureOpen() {
+        when self.connected == false {
+            throw MongoError("mongodb: this connection is closed", 0, "")
+        }
+        give self
+    }
+
+    task isOpen() { give self.connected }
+
+    task ping() {
+        result = self.command(self.database, [["ping", 1]])
+        give result["ok"] == 1 or result["ok"] == true
+    }
+
+    task close() {
+        self.hardClose()
+        give nil
+    }
+
+    task hardClose() {
+        when self.conn != nil {
+            try { self.conn.close() } catch (e) { }
+        }
+        self.conn = nil
+        self.connected = false
+        give nil
+    }
+
+    # ── databases and collections ───────────────────────────────────────────
+
+    task collection(name) { give Collection(self, self.database, str(name)) }
+
+    task use(databaseName) {
+        self.database = str(databaseName)
+        give self
+    }
+
+    task collections() {
+        result = self.command(self.database, [["listCollections", 1], ["nameOnly", true]])
+        names = []
+        get item in result["cursor"]["firstBatch"] { push(names, item["name"]) }
+        give names
+    }
+
+    task databases() {
+        result = self.command("admin", [["listDatabases", 1]])
+        names = []
+        get item in result["databases"] { push(names, item["name"]) }
+        give names
+    }
+
+    task dropDatabase() { give self.command(self.database, [["dropDatabase", 1]]) }
+
+    task serverVersion() { give self.command("admin", [["buildInfo", 1]])["version"] }
+}
+
+export model Collection {
+    init(client, database, name) {
+        self.client = client
+        self.database = database
+        self.name = name
+    }
+
+    # ── writing ─────────────────────────────────────────────────────────────
+
+    task insert(document) {
+        result = self.insertMany([document])
+        give result
+    }
+
+    task insertMany(documents) {
+        result = self.client.command(self.database, [
+            ["insert", self.name],
+            ["documents", documents]
+        ])
+        # A command can succeed while individual writes fail; writeErrors is
+        # where that shows up, and ignoring it loses data silently.
+        self.raiseWriteErrors(result)
+        give result["n"]
+    }
+
+    task update(filter, changes, options = nil) {
+        one = { "q": filter, "u": changes, "multi": false, "upsert": false }
+        when options != nil {
+            when options["multi"] == true { one["multi"] = true }
+            when options["upsert"] == true { one["upsert"] = true }
+        }
+        result = self.client.command(self.database, [
+            ["update", self.name],
+            ["updates", [one]]
+        ])
+        self.raiseWriteErrors(result)
+        upsertedId = nil
+        upsertedCount = 0
+        when typeOf(result["upserted"]) == "array" and len(result["upserted"]) > 0 {
+            upsertedCount = len(result["upserted"])
+            upsertedId = result["upserted"][0]["_id"]
+        }
+        # `n` counts an upserted document too, so "matched" alone cannot tell
+        # an update from an insert. The id of a newly inserted document is the
+        # one thing the caller cannot work out afterwards, so it is returned.
+        give {
+            "matched": orElse(result["n"], 0) - upsertedCount,
+            "modified": orElse(result["nModified"], 0),
+            "upserted": upsertedCount,
+            "upsertedId": upsertedId
+        }
+    }
+
+    task updateMany(filter, changes) { give self.update(filter, changes, { "multi": true }) }
+    task upsert(filter, changes) { give self.update(filter, changes, { "upsert": true }) }
+
+    # `$set`, applied for you -- the commonest update, and forgetting the
+    # operator REPLACES the whole document instead of changing a field.
+    task set(filter, fields) { give self.update(filter, { "$set": fields }) }
+
+    task remove(filter, options = nil) {
+        limit = 1
+        when options != nil and options["multi"] == true { limit = 0 }
+        result = self.client.command(self.database, [
+            ["delete", self.name],
+            ["deletes", [{ "q": filter, "limit": limit }]]
+        ])
+        self.raiseWriteErrors(result)
+        give orElse(result["n"], 0)
+    }
+
+    task removeMany(filter) { give self.remove(filter, { "multi": true }) }
+
+    task raiseWriteErrors(result) {
+        when result["writeErrors"] == nil { give nil }
+        errors = result["writeErrors"]
+        when typeOf(errors) != "array" or len(errors) == 0 { give nil }
+        first = errors[0]
+        throw MongoError("mongodb: " + str(orElse(first["errmsg"], "a write failed")),
+                         orElse(first["code"], 0), "")
+    }
+
+    # ── reading ─────────────────────────────────────────────────────────────
+
+    # `options` may carry limit, skip, sort, projection.
+    task find(filter = nil, options = nil) {
+        request = [["find", self.name], ["filter", orElse(filter, {})]]
+        when options != nil {
+            when options["limit"] != nil { push(request, ["limit", options["limit"]]) }
+            when options["skip"] != nil { push(request, ["skip", options["skip"]]) }
+            when options["sort"] != nil { push(request, ["sort", options["sort"]]) }
+            when options["projection"] != nil { push(request, ["projection", options["projection"]]) }
+        }
+        result = self.client.command(self.database, request)
+        cursor = result["cursor"]
+        documents = []
+        get item in cursor["firstBatch"] { push(documents, item) }
+
+        # A large result arrives in batches. Without following the cursor a
+        # find() over a big collection silently returns only the first 101
+        # documents, which looks like a working query with missing data.
+        cursorId = cursor["id"]
+        while cursorId != 0 and cursorId != nil {
+            more = self.client.command(self.database, [
+                ["getMore", cursorId],
+                ["collection", self.name]
+            ])
+            batch = more["cursor"]
+            get item in batch["nextBatch"] { push(documents, item) }
+            cursorId = batch["id"]
+        }
+        give documents
+    }
+
+    task findOne(filter = nil, options = nil) {
+        opts = {}
+        when options != nil {
+            get name in keys(options) { opts[name] = options[name] }
+        }
+        opts["limit"] = 1
+        found = self.find(filter, opts)
+        when len(found) == 0 { give nil }
+        give found[0]
+    }
+
+    task findById(id) {
+        identifier = id
+        when typeOf(id) == "string" { identifier = ObjectId.fromHex(id) }
+        give self.findOne({ "_id": identifier })
+    }
+
+    task count(filter = nil) {
+        result = self.client.command(self.database, [
+            ["count", self.name],
+            ["query", orElse(filter, {})]
+        ])
+        give orElse(result["n"], 0)
+    }
+
+    task exists(filter) { give self.findOne(filter) != nil }
+
+    task distinct(field, filter = nil) {
+        result = self.client.command(self.database, [
+            ["distinct", self.name],
+            ["key", str(field)],
+            ["query", orElse(filter, {})]
+        ])
+        give orElse(result["values"], [])
+    }
+
+    task aggregate(pipeline) {
+        result = self.client.command(self.database, [
+            ["aggregate", self.name],
+            ["pipeline", pipeline],
+            ["cursor", {}]
+        ])
+        documents = []
+        get item in result["cursor"]["firstBatch"] { push(documents, item) }
+        give documents
+    }
+
+    # ── indexes and maintenance ─────────────────────────────────────────────
+
+    task createIndex(fields, options = nil) {
+        spec = { "key": fields, "name": indexNameFor(fields) }
+        when options != nil {
+            when options["unique"] == true { spec["unique"] = true }
+            when options["name"] != nil { spec["name"] = options["name"] }
+        }
+        give self.client.command(self.database, [
+            ["createIndexes", self.name],
+            ["indexes", [spec]]
+        ])
+    }
+
+    task indexes() {
+        result = self.client.command(self.database, [["listIndexes", self.name]])
+        found = []
+        get item in result["cursor"]["firstBatch"] { push(found, item["name"]) }
+        give found
+    }
+
+    task drop() {
+        try { give self.client.command(self.database, [["drop", self.name]]) }
+        catch (e) {
+            # Dropping something that is not there is not a failure worth
+            # propagating from an idempotent call.
+            when hasattr(e, "code") and getattr(e, "code") == 26 { give nil }
+            throw e
+        }
+    }
+}
+
+task indexNameFor(fields) {
+    parts = []
+    get name in keys(fields) { push(parts, str(name) + "_" + str(fields[name])) }
+    give join(parts, "_")
+}
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+task writeI32(target, value) {
+    n = value
+    when n < 0 { n = 4294967296 + n }
+    repeat i = 1 to 4 {
+        push(target, n % 256)
+        n = floor(n / 256)
+    }
+    give target
+}
+
+task readI32(bytes, offset) {
+    value = bytes[offset] + bytes[offset + 1] * 256 +
+            bytes[offset + 2] * 65536 + bytes[offset + 3] * 16777216
+    when value >= 2147483648 { give value - 4294967296 }
+    give value
+}
+
+task toByteArray(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+
+# SASL payloads travel as BSON binary, so the text has to become bytes first.
+task textBytes(text) {
+    octets = []
+    body = str(text)
+    repeat i = 0 to len(body) - 1 { push(octets, ord(substr(body, i, 1))) }
+    give octets
+}
+
+task orElse(value, fallback) {
+    when value == nil { give fallback }
+    give value
+}
+
+# ── shorthands ──────────────────────────────────────────────────────────────
+
+export task connect(settings) { give Mongo(settings).open() }
+
+# "mongodb://user:password@host:27017/database"
+export task fromUrl(url) {
+    body = str(url)
+    when startsWith(body, "mongodb://") { body = substr(body, 10, len(body) - 10) }
+    settings = { "host": "localhost", "port": DEFAULT_PORT }
+    when contains(body, "@") {
+        at = lastIndexOfChar(body, "@")
+        credentials = substr(body, 0, at)
+        body = substr(body, at + 1, len(body) - at - 1)
+        when contains(credentials, ":") {
+            colon = indexOf(credentials, ":")
+            settings["user"] = url_decode(substr(credentials, 0, colon))
+            settings["password"] = url_decode(substr(credentials, colon + 1, len(credentials) - colon - 1))
+        }
+        other { settings["user"] = url_decode(credentials) }
+    }
+    when contains(body, "?") {
+        mark = indexOf(body, "?")
+        body = substr(body, 0, mark)
+    }
+    when contains(body, "/") {
+        slash = indexOf(body, "/")
+        name = substr(body, slash + 1, len(body) - slash - 1)
+        when name != "" { settings["database"] = name }
+        body = substr(body, 0, slash)
+    }
+    when contains(body, ":") {
+        colon = indexOf(body, ":")
+        settings["host"] = substr(body, 0, colon)
+        settings["port"] = num(substr(body, colon + 1, len(body) - colon - 1))
+    }
+    other when body != "" { settings["host"] = body }
+    give Mongo(settings)
+}
+
+task lastIndexOfChar(text, needle) {
+    found = -1
+    repeat i = 0 to len(text) - 1 {
+        when substr(text, i, 1) == needle { found = i }
+    }
+    give found
+}

@@ -1,0 +1,11 @@
+{
+  "name": "mongodb",
+  "version": "1.0.0",
+  "description": "MongoDB for EZ over pure TCP. BSON, OP_MSG and SCRAM-SHA-256 authentication, with CRUD, cursors, aggregation and indexes. No driver to install.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["mongodb", "mongo", "nosql", "database", "bson", "document"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "socket": "^1.0.0", "crypto": "^1.0.0" }
+}

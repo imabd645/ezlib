@@ -1,0 +1,11 @@
+{
+  "name": "search",
+  "version": "1.0.0",
+  "description": "Full-text search for EZ. Meilisearch and Elasticsearch clients with indexing, querying, filters and bulk operations.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["search", "meilisearch", "elasticsearch", "opensearch", "fulltext", "index"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": { "httpx": "^1.0.0" }
+}

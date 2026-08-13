@@ -1,0 +1,244 @@
+# ============================================================================
+# google — test suite
+#   ez test.ez
+#
+# No credentials and no network. The HTTP layer is replaced with a transport
+# that records the request and returns a canned response, so what is checked
+# is the thing a REST wrapper actually gets wrong: the URL it builds, the verb
+# it uses, the parameters it sets and the body it sends.
+#
+# Calling the real APIs would test Google, not this package.
+# ============================================================================
+
+use "google"
+use "httpx"
+
+PASS = 0
+FAIL = 0
+
+LAST = nil
+NEXT_STATUS = 200
+NEXT_BODY = "{}"
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task throwsSaying(label, fragment, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) {
+        when contains(str(e.message), fragment) { PASS = PASS + 1 }
+        other {
+            FAIL = FAIL + 1
+            out `  FAIL {label}`
+            out `    expected the message to mention: {fragment}`
+            out `    actual:   {e.message}`
+        }
+    }
+}
+
+task fakeTransport(request) {
+    LAST = request
+    give { "ok": true, "status": NEXT_STATUS, "headers": "", "body": NEXT_BODY, "error": nil }
+}
+
+task clientFor(token) {
+    g = Google(token)
+    g.http.useTransport(fakeTransport)
+    give g
+}
+
+# The full URL the last request went to, rebuilt from what the transport saw.
+task lastUrl() {
+    scheme = "http://"
+    when LAST["secure"] { scheme = "https://" }
+    give scheme + LAST["host"] + LAST["path"]
+}
+
+out "google tests"
+
+g = clientFor("ya29.test-token")
+
+# ── authorisation ───────────────────────────────────────────────────────────
+NEXT_BODY = "{\"values\":[[\"a\"]]}"
+g.sheets().values("SHEET1", "Sheet1!A1:B2")
+check("the bearer token is sent", contains(LAST["headers"], "Bearer ya29.test-token"), true)
+check("a bare string token works", g.accessToken(), "ya29.test-token")
+
+# ── Sheets ──────────────────────────────────────────────────────────────────
+NEXT_BODY = "{\"values\":[[\"h1\",\"h2\"],[\"a\",\"b\"],[\"c\"]]}"
+s = g.sheets()
+
+rows = s.values("SHEET1", "Sheet1!A1:B3")
+check("hits the sheets host", LAST["host"], "sheets.googleapis.com")
+check("the values path", contains(lastUrl(), "/v4/spreadsheets/SHEET1/values/"), true)
+check("reads with GET", LAST["method"], "GET")
+# The range contains a "!", which must be escaped or it changes the path.
+check("the range is url-encoded", contains(lastUrl(), "Sheet1%21A1%3AB3"), true)
+check("returns the rows", len(rows), 3)
+
+# Google OMITS trailing empty cells, so rows come back ragged. Indexing into a
+# fixed column then reads past the end.
+check("raw rows are ragged", len(rows[2]), 1)
+padded = s.rows("SHEET1", "Sheet1!A1:B3")
+check("rows() pads to a rectangle", len(padded[2]), 2)
+check("the padding is empty string", padded[2][1], "")
+
+records = s.records("SHEET1", "Sheet1!A1:B3")
+check("records uses the first row as headers", len(records), 2)
+check("and maps by name", records[0]["h1"], "a")
+check("a short row still has every key", records[1]["h2"], "")
+
+NEXT_BODY = "{}"
+s.update("SHEET1", "A1", [["x"]])
+check("update uses PUT", LAST["method"], "PUT")
+# USER_ENTERED makes Google parse the value as if typed; RAW stores it as is.
+check("update defaults to USER_ENTERED", contains(lastUrl(), "valueInputOption=USER_ENTERED"), true)
+check("the body carries the values", contains(LAST["body"], "\"values\""), true)
+s.update("SHEET1", "A1", [["=A2+1"]], "RAW")
+check("RAW can be chosen", contains(lastUrl(), "valueInputOption=RAW"), true)
+
+s.append("SHEET1", "A1", [["y"]])
+check("append uses POST", LAST["method"], "POST")
+check("and the append verb", contains(lastUrl(), ":append"), true)
+check("inserting rows rather than overwriting",
+      contains(lastUrl(), "insertDataOption=INSERT_ROWS"), true)
+
+s.clear("SHEET1", "A1:B2")
+check("clear posts to :clear", contains(lastUrl(), ":clear"), true)
+
+s.create("My Sheet")
+check("create posts to the collection", endsWith(lastUrl(), "/v4/spreadsheets"), true)
+check("with the title in the body", contains(LAST["body"], "My Sheet"), true)
+
+# ── Drive ───────────────────────────────────────────────────────────────────
+NEXT_BODY = "{\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}"
+d = g.drive()
+
+files = d.list()
+check("hits the drive host", LAST["host"], "www.googleapis.com")
+check("the files path", contains(lastUrl(), "/drive/v3/files"), true)
+check("returns the files", len(files), 1)
+# Without an explicit fields list Drive returns only id and name.
+check("asks for useful fields", contains(lastUrl(), "fields="), true)
+d.list("name = 'report.csv'")
+check("a search query is passed", contains(lastUrl(), "q="), true)
+
+NEXT_BODY = "file contents here"
+content = d.download("FILE1")
+check("download asks for the media", contains(lastUrl(), "alt=media"), true)
+# alt=media is what separates content from metadata; without it Drive returns
+# the metadata with a 200 and nothing looks wrong.
+check("and returns the body verbatim", content, "file contents here")
+
+NEXT_BODY = "{\"id\":\"new\"}"
+d.upload("report.csv", "a,b\n1,2", "text/csv")
+check("upload goes to the upload host", contains(lastUrl(), "/upload/drive/v3/files"), true)
+check("as a multipart upload", contains(lastUrl(), "uploadType=multipart"), true)
+check("with a multipart content type", contains(LAST["headers"], "multipart/related"), true)
+# Simple upload cannot carry a filename, which is why this is multipart.
+check("the metadata carries the name", contains(LAST["body"], "report.csv"), true)
+check("and the content is in the body", contains(LAST["body"], "a,b"), true)
+check("the declared mime type is used", contains(LAST["body"], "text/csv"), true)
+
+d.createFolder("Reports")
+check("a folder is a file with a folder mime type",
+      contains(LAST["body"], "application/vnd.google-apps.folder"), true)
+
+d.remove("FILE1")
+check("remove uses DELETE", LAST["method"], "DELETE")
+
+d.shareWithAnyone("FILE1")
+check("sharing posts a permission", contains(lastUrl(), "/permissions"), true)
+check("of type anyone", contains(LAST["body"], "anyone"), true)
+
+# ── Calendar ────────────────────────────────────────────────────────────────
+NEXT_BODY = "{\"items\":[{\"id\":\"e1\",\"summary\":\"Standup\"}]}"
+c = g.calendar()
+
+events = c.events("primary")
+check("hits the calendar path", contains(lastUrl(), "/calendar/v3/calendars/primary/events"), true)
+check("returns the items", len(events), 1)
+# Recurring events otherwise come back as a single rule rather than instances.
+check("expands recurring events", contains(lastUrl(), "singleEvents=true"), true)
+c.events("primary", { "timeMin": "2026-01-01T00:00:00Z" })
+check("a time filter is passed", contains(lastUrl(), "timeMin="), true)
+
+c.createEvent("primary", "Review", "2026-03-01T09:00:00Z", "2026-03-01T10:00:00Z")
+check("creating uses POST", LAST["method"], "POST")
+check("the summary is sent", contains(LAST["body"], "Review"), true)
+check("start and end are sent", contains(LAST["body"], "dateTime"), true)
+
+c.deleteEvent("primary", "e1")
+check("deleting an event", LAST["method"], "DELETE")
+
+# ── Gmail ───────────────────────────────────────────────────────────────────
+NEXT_BODY = "{\"messages\":[{\"id\":\"m1\"}]}"
+m = g.gmail()
+
+msgs = m.messages("is:unread")
+check("hits the gmail host", LAST["host"], "gmail.googleapis.com")
+check("the messages path", contains(lastUrl(), "/gmail/v1/users/me/messages"), true)
+check("a search query is passed", contains(lastUrl(), "q=is%3Aunread"), true)
+check("returns the messages", len(msgs), 1)
+
+NEXT_BODY = "{\"id\":\"sent\"}"
+m.send("them@example.com", "Hello", "Body text")
+check("send posts", LAST["method"], "POST")
+check("to the send endpoint", endsWith(lastUrl(), "/messages/send"), true)
+check("the body carries a raw message", contains(LAST["body"], "\"raw\""), true)
+# base64URL, not base64: the standard alphabet's + and / are not URL-safe and
+# Gmail rejects a message encoded with them.
+check("encoded url-safe", contains(LAST["body"], "+") == false, true)
+decoded = b64url_decode(parse_json(LAST["body"])["raw"])
+check("the recipient is in the message", contains(decoded, "To: them@example.com"), true)
+check("and the subject", contains(decoded, "Subject: Hello"), true)
+check("and the body", contains(decoded, "Body text"), true)
+check("plain text by default", contains(decoded, "text/plain"), true)
+m.send("them@example.com", "Hi", "<b>x</b>", { "html": true })
+check("html can be chosen",
+      contains(b64url_decode(parse_json(LAST["body"])["raw"]), "text/html"), true)
+
+# ── errors ──────────────────────────────────────────────────────────────────
+# Google reports the useful part as error.errors[0].reason; branching on that
+# is more reliable than matching the message.
+NEXT_STATUS = 403
+NEXT_BODY = "{\"error\":{\"code\":403,\"message\":\"Insufficient Permission\",\"errors\":[{\"reason\":\"insufficientPermissions\"}]}}"
+throwsSaying("a 403 surfaces the message", "Insufficient Permission",
+             || g.drive().list())
+throwsSaying("and explains a missing scope", "scope", || g.drive().list())
+try { g.drive().list() }
+catch (e) { check("the reason is attached", e.reason, "insufficientPermissions") }
+
+NEXT_STATUS = 401
+NEXT_BODY = "{\"error\":{\"code\":401,\"message\":\"Invalid Credentials\"}}"
+throwsSaying("a 401 says the token is stale", "expired", || g.drive().list())
+
+NEXT_STATUS = 404
+NEXT_BODY = "{\"error\":{\"code\":404,\"message\":\"File not found: x\"}}"
+throwsSaying("a 404 surfaces the message", "File not found", || g.drive().get("x"))
+
+NEXT_STATUS = 500
+NEXT_BODY = "<html>backend error</html>"
+throwsSaying("a non-JSON failure is still reported", "backend error", || g.drive().list())
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

@@ -1,0 +1,63 @@
+# ============================================================================
+# mysql/auth.ez — proving who you are without sending the password
+#
+# Neither scheme here puts the password on the wire. The server sends a random
+# nonce and the client returns a hash mixed with it, so a captured handshake
+# cannot be replayed against a different nonce.
+# ============================================================================
+
+use "crypto"
+use "mysql/protocol.ez"
+
+task xorBytes(a, b) {
+    result = []
+    repeat i = 0 to len(a) - 1 { push(result, a[i] ^ b[i]) }
+    give result
+}
+
+task sha1Of(byteArray) { give Hash.sha1Bytes(bytesToString(byteArray)) }
+task sha256Of(byteArray) { give Hash.sha256Bytes(bytesToString(byteArray)) }
+
+task concat(a, b) {
+    result = []
+    get x in a { push(result, x) }
+    get y in b { push(result, y) }
+    give result
+}
+
+# mysql_native_password, the default on MariaDB and on MySQL 5.7.
+#
+#   SHA1(password) XOR SHA1( nonce + SHA1(SHA1(password)) )
+export task nativePassword(password, nonce) {
+    when password == nil or password == "" { give [] }
+    stage1 = sha1Of(stringToBytes(str(password)))
+    stage2 = sha1Of(stage1)
+    scrambled = sha1Of(concat(nonce, stage2))
+    give xorBytes(stage1, scrambled)
+}
+
+# caching_sha2_password, the default on MySQL 8.
+#
+#   SHA256(password) XOR SHA256( SHA256(SHA256(password)) + nonce )
+#
+# This is only the FAST path, which the server accepts once it already holds
+# the password in its cache. On a cold cache it answers "full authentication
+# required", and completing that over a plaintext connection means encrypting
+# the password with the server's RSA public key -- which needs an RSA
+# implementation this package does not have. The client reports that clearly
+# rather than hanging or failing with something unrelated.
+export task cachingSha2Password(password, nonce) {
+    when password == nil or password == "" { give [] }
+    stage1 = sha256Of(stringToBytes(str(password)))
+    stage2 = sha256Of(stage1)
+    scrambled = sha256Of(concat(stage2, nonce))
+    give xorBytes(stage1, scrambled)
+}
+
+export task scrambleFor(plugin, password, nonce) {
+    name = str(plugin)
+    when name == "mysql_native_password" or name == "" { give nativePassword(password, nonce) }
+    when name == "caching_sha2_password" { give cachingSha2Password(password, nonce) }
+    when name == "mysql_clear_password" { give stringToBytes(str(password)) }
+    throw Exception(`mysql: the server asked for the '{name}' authentication plugin, which this client does not implement. Use mysql_native_password: ALTER USER ... IDENTIFIED WITH mysql_native_password BY '...'`)
+}

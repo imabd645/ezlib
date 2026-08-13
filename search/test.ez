@@ -1,0 +1,194 @@
+# ============================================================================
+# search — test suite
+#   ez test.ez
+#
+# The offline section covers the compact JSON encoder, which is the piece the
+# bulk endpoint depends on and the only part that can be wrong without a
+# server saying so.
+#
+# The live sections run against a real Meilisearch and a real Elasticsearch:
+#
+#   docker run -d -p 7700:7700 -e MEILI_MASTER_KEY=ezTestKey123 \
+#              -e MEILI_ENV=development getmeili/meilisearch:v1.6
+#   docker run -d -p 9200:9200 -e discovery.type=single-node \
+#              -e xpack.security.enabled=false \
+#              docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+#
+# Either being absent skips its section and reports the skip, rather than
+# passing quietly.
+# ============================================================================
+
+use "search"
+use "search/ndjson.ez"
+use "httpx"
+
+PASS = 0
+FAIL = 0
+SKIPPED = 0
+
+MEILI_URL = "http://localhost:7700"
+MEILI_KEY = "ezTestKey123"
+ES_URL = "http://localhost:9200"
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+task reachable(url) {
+    try {
+        r = Http().withTimeout(3000).get(url)
+        give r.status > 0
+    }
+    catch (e) { give false }
+}
+
+out "search tests"
+
+# ── compact JSON ────────────────────────────────────────────────────────────
+# The bulk endpoint is newline-DELIMITED, so a newline inside a document ends
+# it early. to_json pretty-prints, which is why this exists.
+check("no newlines in an object", contains(compactJson({ "a": 1, "b": 2 }), "\n"), false)
+check("no newlines in an array", contains(compactJson([1, 2, 3]), "\n"), false)
+check("an array", compactJson([1, 2, 3]), "[1,2,3]")
+check("nested", compactJson({ "a": [1, { "b": 2 }] }), "{\"a\":[1,{\"b\":2}]}")
+check("null", compactJson(nil), "null")
+check("true", compactJson(true), "true")
+check("false", compactJson(false), "false")
+check("an empty array", compactJson([]), "[]")
+check("an empty object", compactJson({}), "{}")
+check("a string", compactJson("hi"), "\"hi\"")
+# Escaping is not optional: an unescaped quote makes the line invalid JSON,
+# and an unescaped newline splits the document in two.
+check("escapes a quote", compactJson("say \"hi\""), "\"say \\\"hi\\\"\"")
+check("escapes a backslash", compactJson("a\\b"), "\"a\\\\b\"")
+check("escapes a newline", compactJson("a\nb"), "\"a\\nb\"")
+check("escapes a tab", compactJson("a\tb"), "\"a\\tb\"")
+check("a newline in a value never reaches the output",
+      contains(compactJson({ "note": "line1\nline2" }), "\n"), false)
+# Bytes above 127 are already UTF-8 and JSON takes them directly.
+check("passes utf-8 through", compactJson("café"), "\"café\"")
+# It must still be parseable by the ordinary parser.
+check("round-trips through parse_json", parse_json(compactJson({ "a": "x\ny" }))["a"], "x\ny")
+
+# ── Meilisearch, live ───────────────────────────────────────────────────────
+when reachable(MEILI_URL + "/health") == false {
+    SKIPPED = SKIPPED + 22
+    out "  (no Meilisearch on 7700 -- 22 assertions skipped)"
+}
+other {
+    m = Meili(MEILI_URL, MEILI_KEY)
+    check("health", m.health()["status"], "available")
+    check("version is reported", len(str(m.version()["pkgVersion"])) > 0, true)
+
+    m.deleteIndex("ez_test_books")
+    m.waitForTask(m.createIndex("ez_test_books", "id"))
+    books = m.index("ez_test_books")
+
+    books.add([
+        { "id": 1, "title": "The Left Hand of Darkness", "author": "Le Guin", "year": 1969 },
+        { "id": 2, "title": "A Wizard of Earthsea", "author": "Le Guin", "year": 1968 },
+        { "id": 3, "title": "Dune", "author": "Herbert", "year": 1965 }
+    ])
+    # Indexing is asynchronous. Reading without waiting sees the old state,
+    # which is why every write hands back a task id.
+    books.waitForPending()
+    check("documents are indexed", books.count(), 3)
+
+    check("finds a match", len(books.find("darkness")), 1)
+    check("the right one", books.find("darkness")[0]["title"], "The Left Hand of Darkness")
+    # Typo tolerance is the reason to choose this engine.
+    check("tolerates a typo", len(books.find("wizrd")), 1)
+    check("no match", len(books.find("zzzznothing")), 0)
+    check("fetches by id", books.document(2)["title"], "A Wizard of Earthsea")
+    check("a missing document is nil", books.document(999), nil)
+    check("lists documents", len(books.documents(10, 0)), 3)
+
+    # Meilisearch refuses a filter on a field that was not declared, which is
+    # the first thing everyone trips over.
+    books.setFilterable(["author", "year"])
+    books.waitForPending()
+    filtered = books.search("", { "filter": "year < 1969" })
+    check("filters", filtered["estimatedTotalHits"], 2)
+    books.setSortable(["year"])
+    books.waitForPending()
+    sorted1 = books.search("", { "sort": ["year:asc"], "limit": 1 })
+    check("sorts", sorted1["hits"][0]["year"], 1965)
+    check("limit is honoured", len(books.search("", { "limit": 2 })["hits"]), 2)
+    check("settings are readable", len(keys(books.settings())) > 0, true)
+
+    books.remove(3)
+    books.waitForPending()
+    check("removes a document", books.count(), 2)
+    books.clear()
+    books.waitForPending()
+    check("clears the index", books.count(), 0)
+
+    check("lists indexes", contains(to_json(m.indexes()), "ez_test_books"), true)
+    # A wrong key must be refused, not silently ignored.
+    throws("a bad api key is rejected",
+           || Meili(MEILI_URL, "wrong-key").index("ez_test_books").search("x"))
+    # An id containing a slash would address a different endpoint unescaped.
+    check("an id with a slash is escaped", books.document("a/b"), nil)
+    m.deleteIndex("ez_test_books")
+    check("the index is gone", contains(to_json(m.indexes()), "ez_test_books"), false)
+}
+
+# ── Elasticsearch, live ─────────────────────────────────────────────────────
+when reachable(ES_URL) == false {
+    SKIPPED = SKIPPED + 14
+    out "  (no Elasticsearch on 9200 -- 14 assertions skipped)"
+}
+other {
+    es = Elastic(ES_URL)
+    check("info", len(str(es.info()["version"]["number"])) > 0, true)
+
+    es.deleteIndex("ez_test_books")
+    es.createIndex("ez_test_books")
+    idx = es.index("ez_test_books")
+
+    idx.add({ "title": "The Left Hand of Darkness", "author": "Le Guin", "year": 1969 }, "1")
+    # The bulk path is the one that depends on compact JSON.
+    idx.addMany([
+        { "id": "2", "title": "A Wizard of Earthsea", "author": "Le Guin", "year": 1968 },
+        { "id": "3", "title": "Dune", "author": "Herbert", "year": 1965 }
+    ], "id")
+    idx.refresh()
+    check("bulk indexing worked", idx.count(), 3)
+
+    check("finds a match", len(idx.find("darkness")), 1)
+    check("the right one", idx.find("darkness")[0]["title"], "The Left Hand of Darkness")
+    check("fetches by id", idx.document("1")["title"], "The Left Hand of Darkness")
+    check("a missing document is nil", idx.document("nope"), nil)
+    check("the raw DSL works",
+          idx.query({ "query": { "term": { "author.keyword": "Le Guin" } } })["hits"]["total"]["value"], 2)
+    check("size is honoured", len(idx.find("a", { "size": 1 })) <= 1, true)
+
+    check("removes", idx.remove("3"), true)
+    idx.refresh()
+    check("the count drops", idx.count(), 2)
+    check("removing what is not there", idx.remove("nope"), false)
+    check("lists indexes", contains(to_json(es.indexes()), "ez_test_books"), true)
+    # A bad query must surface the server's own reason, not a generic failure.
+    throws("a malformed query is reported",
+           || idx.query({ "query": { "nonsense_clause": {} } }))
+    es.deleteIndex("ez_test_books")
+    check("the index is gone", contains(to_json(es.indexes()), "ez_test_books"), false)
+}
+
+out ""
+when SKIPPED > 0 { out `  skipped {SKIPPED}` }
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }
