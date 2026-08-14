@@ -56,7 +56,7 @@ ez install <every name below>
 | **sqlite** | 1.0.0 | SQLite over pure FFI — prepared statements, transactions, migrations |
 | **db** | 1.0.0 | SQLite framework with CRUD helpers, query builders and transactions |
 | **orm** | 1.1.0 | SQLAlchemy-style ORM — models, relationships, identity map, sessions |
-| **migrate** | 1.0.0 | Schema migrations — ordered up/down steps, a ledger, transactional application, drift detection |
+| **migrate** | 1.1.0 | Schema migrations — ordered up/down steps declared in code or loaded from a directory of `.sql` files, a ledger, transactional application, drift detection |
 | **redis** | 1.0.0 | Redis over pure TCP — RESP, strings, hashes, lists, sets, expiry, URL connection strings |
 | **s3** | 1.0.0 | S3-compatible object storage — Signature V4, presigned URLs, presets for R2, Spaces and MinIO |
 | **cache** | 1.0.0 | In-memory caching — TTL expiry, LRU eviction, compute-on-miss, memoisation, hit-rate stats |
@@ -174,7 +174,7 @@ auth      → web            oauth      → crypto        s3         → httpx, 
 jwt       → crypto, pki    os         → fs            serve      → fs
 log       → fs             password   → crypto        table      → color
 mailer    → email          progress   → color         taskschd   → os, csv
-migrate   → orm            queue      → redis         totp       → crypto
+migrate   → orm, fs        queue      → redis         totp       → crypto
                            redis      → socket        websocket  → socket, crypto
 ```
 
