@@ -1,0 +1,185 @@
+# ============================================================================
+# migrate/files.ez — loading migrations from a directory of .sql files
+#
+# The rest of this package treats a migration as a pair of closures; this file
+# is what turns files on disk into that pair, so Migrator itself never has to
+# know a directory was involved.
+#
+# Naming convention, one migration per id:
+#
+#   001_users.up.sql
+#   001_users.down.sql     -- optional; a migration with no down file cannot
+#                              be rolled back, same as passing nil to add()
+#
+# or, for something with no rollback at all, a single file:
+#
+#   001_users.sql           -- treated as the up step, down is nil
+#
+# Anything else in the directory (a README, a .gitkeep) is ignored rather
+# than rejected, since a migrations folder is a reasonable place to keep both.
+# ============================================================================
+
+use "fs" as fs
+
+# ── filename → (id, kind) ───────────────────────────────────────────────────
+
+# Longer suffixes are checked first: ".up.sql" and ".down.sql" both end in
+# ".sql", so the plain-.sql case has to come last or every up/down file would
+# be misread as a standalone one.
+task _parseMigrationFileName(name) {
+    when endsWith(name, ".up.sql") {
+        give { "id": substr(name, 0, len(name) - 7), "kind": "up" }
+    }
+    when endsWith(name, ".down.sql") {
+        give { "id": substr(name, 0, len(name) - 9), "kind": "down" }
+    }
+    when endsWith(name, ".sql") {
+        give { "id": substr(name, 0, len(name) - 4), "kind": "up" }
+    }
+    give nil
+}
+
+task _joinPath(dir, name) {
+    when endsWith(dir, "\\") { give dir + name }
+    give dir + "\\" + name
+}
+
+# ── scanning a directory ────────────────────────────────────────────────────
+
+# Reads every *.sql file in `dirPath` and groups them by id. Returns
+# [{ id, up, down }], sorted by id -- the same order `Migrator.ordered()`
+# would put them in, since ids are meant to sort the way they should run.
+#
+# Throws if a directory doesn't exist, or if some id has a down file but no
+# up file -- that pairing can't come from anything but a typo or a half
+# deleted migration, and running would otherwise silently skip it forever
+# (it would never appear in `pending()`, since there is no up step to apply).
+export task scanMigrationsDir(dirPath) {
+    when fs.exists(dirPath) == false or fs.isDir(dirPath) == false {
+        throw Exception(`migrate: '{dirPath}' is not a directory`)
+    }
+
+    byId = {}
+    get name in fs.listDir(dirPath) {
+        parsed = _parseMigrationFileName(name)
+        when parsed == nil { skip }
+
+        id = parsed["id"]
+        when byId[id] == nil { byId[id] = { "up": nil, "down": nil } }
+        text = readFile(_joinPath(dirPath, name))
+        when parsed["kind"] == "up"   { byId[id]["up"]   = text }
+        when parsed["kind"] == "down" { byId[id]["down"] = text }
+    }
+
+    result = []
+    get id in sort(keys(byId)) {
+        entry = byId[id]
+        when entry["up"] == nil {
+            throw Exception(`migrate: '{id}' has a down file but no up file in '{dirPath}'`)
+        }
+        push(result, { "id": id, "up": entry["up"], "down": entry["down"] })
+    }
+    give result
+}
+
+# ── splitting a file into statements ────────────────────────────────────────
+
+# Same job as xml's xmlIndexFrom -- indexOf has no start offset, so searching
+# from partway through the string needs its own loop.
+task _indexFrom(haystack, needle, from) {
+    hLen = len(haystack)
+    nLen = len(needle)
+    when nLen == 0 { give -1 }
+    last = hLen - nLen
+    when from > last { give -1 }
+    repeat i = from to last {
+        when substr(haystack, i, nLen) == needle { give i }
+    }
+    give -1
+}
+
+# Drivers here prepare one statement at a time (sqlite refuses a string with
+# more than one), so a file holding several `CREATE TABLE ...; CREATE INDEX
+# ...;` has to be split before it runs. This understands enough SQL not to
+# split inside a '...' or "..." literal or a -- / * * / comment. It is not a
+# parser: a semicolon inside something stranger, like a Postgres dollar-quoted
+# function body, will still split wrongly. Keep those as one statement, one
+# file, with no trailing semicolon for anything after it in the same file.
+export task splitStatements(sql) {
+    body = str(sql)
+    n = len(body)
+    results = []
+    buf = ""
+    i = 0
+
+    while i < n {
+        c = substr(body, i, 1)
+        c2 = ""
+        when i + 1 < n { c2 = substr(body, i, 2) }
+
+        when c2 == "--" {
+            end = _indexFrom(body, chr(10), i)
+            when end == -1 { i = n }
+            other { i = end + 1 }
+            skip
+        }
+
+        when c2 == "/*" {
+            end = _indexFrom(body, "*/", i + 2)
+            when end == -1 {
+                throw Exception("migrate: unterminated block comment in migration SQL")
+            }
+            i = end + 2
+            skip
+        }
+
+        # 'string literal', with '' as an escaped quote inside one.
+        when c == "'" {
+            buf = buf + c
+            i = i + 1
+            while i < n {
+                c = substr(body, i, 1)
+                buf = buf + c
+                i = i + 1
+                when c == "'" {
+                    when i < n and substr(body, i, 1) == "'" {
+                        buf = buf + "'"
+                        i = i + 1
+                    }
+                    other { escape }
+                }
+            }
+            skip
+        }
+
+        # "quoted identifier" -- no doubling convention to worry about here.
+        when c == "\"" {
+            buf = buf + c
+            i = i + 1
+            while i < n {
+                c = substr(body, i, 1)
+                buf = buf + c
+                i = i + 1
+                when c == "\"" { escape }
+            }
+            skip
+        }
+
+        when c == ";" {
+            trimmed = trim(buf)
+            when trimmed != "" { push(results, trimmed) }
+            buf = ""
+            i = i + 1
+            skip
+        }
+
+        other {
+            buf = buf + c
+            i = i + 1
+        }
+    }
+
+    trimmed = trim(buf)
+    when trimmed != "" { push(results, trimmed) }
+    give results
+}

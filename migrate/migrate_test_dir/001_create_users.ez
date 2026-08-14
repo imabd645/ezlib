@@ -1,0 +1,7 @@
+task up(db) {
+    db.execute("CREATE TABLE file_users (id INTEGER PRIMARY KEY, name TEXT)", [])
+}
+
+task down(db) {
+    db.execute("DROP TABLE file_users", [])
+}

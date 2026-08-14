@@ -11,6 +11,9 @@
 #       |db| db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", []),
 #       |db| db.execute("DROP TABLE users", []))
 #
+#   # or load a folder of 001_users.up.sql / 001_users.down.sql files:
+#   m.addDir("migrations")
+#
 #   m.up()
 #
 # The ORM's createAll() uses CREATE TABLE IF NOT EXISTS, so changing a model
@@ -19,7 +22,8 @@
 # schema got to where it is, applied in order, exactly once each.
 # ============================================================================
 
-use "migrate/store.ez"
+use "store.ez"
+use "files.ez"
 
 export model Migrator {
 
@@ -71,6 +75,23 @@ export model Migrator {
     task addWithSource(id, up, down, source) {
         self.add(id, up, down)
         self.migrations[len(self.migrations) - 1]["checksum"] = fingerprint(source)
+        give self
+    }
+
+    # Declares every migration found in `dirPath` -- see migrate/files.ez for
+    # the naming convention (001_users.up.sql / .down.sql, or a bare .sql for
+    # a one-way migration). Each file is fingerprinted on its own text, so
+    # drift() and report() work the same as for migrations added by hand.
+    task addDir(dirPath) {
+        get entry in scanMigrationsDir(dirPath) {
+            upTask = _sqlRunner(splitStatements(entry["up"]))
+            downTask = nil
+            when entry["down"] != nil { downTask = _sqlRunner(splitStatements(entry["down"])) }
+            # The checksum only has to notice the file changed, so the raw
+            # up/down text goes in as-is rather than the split statements.
+            source = entry["up"] + chr(0) + str(entry["down"])
+            self.addWithSource(entry["id"], upTask, downTask, source)
+        }
         give self
     }
 
@@ -273,6 +294,20 @@ export model Migrator {
 task nowStamp() {
     d = DateTime()
     give d.format("%Y-%m-%d %H:%M:%S")
+}
+
+# A fresh call frame per file, so each closure below captures its own
+# `statements` parameter rather than a loop variable in addDir() that every
+# closure would end up sharing by reference once the loop finished -- the
+# same reason `retry`'s attempt counter lives on the policy instead of in a
+# captured local.
+task _sqlRunner(statements) {
+    give |db| _runStatements(db, statements)
+}
+
+task _runStatements(db, statements) {
+    get stmt in statements { db.execute(stmt, []) }
+    give nil
 }
 
 # ── shorthand ───────────────────────────────────────────────────────────────

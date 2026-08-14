@@ -1,0 +1,8 @@
+__mig_up = nil
+export model TestModel {
+    task run() {
+        source = "task up() { out \"up run\" }\n__mig_up = up\nout \"Inside eval: \" + type(__mig_up)\n"
+        eval(source)
+        out "In model: type is " + type(__mig_up)
+    }
+}

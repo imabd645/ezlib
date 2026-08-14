@@ -1,0 +1,13 @@
+__mig_up = nil
+__mig_down = nil
+
+task runMe() {
+    arr = [1, 2]
+    get i in arr {
+        source = "task up(db) { out \"up run \" + str(" + str(i) + ") }\n"
+        wrapped = source + "__mig_up = up\ntry { __mig_down = down } catch (e) { __mig_down = nil }\n"
+        eval(wrapped)
+        __mig_up(nil)
+    }
+}
+runMe()

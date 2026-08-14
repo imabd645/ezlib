@@ -4,8 +4,10 @@
 // ============================================================================
 
 use "orm"
+use "fs"
 use "migrate"
 use "migrate/store.ez"
+use "migrate/files.ez"
 
 PASS = 0
 FAIL = 0
@@ -190,6 +192,122 @@ m13 = Migrator(d13).onLog(|msg| { push(LOGGED, msg)  give nil })
 m13.add("001_a", |db| db.execute("CREATE TABLE a (x INTEGER)", []), nil)
 m13.up()
 check("log handler receives output", len(LOGGED) > 0, true)
+
+// ── file-based migrations ────────────────────────────────────────────────────
+
+MIG_DIRS = []
+MIG_FILES = []
+task testDir(name) {
+    path = "migrate_test_" + name
+    try { fs.remove(path) } catch (e) { }
+    fs.mkdir(path)
+    push(MIG_DIRS, path)
+    give path
+}
+task writeIn(dir, name, content) {
+    path = dir + "\\" + name
+    writeFile(path, content)
+    push(MIG_FILES, path)
+    give path
+}
+
+out ""
+out "migrate — file-based migrations"
+
+// ── splitStatements: the part none of this works without ──────────────────
+oneLine = splitStatements("CREATE TABLE t (a TEXT); -- a comment; with a semicolon\nINSERT INTO t VALUES ('a;b');")
+checkVal("comments and string semicolons are not split points", len(oneLine), 2)
+check("first statement kept whole", contains(oneLine[0], "CREATE TABLE t"), true)
+check("string literal's semicolon survives", contains(oneLine[1], "'a;b'"), true)
+
+blockStmts = splitStatements("/* multi\nline; comment */ CREATE TABLE t2 (a TEXT);")
+checkVal("block comments are not split points either", len(blockStmts), 1)
+
+checkVal("blank input yields no statements", len(splitStatements("   ")), 0)
+checkVal("a lone trailing ; adds nothing extra", len(splitStatements("CREATE TABLE t3 (a TEXT);")), 1)
+checkVal("a statement with no trailing ; is still kept", len(splitStatements("CREATE TABLE t4 (a TEXT)")), 1)
+
+// ── scanning a directory: ordering, optional down, bare .sql, ignored files ─
+dir1 = testDir("dir1")
+writeIn(dir1, "001_a.up.sql", "CREATE TABLE fa (x INTEGER);")
+writeIn(dir1, "001_a.down.sql", "DROP TABLE fa;")
+writeIn(dir1, "002_b.sql", "CREATE TABLE fb (x INTEGER);")   // bare .sql, up only
+writeIn(dir1, "README.md", "not a migration")                // must be ignored
+
+d20 = freshDriver()
+m20 = Migrator(d20).quiet()
+m20.addDir(dir1)
+checkVal("addDir finds both, sorted by id, non-sql ignored", m20.pending(), ["001_a", "002_b"])
+checkVal("addDir applies in id order", m20.up(), ["001_a", "002_b"])
+check("table from the .up/.down pair", tableExists(d20, "fa"), true)
+check("table from the bare .sql file", tableExists(d20, "fb"), true)
+
+threw = false
+try { m20.down(1) } catch (e) { threw = true }
+check("a bare .sql migration has no down step", threw, true)
+check("the failed rollback left its table alone", tableExists(d20, "fb"), true)
+
+// ── a migration with a real down file actually rolls back ──────────────────
+dir2 = testDir("dir2")
+writeIn(dir2, "001_c.up.sql", "CREATE TABLE fc (x INTEGER);")
+writeIn(dir2, "001_c.down.sql", "DROP TABLE fc;")
+
+d21 = freshDriver()
+m21 = Migrator(d21).quiet()
+m21.addDir(dir2)
+m21.up()
+check("table exists before rollback", tableExists(d21, "fc"), true)
+checkVal("down reverts the file-based migration", m21.down(1), ["001_c"])
+check("table gone after rollback", tableExists(d21, "fc"), false)
+
+// ── multi-statement files run as separate statements, in order ─────────────
+dir3 = testDir("dir3")
+multiSql = "CREATE TABLE quotes (id INTEGER PRIMARY KEY, note TEXT);\n" +
+    "INSERT INTO quotes (note) VALUES ('semi ; colon; inside a string');\n" +
+    "-- a trailing comment with a ; in it\n" +
+    "INSERT INTO quotes (note) VALUES ('second row');"
+writeIn(dir3, "001_quotes.up.sql", multiSql)
+writeIn(dir3, "001_quotes.down.sql", "DROP TABLE quotes;")
+
+d22 = freshDriver()
+m22 = Migrator(d22).quiet()
+m22.addDir(dir3)
+m22.up()
+rows = d22.query("SELECT note FROM quotes ORDER BY id", [])
+checkVal("both inserts ran as separate statements", len(rows), 2)
+check("the embedded semicolon was not split on", rows[0]["note"], "semi ; colon; inside a string")
+check("the second row ran too", rows[1]["note"], "second row")
+
+// ── errors: a down file with no matching up file ────────────────────────────
+dir4 = testDir("dir4")
+writeIn(dir4, "001_orphan.down.sql", "DROP TABLE nope;")
+orphanThrew = false
+try { scanMigrationsDir(dir4) } catch (e) { orphanThrew = true }
+check("a down file with no up file is refused", orphanThrew, true)
+
+// ── errors: the directory itself is missing ─────────────────────────────────
+missingThrew = false
+try { Migrator(freshDriver()).quiet().addDir("migrate_test_does_not_exist") } catch (e) { missingThrew = true }
+check("addDir on a missing directory throws", missingThrew, true)
+
+// ── drift detection works the same way for file-based migrations ───────────
+dir5 = testDir("dir5")
+writeIn(dir5, "001_d.up.sql", "CREATE TABLE fd (x INTEGER);")
+
+d23 = freshDriver()
+m23 = Migrator(d23).quiet()
+m23.addDir(dir5)
+m23.up()
+
+// Same directory, edited on disk since it was applied.
+try { fs.remove(dir5 + "\\001_d.up.sql") } catch (e) { }
+writeIn(dir5, "001_d.up.sql", "CREATE TABLE fd (x INTEGER, y TEXT);")
+m24 = Migrator(d23).quiet()
+m24.addDir(dir5)
+checkVal("editing an applied file is detected as drift", m24.drifted(), ["001_d"])
+
+get f in MIG_FILES { try { fs.remove(f) } catch (e) { } }
+get dir in MIG_DIRS { try { fs.remove(dir) } catch (e) { } }
 
 get f in DB_FILES { try { File.remove(f) } catch (e) { } }
 out ""

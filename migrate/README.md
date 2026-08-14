@@ -2,7 +2,7 @@
 
 > **Import:** `use "migrate"`
 > **Install:** `ez install migrate`
-> **Depends on:** `orm`
+> **Depends on:** `orm`, `fs`
 
 ```ez
 use "orm"
@@ -116,6 +116,58 @@ m.drifted()      # ["001_users"] once the text changes
 `report()` marks those as `CHANGED`. The fingerprint is a cheap content hash,
 not a cryptographic one — it only has to notice that the text changed.
 
+## Loading migrations from a directory
+
+`m.add(...)` keeps everything in code, in one file or a registry module that
+imports one file per migration. If you'd rather keep each migration as its
+own `.sql` file, `addDir` reads a whole folder:
+
+```ez
+m.addDir("migrations")
+```
+
+One migration per id, two files:
+
+```
+migrations/
+  001_users.up.sql
+  001_users.down.sql
+  002_add_email.up.sql
+  002_add_email.down.sql
+```
+
+`.down.sql` is optional — a migration with no down file can't be rolled back,
+same as passing `nil` to `add()` directly. For something with no rollback at
+all, skip the pair and write a single file instead:
+
+```
+migrations/
+  003_backfill.sql
+```
+
+Anything else in the folder — a `README.md`, a `.gitkeep` — is ignored rather
+than rejected, so the migrations directory can carry its own documentation.
+
+A file may hold more than one statement, separated by `;`:
+
+```sql
+-- 001_users.up.sql
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+CREATE INDEX idx_users_name ON users (name);
+```
+
+sqlite (and the other drivers here) only prepare one statement at a time, so
+`addDir` splits each file before running it. The splitter understands `'...'`
+and `"..."` string literals and `--` / `/* */` comments well enough not to
+split inside them, but it is not a SQL parser — a semicolon inside something
+stranger, such as a Postgres dollar-quoted function body, will still split
+wrongly. Keep those as one statement per file.
+
+Everything declared through `addDir` behaves exactly like a migration added
+by hand: it runs in id order, in a transaction, with a checksum taken from the
+file's own text — so `drifted()` catches an edited `.sql` file the same way
+it catches an edited closure.
+
 ## A migration CLI
 
 Pairs with `args`, which is usually how this gets run:
@@ -140,9 +192,9 @@ other                            { out m.report() }
 
 ## Notes
 
-- **Migrations are declared in code**, not discovered from a directory — EZ
-  has no directory listing in this library's dependencies. Keep them in one
-  file, or one file per migration that a registry module imports.
+- **Migrations can be declared in code or loaded from a directory** —
+  `m.add(...)` for the former, `m.addDir("migrations")` for the latter. Mix
+  both if you want; ids just have to stay unique across the two.
 - **The ledger lives in `schema_migrations`** alongside your data, so it
   travels with the database rather than with the code.
 - **`down` is for development.** Reversing a migration that dropped a column
@@ -157,10 +209,11 @@ other                            { out m.report() }
 ez test.ez
 ```
 
-50 tests covering ordering, idempotence, rollback, targeted application,
-irreversible migrations, drift and orphan detection, the ledger, and — most
-importantly — that a failed migration leaves neither schema changes nor a
-ledger row behind.
+72 tests covering ordering, idempotence, rollback, targeted application,
+irreversible migrations, drift and orphan detection, the ledger, directory
+loading (naming convention, statement splitting, missing files, ignored
+files), and — most importantly — that a failed migration leaves neither
+schema changes nor a ledger row behind.
 
 ## Structure
 
@@ -168,6 +221,7 @@ ledger row behind.
 | --- | --- |
 | `main.ez` | The `Migrator`: declaring, running, inspecting, reporting |
 | `store.ez` | The `schema_migrations` ledger and content fingerprinting |
+| `files.ez` | Reading `.sql` files from a directory and splitting them into statements |
 
 ## License
 
