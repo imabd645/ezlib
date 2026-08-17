@@ -1,3 +1,0 @@
-use "wa_crypto.ez"
-wac_generateKeyPair()
-
