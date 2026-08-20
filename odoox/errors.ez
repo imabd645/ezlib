@@ -1,0 +1,130 @@
+// ============================================================================
+// odoox/errors.ez — typed exceptions
+//
+// Every odoox failure used to arrive as a plain Exception, so a caller could
+// not tell "your password is wrong" from "that model doesn't exist" from
+// "you don't have access" without parsing the message string. These give each
+// of those a distinct type, the way EZ's own FileNotFoundError/KeyError/etc.
+// let a caller catch one kind of native fault without catching everything.
+//
+//   try { session.read("res.user").exec() }
+//   catch (ModelNotFoundError e) { out "no such model: " + e.message }
+//   catch (AccessDeniedError e)  { out "not allowed: " + e.message }
+//   catch (OdooxError e)         { out "some other odoox failure: " + e.message }
+//
+// Each subclass calls super(message) so the built-in Exception base still
+// records self.message the same way it would for a plain `throw
+// Exception(...)` -- bypassing that leaves the base half-initialised, same
+// reasoning as ORMError in the orm package.
+// ============================================================================
+
+export model OdooxError extends Exception {
+    init(message) {
+        super(message)
+        self.message = message
+    }
+
+    task toString() { give "OdooxError: " + self.message }
+}
+
+// db/url/email/pass missing, or Odoo said the credentials were wrong. Login
+// returning `false` isn't an RPC error (no error object at all), so it's kept
+// separate from RpcError and its subclasses below.
+export model AuthenticationError extends OdooxError {
+    init(message) {
+        super(message)
+    }
+
+    task toString() { give "AuthenticationError: " + self.message }
+}
+
+// The catch-all for anything Odoo's `object.execute_kw` returned as a
+// JSON-RPC error that didn't match a more specific case. Carries the service,
+// method and (when Odoo sent one) the Python exception class name, so a
+// caller that wants more than the message can still get at it.
+export model RpcError extends OdooxError {
+    init(message, service, method, odooException) {
+        super(message)
+        self.service = service
+        self.method = method
+        self.odooException = odooException
+    }
+
+    task toString() { give "RpcError: " + self.method + ": " + self.message }
+}
+
+// odoo.exceptions.AccessError, or a message starting "Access Denied" --
+// the user is authenticated but not allowed to touch this model/record.
+export model AccessDeniedError extends RpcError {
+    init(message, service, method, odooException) {
+        super(message, service, method, odooException)
+    }
+
+    task toString() { give "AccessDeniedError: " + self.message }
+}
+
+// "Object res.user doesn't exist" and similar -- the model name itself is
+// wrong (usually res.users vs res.user, a typo, or a module that isn't
+// installed on this database).
+export model ModelNotFoundError extends RpcError {
+    init(message, service, method, odooException) {
+        super(message, service, method, odooException)
+    }
+
+    task toString() { give "ModelNotFoundError: " + self.message }
+}
+
+// odoo.exceptions.ValidationError / UserError -- a business-logic rejection
+// rather than a permissions or plumbing problem (a required field missing, a
+// constraint violated, a workflow guard).
+export model ValidationError extends RpcError {
+    init(message, service, method, odooException) {
+        super(message, service, method, odooException)
+    }
+
+    task toString() { give "ValidationError: " + self.message }
+}
+
+// ── classification ───────────────────────────────────────────────────────
+//
+// Odoo's JSON-RPC error looks like:
+//   { "code": 200, "message": "Odoo Server Error",
+//     "data": { "name": "odoo.exceptions.AccessError", "message": "...", "debug": "..." } }
+//
+// `data.name` is the reliable signal when Odoo sends one. Not every deployment
+// does (some proxies or old versions collapse it), so the message text is the
+// fallback -- matched against the same phrases Odoo itself uses, not against
+// guesses.
+
+export task raiseFromOdooError(err, service, method) {
+    detail = errorDetail(err)
+    exceptionName = errorExceptionName(err)
+
+    when exceptionName != nil and contains(exceptionName, "AccessError") {
+        throw AccessDeniedError(detail, service, method, exceptionName)
+    }
+    when contains(detail, "Access Denied") or contains(detail, "AccessError") {
+        throw AccessDeniedError(detail, service, method, exceptionName)
+    }
+    when exceptionName != nil and contains(exceptionName, "ValidationError") {
+        throw ValidationError(detail, service, method, exceptionName)
+    }
+    when exceptionName != nil and contains(exceptionName, "UserError") {
+        throw ValidationError(detail, service, method, exceptionName)
+    }
+    when contains(detail, "doesn't exist") and contains(detail, "Object") {
+        throw ModelNotFoundError(detail, service, method, exceptionName)
+    }
+    throw RpcError(detail, service, method, exceptionName)
+}
+
+task errorDetail(err) {
+    when has_key(err, "data") and has_key(err["data"], "message") { give err["data"]["message"] }
+    when has_key(err, "message") { give err["message"] }
+    give str(err)
+}
+
+task errorExceptionName(err) {
+    when has_key(err, "data") and has_key(err["data"], "name") { give err["data"]["name"] }
+    give nil
+}

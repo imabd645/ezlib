@@ -137,21 +137,45 @@ session.count("res.partner", "active=true")               # -> filtered count
 
 ## Errors
 
-A bad login throws with the url/db/email it tried:
+Every failure is a typed exception under `OdooxError`, so you can catch what
+you actually expect instead of parsing message text:
 
-```
-odoox: login failed for admin@mycompany.com on database "mycompany" -- check url, db, email, pass
+```ez
+use "odoox/errors.ez"
+
+try {
+    session.read("res.user").exec()
+}
+catch (AuthenticationError e) { out "bad credentials: " + e.message }
+catch (AccessDeniedError e)   { out "not allowed: " + e.message }
+catch (ModelNotFoundError e)  { out "no such model: " + e.message }
+catch (ValidationError e)     { out "rejected: " + e.message }
+catch (RpcError e)            { out e.service + "." + e.method + " failed: " + e.message }
+catch (OdooxError e)          { out "odoox misuse: " + e.message }
 ```
 
-An RPC-level error (bad model name, access rights, a Python traceback from
-Odoo) throws with the service, method and Odoo's own message:
+| type | when |
+|---|---|
+| `AuthenticationError` | `login()` — missing config, or Odoo rejected the credentials |
+| `AccessDeniedError` | `odoo.exceptions.AccessError`, or a message starting "Access Denied" |
+| `ModelNotFoundError` | "Object X doesn't exist" — wrong model name, e.g. `res.user` instead of `res.users` |
+| `ValidationError` | `odoo.exceptions.ValidationError` / `UserError` — a business-logic rejection |
+| `RpcError` | anything else `object.execute_kw` returned as an error; carries `.service`, `.method`, `.odooException` (Odoo's Python exception class name, when it sent one) |
+| `OdooxError` | misuse of the library itself — missing `.value(...)` before `write().exec()`, an unparsable `.condition(...)`, etc. |
 
-```
-odoox: object.execute_kw failed: (Access Denied) You are not allowed to access 'Contact' (res.partner) records.
-```
+Every subclass extends the one above it in that table, so `catch (RpcError e)`
+also catches `AccessDeniedError`, `ModelNotFoundError` and `ValidationError`,
+and `catch (OdooxError e)` catches everything odoox throws.
 
-A transport failure (DNS, TLS, timeout) throws from `httpx` underneath with
-the reason in words — see the `httpx` README.
+Classification reads Odoo's `error.data.name` (the Python exception's class
+path) when present, and falls back to matching the message text Odoo itself
+uses ("Access Denied", "doesn't exist") when it isn't. A response odoox
+doesn't recognize still throws — as a plain `RpcError` rather than something
+more specific — so nothing is silently swallowed.
+
+A transport failure (DNS, TLS, timeout) throws from `httpx` underneath, not
+from `odoox` — see the `httpx` README for that shape.
+
 
 ## Testing without a live Odoo
 

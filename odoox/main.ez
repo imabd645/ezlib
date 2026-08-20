@@ -1,46 +1,47 @@
-# ============================================================================
-# odoox — an Odoo JSON-RPC client for EZ
-#
-#   use "odoox"
-#
-#   client = Odoo()
-#   client.url = "https://mycompany.odoo.com"
-#   client.db = "mycompany"
-#   client.email = "admin@mycompany.com"
-#   client.pass = "secret"
-#
-#   session = client.login()
-#
-#   rows = session.read("res.partner", ["name", "email"])
-#       .condition("id=87429")
-#       .OR("id=8129")
-#       .limit(10)
-#       .exec()
-#
-#   session.write("res.partner")
-#       .value("name", "Updated Name")
-#       .condition("id=87429")
-#       .exec()
-#
-#   fields = session.inspect("res.partner")
-#
-# Talks to Odoo's classic /jsonrpc endpoint (service "common" for auth,
-# service "object" for execute_kw). No cookies, no web session -- every call
-# carries db/uid/password, same as odoorpc / the official XML-RPC examples.
-# Transport is httpx, so real status codes and real errors instead of a
-# silently-200 response.
-# ============================================================================
+// ============================================================================
+// odoox — an Odoo JSON-RPC client for EZ
+//
+//   use "odoox"
+//
+//   client = Odoo()
+//   client.url = "https://mycompany.odoo.com"
+//   client.db = "mycompany"
+//   client.email = "admin@mycompany.com"
+//   client.pass = "secret"
+//
+//   session = client.login()
+//
+//   rows = session.read("res.partner", ["name", "email"])
+//       .condition("id=87429")
+//       .OR("id=8129")
+//       .limit(10)
+//       .exec()
+//
+//   session.write("res.partner")
+//       .value("name", "Updated Name")
+//       .condition("id=87429")
+//       .exec()
+//
+//   fields = session.inspect("res.partner")
+//
+// Talks to Odoo's classic /jsonrpc endpoint (service "common" for auth,
+// service "object" for execute_kw). No cookies, no web session -- every call
+// carries db/uid/password, same as odoorpc / the official XML-RPC examples.
+// Transport is httpx, so real status codes and real errors instead of a
+// silently-200 response.
+// ============================================================================
 
 use "httpx"
+use "errors.ez"
 
-# ── condition parsing ───────────────────────────────────────────────────────
-#
-# "id=87429"   -> ["id", "=", 87429]
-# "age>=18"    -> ["age", ">=", 18]
-# "name='Bob'" -> ["name", "=", "Bob"]
-#
-# Longest operators are checked first so ">=" isn't mistaken for ">" followed
-# by a stray "=".
+// ── condition parsing ───────────────────────────────────────────────────────
+//
+// "id=87429"   -> ["id", "=", 87429]
+// "age>=18"    -> ["age", ">=", 18]
+// "name='Bob'" -> ["name", "=", "Bob"]
+//
+// Longest operators are checked first so ">=" isn't mistaken for ">" followed
+// by a stray "=".
 
 ODOOX_OPERATORS = [">=", "<=", "!=", "=", ">", "<"]
 
@@ -56,12 +57,12 @@ export task parseCondition(expr) {
         }
     }
     when op == nil {
-        throw Exception(`odoox: no operator (=, !=, >, >=, <, <=) found in condition "{expr}"`)
+        throw OdooxError(`odoox: no operator (=, !=, >, >=, <, <=) found in condition "{expr}"`)
     }
     field = trim(substr(text, 0, at))
     rawValue = trim(substr(text, at + len(op), len(text) - at - len(op)))
     when field == "" {
-        throw Exception(`odoox: condition "{expr}" has no field name`)
+        throw OdooxError(`odoox: condition "{expr}" has no field name`)
     }
     give [field, op, coerceValue(rawValue)]
 }
@@ -99,14 +100,14 @@ task isNumericLiteral(raw) {
     give seenDigit
 }
 
-# ── domain building ─────────────────────────────────────────────────────────
-#
-# Odoo domains are flat prefix (polish) notation: adjacent leaves are
-# implicitly AND'ed, and "|" prefixes the next two complete expressions to OR
-# them. Because the domain built so far is always itself one complete
-# expression, ANDing a new term is a plain append, and ORing a new term is
-# ["|"] + existing + [term] -- which OR's the *whole* accumulated condition
-# with the new one, matching what `.condition(a).OR(b)` reads as.
+// ── domain building ─────────────────────────────────────────────────────────
+//
+// Odoo domains are flat prefix (polish) notation: adjacent leaves are
+// implicitly AND'ed, and "|" prefixes the next two complete expressions to OR
+// them. Because the domain built so far is always itself one complete
+// expression, ANDing a new term is a plain append, and ORing a new term is
+// ["|"] + existing + [term] -- which OR's the *whole* accumulated condition
+// with the new one, matching what `.condition(a).OR(b)` reads as.
 
 export task domainAnd(domain, term) {
     give domain + [term]
@@ -117,7 +118,7 @@ export task domainOr(domain, term) {
     give ["|"] + domain + [term]
 }
 
-# ── JSON-RPC transport ──────────────────────────────────────────────────────
+// ── JSON-RPC transport ──────────────────────────────────────────────────────
 
 _odooxRpcId = 0
 
@@ -140,20 +141,12 @@ task rpcCall(http, url, service, method, args) {
 task rpcUnwrap(r, service, method) {
     body = r.json()
     when has_key(body, "error") {
-        throw Exception(rpcErrorMessage(body["error"], service, method))
+        raiseFromOdooError(body["error"], service, method)
     }
     give body["result"]
 }
 
-task rpcErrorMessage(err, service, method) {
-    detail = nil
-    when has_key(err, "data") and has_key(err["data"], "message") { detail = err["data"]["message"] }
-    other when has_key(err, "message") { detail = err["message"] }
-    when detail == nil { detail = str(err) }
-    give `odoox: {service}.{method} failed: {detail}`
-}
-
-# ── Odoo — the client you configure and log in with ────────────────────────
+// ── Odoo — the client you configure and log in with ────────────────────────
 
 export model Odoo {
 
@@ -168,29 +161,29 @@ export model Odoo {
 
     task rpcUrl() {
         when self.url == nil {
-            throw Exception("odoox: Odoo().url must be set before login()")
+            throw OdooxError("odoox: Odoo().url must be set before login()")
         }
         base = str(self.url)
         when endsWith(base, "/") { base = substr(base, 0, len(base) - 1) }
         give base + "/jsonrpc"
     }
 
-    # Authenticates via the "common" service and returns a Session carrying
-    # the uid. Nothing above this point touches the network.
+    // Authenticates via the "common" service and returns a Session carrying
+    // the uid. Nothing above this point touches the network.
     task login() {
         when self.db == nil or self.email == nil or self.pass == nil {
-            throw Exception("odoox: db, email and pass must all be set before login()")
+            throw OdooxError("odoox: db, email and pass must all be set before login()")
         }
         result = rpcCall(self.http, self.rpcUrl(), "common", "login", [self.db, self.email, self.pass])
         when result == false or result == nil {
-            throw Exception(`odoox: login failed for {self.email} on database "{self.db}" -- check url, db, email, pass`)
+            throw AuthenticationError(`odoox: login failed for {self.email} on database "{self.db}" -- check url, db, email, pass`)
         }
         self.uid = result
         give Session(self)
     }
 }
 
-# ── Session — everything after login ────────────────────────────────────────
+// ── Session — everything after login ────────────────────────────────────────
 
 export model Session {
 
@@ -203,18 +196,18 @@ export model Session {
         give rpcCall(self.odoo.http, self.odoo.rpcUrl(), "object", "execute_kw", fullArgs)
     }
 
-    # session.read("res.partner", ["name","email"])   -- explicit field list
-    # session.read("res.partner")                     -- nil fields -> all fields
-    # session.read("res.partner", nil)                -- same, explicit
+    // session.read("res.partner", ["name","email"])   -- explicit field list
+    // session.read("res.partner")                     -- nil fields -> all fields
+    // session.read("res.partner", nil)                -- same, explicit
     task read(modelName, fields = nil) {
         give ReadQuery(self, modelName, fields)
     }
 
-    # session.write("res.partner").value("name","x").condition("id=87429").exec()
-    #
-    # Odoo's write() takes ids, not a domain, so the condition is resolved with
-    # a search() first and the write() applied to whatever matches. Two RPC
-    # calls under one chain.
+    // session.write("res.partner").value("name","x").condition("id=87429").exec()
+    //
+    // Odoo's write() takes ids, not a domain, so the condition is resolved with
+    // a search() first and the write() applied to whatever matches. Two RPC
+    // calls under one chain.
     task write(modelName) {
         give WriteQuery(self, modelName)
     }
@@ -233,7 +226,7 @@ export model Session {
         give self.callKw(modelName, "search_count", [domain], {})
     }
 
-    # session.inspect("res.partner") -> { fieldName: { type, string, required, ... } }
+    // session.inspect("res.partner") -> { fieldName: { type, string, required, ... } }
     task inspect(modelName, attributes = nil) {
         wanted = attributes
         when wanted == nil {
@@ -243,7 +236,7 @@ export model Session {
     }
 }
 
-# ── ReadQuery — chainable search_read builder ───────────────────────────────
+// ── ReadQuery — chainable search_read builder ───────────────────────────────
 
 export model ReadQuery {
 
@@ -298,7 +291,7 @@ export model ReadQuery {
     }
 }
 
-# ── WriteQuery — chainable search + write builder ───────────────────────────
+// ── WriteQuery — chainable search + write builder ───────────────────────────
 
 export model WriteQuery {
 
@@ -325,8 +318,8 @@ export model WriteQuery {
         give self
     }
 
-    # Writes directly to known ids, skipping the search -- for when you
-    # already have them instead of a condition.
+    // Writes directly to known ids, skipping the search -- for when you
+    // already have them instead of a condition.
     task ids(idList) {
         self.explicitIds = idList
         give self
@@ -334,13 +327,13 @@ export model WriteQuery {
 
     task exec() {
         when len(keys(self.values)) == 0 {
-            throw Exception("odoox: write() needs at least one .value(field, val) before exec()")
+            throw OdooxError("odoox: write() needs at least one .value(field, val) before exec()")
         }
         targetIds = nil
         when self.explicitIds != nil { targetIds = self.explicitIds }
         other {
             when len(self.domain) == 0 {
-                throw Exception("odoox: write() needs .condition(...) or .ids([...]) before exec() -- refusing to write every row")
+                throw OdooxError("odoox: write() needs .condition(...) or .ids([...]) before exec() -- refusing to write every row")
             }
             targetIds = self.session.callKw(self.modelName, "search", [self.domain], {})
         }
