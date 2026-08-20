@@ -1,4 +1,0 @@
-use "wa_proto.ez"
-
-out wap_encodeVarint(3000)
-out wap_encodeVarint(10123)

@@ -1,8 +1,0 @@
-{
-  "name": "whatsapp",
-  "version": "1.0.0",
-  "description": "WhatsApp Web client for EZ — Baileys-style Noise Protocol over WebSocket",
-  "entry": "main.ez",
-  "author": "EZ Standard Library",
-  "requires": ["crypto"]
-}
