@@ -1,0 +1,120 @@
+# ============================================================================
+# url — tests
+#
+# Percent-encoding vectors are RFC 3986's own examples; the parse vectors are
+# the classic splits every URL parser is expected to make.
+# ============================================================================
+
+use "url"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+task refused(name, threw) { checkTrue(name, threw) }
+
+# ── encoding ─────────────────────────────────────────────────────────────────
+
+out "encoding"
+
+check("space, ampersand, equals", urlEncodeComponent("a b&c=d"), "a%20b%26c%3Dd")
+check("unreserved stays literal", urlEncodeComponent("AZaz09-_.~"), "AZaz09-_.~")
+check("a slash is encoded", urlEncodeComponent("/path/to"), "%2Fpath%2Fto")
+check("a question mark is encoded", urlEncodeComponent("a?b"), "a%3Fb")
+check("empty", urlEncodeComponent(""), "")
+check("nil", urlEncodeComponent(nil), "")
+check("a number", urlEncodeComponent(42), "42")
+check("utf-8 becomes bytes", urlEncodeComponent("é"), "%C3%A9")
+
+# ── decoding ─────────────────────────────────────────────────────────────────
+
+out "decoding"
+
+check("round-trip", urlDecodeComponent("a%20b%26c"), "a b&c")
+check("a plus is a space", urlDecodeComponent("a+b"), "a b")
+check("utf-8 round-trip", urlDecodeComponent("%C3%A9"), "é")
+check("lowercase hex", urlDecodeComponent("%3d"), "=")
+check("a malformed escape is kept", urlDecodeComponent("a%zzb"), "a%zzb")
+check("a truncated escape is kept", urlDecodeComponent("a%2"), "a%2")
+
+# ── query building ───────────────────────────────────────────────────────────
+
+out "query building"
+
+check("two keys", urlBuildQuery({ "a": "1", "b": "two words" }), "a=1&b=two%20words")
+check("an ampersand value", urlBuildQuery({ "q": "x&y" }), "q=x%26y")
+check("a list repeats", urlBuildQuery({ "a": [1, 2] }), "a=1&a=2")
+check("a nil value", urlBuildQuery({ "a": nil }), "a=")
+check("empty", urlBuildQuery({}), "")
+check("keys are sorted", urlBuildQuery({ "z": 1, "a": 2 }), "a=2&z=1")
+
+# ── query parsing ────────────────────────────────────────────────────────────
+
+out "query parsing"
+
+check("two keys", urlParseQuery("a=1&b=two+words"), { "a": "1", "b": "two words" })
+check("percent in value", urlParseQuery("c=x%26y"), { "c": "x&y" })
+check("a bare flag", urlParseQuery("flag"), { "flag": "" })
+check("repeated key collects", urlParseQuery("a=1&a=2"), { "a": ["1", "2"] })
+check("a leading ? is tolerated", urlParseQuery("?a=1"), { "a": "1" })
+check("empty", urlParseQuery(""), {})
+
+# ── parsing ──────────────────────────────────────────────────────────────────
+
+out "parsing"
+
+u = urlParse("https://user:pass@example.com:8080/path/to?q=1#frag")
+check("scheme", u["scheme"], "https")
+check("userinfo", u["userinfo"], "user:pass")
+check("host", u["host"], "example.com")
+check("port", u["port"], 8080)
+check("path", u["path"], "/path/to")
+check("query", u["query"], "q=1")
+check("fragment", u["fragment"], "frag")
+
+u2 = urlParse("http://example.com")
+check("bare host", u2["host"], "example.com")
+check("no port", u2["port"], nil)
+check("root path normalised", u2["path"], "/")
+check("no query", u2["query"], nil)
+
+check("a mailto url", urlParse("mailto:foo@bar.com")["scheme"], "mailto")
+check("a mailto url path", urlParse("mailto:foo@bar.com")["path"], "foo@bar.com")
+
+r = urlParse("/relative/path?x=1")
+check("no scheme", r["scheme"], nil)
+check("relative path", r["path"], "/relative/path")
+check("relative query", r["query"], "x=1")
+
+v6 = urlParse("https://[::1]:8080/x")
+check("ipv6 host", v6["host"], "[::1]")
+check("ipv6 port", v6["port"], 8080)
+
+# ── errors ───────────────────────────────────────────────────────────────────
+
+out "errors"
+
+threw = false
+try { urlParse(nil) } catch (e) { threw = true }
+refused("nil is refused", threw)
+
+out ""
+when failed == 0 {
+    out `url: all {passed} checks passed`
+}
+other {
+    out `url: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

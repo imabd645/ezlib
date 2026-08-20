@@ -1,0 +1,35 @@
+use "providers/registry.ez"
+use "base64.ez"
+
+task _rawBytes(s) {
+    n = len(s)
+    when n == 0 { give [] }
+    buf = os_alloc(n + 1)
+    os_write_string(buf, 0, s)
+    res = []
+    repeat i = 0 to n - 1 { push(res, os_read_byte(buf, i) & 255) }
+    os_free(buf)
+    give res
+}
+
+export model AES {
+    static task encrypt(key, iv, plaintext) {
+        kb = typeOf(key) == "array" ? key : _rawBytes(key)
+        ib = typeOf(iv) == "array" ? iv : _rawBytes(iv)
+        pb = typeOf(plaintext) == "array" ? plaintext : _rawBytes(plaintext)
+        
+        cipherBytes = Provider.get().aesProcess(kb, ib, pb, true)
+        give Base64.encode(cipherBytes)
+    }
+    
+    static task decrypt(key, iv, cipherBase64) {
+        kb = typeOf(key) == "array" ? key : _rawBytes(key)
+        ib = typeOf(iv) == "array" ? iv : _rawBytes(iv)
+        cb = Base64.decodeToBytes(cipherBase64)
+        
+        plainBytes = Provider.get().aesProcess(kb, ib, cb, false)
+        res = ""
+        get b in plainBytes { res = res + chr(b) }
+        give res
+    }
+}

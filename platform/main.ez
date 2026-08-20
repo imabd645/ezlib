@@ -1,0 +1,76 @@
+﻿// ============================================================================
+// platform -- Cross-platform runtime and dynamic library helper for EZ
+//
+//   use "platform"
+//
+//   platform.os() // "windows" | "macos" | "linux" | "posix"
+//   platform.isWindows()
+//   platform.isMacOS()
+//   platform.isLinux()
+//   platform.loadLib({
+//       windows: ["sqlite3.dll", "winsqlite3.dll"],
+//       macos:   "libsqlite3.dylib",
+//       linux:   ["libsqlite3.so.0", "libsqlite3.so"]
+//   })
+// ============================================================================
+
+export model Platform {
+    task getos() {
+        try {
+            give os()
+        } catch e {
+            give "windows"
+        }
+    }
+
+    task isWindows() { give self.getos() == "windows" }
+    task isMacOS()   { give self.getos() == "macos" }
+    task isLinux()   { give self.getos() == "linux" }
+
+    task loadLib(spec) {
+        current = self.getos()
+        candidates = []
+
+        when typeOf(spec) == "string" {
+            candidates = [spec]
+        } when typeOf(spec) == "dict" {
+            when current == "windows" and spec.contains("windows") {
+                val = spec["windows"]
+                when typeOf(val) == "array" { candidates = val } other { candidates = [val] }
+            } when current == "macos" and spec.contains("macos") {
+                val = spec["macos"]
+                when typeOf(val) == "array" { candidates = val } other { candidates = [val] }
+            } when current == "linux" and spec.contains("linux") {
+                val = spec["linux"]
+                when typeOf(val) == "array" { candidates = val } other { candidates = [val] }
+            } when spec.contains("posix") and (current == "linux" or current == "macos" or current == "posix") {
+                val = spec["posix"]
+                when typeOf(val) == "array" { candidates = val } other { candidates = [val] }
+            } when spec.contains("default") {
+                val = spec["default"]
+                when typeOf(val) == "array" { candidates = val } other { candidates = [val] }
+            }
+        } when typeOf(spec) == "array" {
+            candidates = spec
+        }
+
+        when len(candidates) == 0 {
+            throw "platform.loadLib: no library candidate specified for OS '" + str(current) + "'"
+        }
+
+        get name in candidates {
+            try {
+                handle = os_load_lib(name)
+                when typeOf(handle) != "nil" and handle != 0 {
+                    give handle
+                }
+            } catch e {
+                // try next candidate
+            }
+        }
+
+        throw "platform.loadLib: failed to load library on " + str(current) + ". Tried: " + str(candidates)
+    }
+}
+
+export platform = Platform()

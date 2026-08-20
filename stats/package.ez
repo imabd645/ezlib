@@ -1,0 +1,11 @@
+{
+  "name": "stats",
+  "version": "1.0.0",
+  "description": "Descriptive statistics for EZ: mean, median, mode, variance, standard deviation, percentiles, and linear regression with correlation.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["statistics", "mean", "median", "mode", "variance", "stddev", "percentile", "regression", "correlation"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

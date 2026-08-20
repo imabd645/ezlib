@@ -1,0 +1,187 @@
+# ============================================================================
+# stats — descriptive statistics for EZ
+#
+#   use "stats"
+#
+#   mean([2, 4, 6])            # 4
+#   median([1, 2, 3, 4])       # 2.5
+#   percentile(values, 90)     # nearest-rank 90th percentile
+#   linreg(xs, ys)             # { slope, intercept, r }
+#
+# The functions that reduce a list to one number return nil on empty input
+# (sum excepted: sum([]) is 0), so "no data" is distinguishable from "a real
+# zero". Variance and standard deviation default to the sample form (divide by
+# n-1); pass `false` for the population form.
+# ============================================================================
+
+# Sum of a list. Safe to name `sum`: there is no builtin that it would shadow.
+export task sum(values) {
+    total = 0
+    get v in values { total = total + v }
+    give total
+}
+
+export task mean(values) {
+    n = len(values)
+    when n == 0 { give nil }
+    give sum(values) / n
+}
+
+export task minimum(values) {
+    when len(values) == 0 { give nil }
+    best = values[0]
+    get v in values {
+        when v < best { best = v }
+    }
+    give best
+}
+
+export task maximum(values) {
+    when len(values) == 0 { give nil }
+    best = values[0]
+    get v in values {
+        when v > best { best = v }
+    }
+    give best
+}
+
+# max - min. Called `span` because `range` is an interpreter builtin.
+export task span(values) {
+    when len(values) == 0 { give nil }
+    give maximum(values) - minimum(values)
+}
+
+export task median(values) {
+    n = len(values)
+    when n == 0 { give nil }
+    s = sort(values)
+    when n % 2 == 1 {
+        give s[floor((n - 1) / 2)]
+    }
+    lo = floor(n / 2) - 1
+    hi = floor(n / 2)
+    give (s[lo] + s[hi]) / 2
+}
+
+# The most frequent value; the first one wins a tie.
+export task mode(values) {
+    n = len(values)
+    when n == 0 { give nil }
+    counts = {}
+    get v in values {
+        key = to_json(v)
+        when has_key(counts, key) { counts[key] = counts[key] + 1 } other { counts[key] = 1 }
+    }
+    best = nil
+    bestCount = 0
+    get v in values {
+        key = to_json(v)
+        when counts[key] > bestCount {
+            best = v
+            bestCount = counts[key]
+        }
+    }
+    give best
+}
+
+# Variance. sample=true divides by n-1 (the default), sample=false by n.
+export task variance(values, sample = true) {
+    n = len(values)
+    when n == 0 { give nil }
+    m = sum(values) / n
+    total = 0
+    get v in values {
+        d = v - m
+        total = total + d * d
+    }
+    when sample {
+        when n < 2 { give nil }
+        give total / (n - 1)
+    }
+    give total / n
+}
+
+export task stddev(values, sample = true) {
+    v = variance(values, sample)
+    when v == nil { give nil }
+    give sqrt(v)
+}
+
+# Nearest-rank percentile: the k-th sorted value where k = ceil(p/100 * n).
+# This is the simplest method and the one to reach for unless you need
+# interpolation between values.
+export task percentile(values, p) {
+    n = len(values)
+    when n == 0 { give nil }
+    when p < 0 or p > 100 {
+        throw Exception("stats: percentile must be between 0 and 100")
+    }
+    s = sort(values)
+    k = ceil(p / 100 * n)
+    when k < 1 { k = 1 }
+    when k > n { k = n }
+    give s[k - 1]
+}
+
+export task quantile(values, q) {
+    when q < 0 or q > 1 {
+        throw Exception("stats: quantile must be between 0 and 1")
+    }
+    give percentile(values, q * 100)
+}
+
+# Pearson correlation coefficient, in [-1, 1]. nil when either series is
+# constant (the coefficient is undefined) or the lengths disagree.
+export task correlation(xs, ys) {
+    n = len(xs)
+    when n != len(ys) {
+        throw Exception("stats: correlation needs equal-length inputs")
+    }
+    when n < 2 { give nil }
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = 0
+    vx = 0
+    vy = 0
+    repeat i = 0 to n - 1 {
+        dx = xs[i] - mx
+        dy = ys[i] - my
+        cov = cov + dx * dy
+        vx = vx + dx * dx
+        vy = vy + dy * dy
+    }
+    when vx == 0 or vy == 0 { give nil }
+    give cov / sqrt(vx * vy)
+}
+
+# Least-squares linear regression: y = slope * x + intercept. r is the Pearson
+# correlation of the fit; it is nil when y is constant.
+export task linreg(xs, ys) {
+    n = len(xs)
+    when n != len(ys) {
+        throw Exception("stats: linreg needs equal-length inputs")
+    }
+    when n < 2 {
+        throw Exception("stats: linreg needs at least two points")
+    }
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = 0
+    vx = 0
+    vy = 0
+    repeat i = 0 to n - 1 {
+        dx = xs[i] - mx
+        dy = ys[i] - my
+        cov = cov + dx * dy
+        vx = vx + dx * dx
+        vy = vy + dy * dy
+    }
+    when vx == 0 {
+        throw Exception("stats: linreg needs a non-constant x series")
+    }
+    slope = cov / vx
+    intercept = my - slope * mx
+    r = nil
+    when vy != 0 { r = cov / sqrt(vx * vy) }
+    give { "slope": slope, "intercept": intercept, "r": r }
+}

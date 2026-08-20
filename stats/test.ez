@@ -1,0 +1,130 @@
+# ============================================================================
+# stats — tests
+# ============================================================================
+
+use "stats"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+task refused(name, threw) { checkTrue(name, threw) }
+task near(a, b) { give abs(a - b) < 0.0001 }
+
+# ── centre ───────────────────────────────────────────────────────────────────
+
+out "centre"
+
+check("sum", sum([1, 2, 3, 4]), 10)
+check("sum of empty", sum([]), 0)
+check("mean", mean([2, 4, 6]), 4)
+check("mean non-integer", mean([1, 2, 3, 4]), 2.5)
+check("mean of empty is nil", mean([]), nil)
+check("median odd", median([1, 2, 3]), 2)
+check("median even", median([1, 2, 3, 4]), 2.5)
+check("median ignores input order", median([4, 1, 3, 2]), 2.5)
+check("median of empty is nil", median([]), nil)
+
+# ── spread ───────────────────────────────────────────────────────────────────
+
+out "spread"
+
+check("minimum", minimum([3, 1, 2]), 1)
+check("maximum", maximum([3, 1, 2]), 3)
+check("span", span([5, 1, 9]), 8)
+check("minimum of empty is nil", minimum([]), nil)
+
+# ── variance and standard deviation ──────────────────────────────────────────
+
+out "variance and stddev"
+
+# Population variance of 1..4 is 5/4; the sample form divides by n-1 = 3.
+checkTrue("population variance", near(variance([1, 2, 3, 4], false), 1.25))
+checkTrue("sample variance", near(variance([1, 2, 3, 4], true), 1.6667))
+checkTrue("population stddev", near(stddev([1, 2, 3, 4], false), 1.11803))
+check("sample stddev of one point is nil", stddev([5], true), nil)
+check("variance of empty is nil", variance([]), nil)
+checkTrue("variance of a constant is zero", near(variance([7, 7, 7], false), 0))
+
+# ── mode ─────────────────────────────────────────────────────────────────────
+
+out "mode"
+
+check("mode", mode([1, 2, 2, 3]), 2)
+check("mode first on tie", mode([1, 1, 2, 2]), 1)
+check("mode single", mode([42]), 42)
+check("mode of empty is nil", mode([]), nil)
+check("mode works on strings", mode(["a", "b", "b", "c"]), "b")
+
+# ── percentiles ──────────────────────────────────────────────────────────────
+
+out "percentiles"
+
+check("50th percentile", percentile([1, 2, 3, 4], 50), 2)
+check("75th percentile", percentile([1, 2, 3, 4], 75), 3)
+check("0th percentile", percentile([1, 2, 3, 4], 0), 1)
+check("100th percentile", percentile([1, 2, 3, 4], 100), 4)
+check("quantile 0.5", quantile([1, 2, 3, 4], 0.5), 2)
+check("percentile unsorted input", percentile([4, 1, 3, 2], 50), 2)
+
+# ── regression and correlation ───────────────────────────────────────────────
+
+out "regression and correlation"
+
+fit = linreg([1, 2, 3], [2, 4, 6])
+checkTrue("a perfect line has slope 2", near(fit["slope"], 2))
+checkTrue("a perfect line has intercept 0", near(fit["intercept"], 0))
+checkTrue("a perfect line has r 1", near(fit["r"], 1))
+
+fit2 = linreg([1, 2, 3, 4], [2, 3, 5, 6])
+checkTrue("slope of a noisy line", near(fit2["slope"], 1.4))
+checkTrue("intercept of a noisy line", near(fit2["intercept"], 0.5))
+
+checkTrue("positive correlation", near(correlation([1, 2, 3], [2, 4, 6]), 1))
+checkTrue("negative correlation", near(correlation([1, 2, 3], [3, 2, 1]), -1))
+check("correlation of a constant series is nil", correlation([1, 2, 3], [5, 5, 5]), nil)
+
+# ── errors ───────────────────────────────────────────────────────────────────
+
+out "errors"
+
+threw = false
+try { percentile([1, 2], 101) } catch (e) { threw = true }
+refused("percentile above 100 is refused", threw)
+
+threw = false
+try { quantile([1, 2], 1.5) } catch (e) { threw = true }
+refused("quantile above 1 is refused", threw)
+
+threw = false
+try { linreg([1, 2], [1, 2, 3]) } catch (e) { threw = true }
+refused("unequal lengths are refused", threw)
+
+threw = false
+try { linreg([1], [1]) } catch (e) { threw = true }
+refused("one point is refused", threw)
+
+threw = false
+try { linreg([1, 1, 1], [1, 2, 3]) } catch (e) { threw = true }
+refused("a constant x series is refused", threw)
+
+out ""
+when failed == 0 {
+    out `stats: all {passed} checks passed`
+}
+other {
+    out `stats: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

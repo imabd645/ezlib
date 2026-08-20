@@ -1,0 +1,20 @@
+{
+  "name": "odoox",
+  "version": "0.1.0",
+  "description": "Odoo JSON-RPC client for EZ. Chainable search_read/write builder over the classic /jsonrpc common+object API.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": [
+    "odoo",
+    "jsonrpc",
+    "orm",
+    "erp",
+    "api",
+    "client"
+  ],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {
+    "httpx": "^1.0.1"
+  }
+}

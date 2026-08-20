@@ -1,0 +1,350 @@
+# ============================================================================
+# odoox — an Odoo JSON-RPC client for EZ
+#
+#   use "odoox"
+#
+#   client = Odoo()
+#   client.url = "https://mycompany.odoo.com"
+#   client.db = "mycompany"
+#   client.email = "admin@mycompany.com"
+#   client.pass = "secret"
+#
+#   session = client.login()
+#
+#   rows = session.read("res.partner", ["name", "email"])
+#       .condition("id=87429")
+#       .OR("id=8129")
+#       .limit(10)
+#       .exec()
+#
+#   session.write("res.partner")
+#       .value("name", "Updated Name")
+#       .condition("id=87429")
+#       .exec()
+#
+#   fields = session.inspect("res.partner")
+#
+# Talks to Odoo's classic /jsonrpc endpoint (service "common" for auth,
+# service "object" for execute_kw). No cookies, no web session -- every call
+# carries db/uid/password, same as odoorpc / the official XML-RPC examples.
+# Transport is httpx, so real status codes and real errors instead of a
+# silently-200 response.
+# ============================================================================
+
+use "httpx"
+
+# ── condition parsing ───────────────────────────────────────────────────────
+#
+# "id=87429"   -> ["id", "=", 87429]
+# "age>=18"    -> ["age", ">=", 18]
+# "name='Bob'" -> ["name", "=", "Bob"]
+#
+# Longest operators are checked first so ">=" isn't mistaken for ">" followed
+# by a stray "=".
+
+ODOOX_OPERATORS = [">=", "<=", "!=", "=", ">", "<"]
+
+export task parseCondition(expr) {
+    text = trim(str(expr))
+    op = nil
+    at = -1
+    get candidate in ODOOX_OPERATORS {
+        pos = indexOf(text, candidate)
+        when pos > 0 and op == nil {
+            op = candidate
+            at = pos
+        }
+    }
+    when op == nil {
+        throw Exception(`odoox: no operator (=, !=, >, >=, <, <=) found in condition "{expr}"`)
+    }
+    field = trim(substr(text, 0, at))
+    rawValue = trim(substr(text, at + len(op), len(text) - at - len(op)))
+    when field == "" {
+        throw Exception(`odoox: condition "{expr}" has no field name`)
+    }
+    give [field, op, coerceValue(rawValue)]
+}
+
+task coerceValue(raw) {
+    when len(raw) >= 2 {
+        first = substr(raw, 0, 1)
+        last = substr(raw, len(raw) - 1, 1)
+        when (first == "\"" and last == "\"") or (first == "'" and last == "'") {
+            give substr(raw, 1, len(raw) - 2)
+        }
+    }
+    when raw == "true" { give true }
+    when raw == "false" { give false }
+    when raw == "nil" { give nil }
+    when isNumericLiteral(raw) {
+        when contains(raw, ".") { give num(raw) }
+        give floor(num(raw))
+    }
+    give raw
+}
+
+task isNumericLiteral(raw) {
+    when raw == "" { give false }
+    i = 0
+    seenDigit = false
+    while i < len(raw) {
+        c = substr(raw, i, 1)
+        when c == "-" and i == 0 { }
+        other when c == "." { }
+        other when c >= "0" and c <= "9" { seenDigit = true }
+        other { give false }
+        i = i + 1
+    }
+    give seenDigit
+}
+
+# ── domain building ─────────────────────────────────────────────────────────
+#
+# Odoo domains are flat prefix (polish) notation: adjacent leaves are
+# implicitly AND'ed, and "|" prefixes the next two complete expressions to OR
+# them. Because the domain built so far is always itself one complete
+# expression, ANDing a new term is a plain append, and ORing a new term is
+# ["|"] + existing + [term] -- which OR's the *whole* accumulated condition
+# with the new one, matching what `.condition(a).OR(b)` reads as.
+
+export task domainAnd(domain, term) {
+    give domain + [term]
+}
+
+export task domainOr(domain, term) {
+    when len(domain) == 0 { give [term] }
+    give ["|"] + domain + [term]
+}
+
+# ── JSON-RPC transport ──────────────────────────────────────────────────────
+
+_odooxRpcId = 0
+
+task nextRpcId() {
+    _odooxRpcId = _odooxRpcId + 1
+    give _odooxRpcId
+}
+
+task rpcCall(http, url, service, method, args) {
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": { "service": service, "method": method, "args": args },
+        "id": nextRpcId()
+    }
+    r = http.post(url, { "json": payload }).raiseForStatus()
+    give rpcUnwrap(r, service, method)
+}
+
+task rpcUnwrap(r, service, method) {
+    body = r.json()
+    when has_key(body, "error") {
+        throw Exception(rpcErrorMessage(body["error"], service, method))
+    }
+    give body["result"]
+}
+
+task rpcErrorMessage(err, service, method) {
+    detail = nil
+    when has_key(err, "data") and has_key(err["data"], "message") { detail = err["data"]["message"] }
+    other when has_key(err, "message") { detail = err["message"] }
+    when detail == nil { detail = str(err) }
+    give `odoox: {service}.{method} failed: {detail}`
+}
+
+# ── Odoo — the client you configure and log in with ────────────────────────
+
+export model Odoo {
+
+    init() {
+        self.url = nil
+        self.db = nil
+        self.email = nil
+        self.pass = nil
+        self.uid = nil
+        self.http = Http().withTimeout(30000)
+    }
+
+    task rpcUrl() {
+        when self.url == nil {
+            throw Exception("odoox: Odoo().url must be set before login()")
+        }
+        base = str(self.url)
+        when endsWith(base, "/") { base = substr(base, 0, len(base) - 1) }
+        give base + "/jsonrpc"
+    }
+
+    # Authenticates via the "common" service and returns a Session carrying
+    # the uid. Nothing above this point touches the network.
+    task login() {
+        when self.db == nil or self.email == nil or self.pass == nil {
+            throw Exception("odoox: db, email and pass must all be set before login()")
+        }
+        result = rpcCall(self.http, self.rpcUrl(), "common", "login", [self.db, self.email, self.pass])
+        when result == false or result == nil {
+            throw Exception(`odoox: login failed for {self.email} on database "{self.db}" -- check url, db, email, pass`)
+        }
+        self.uid = result
+        give Session(self)
+    }
+}
+
+# ── Session — everything after login ────────────────────────────────────────
+
+export model Session {
+
+    init(odoo) {
+        self.odoo = odoo
+    }
+
+    task callKw(modelName, method, args, kwargs) {
+        fullArgs = [self.odoo.db, self.odoo.uid, self.odoo.pass, modelName, method, args, kwargs]
+        give rpcCall(self.odoo.http, self.odoo.rpcUrl(), "object", "execute_kw", fullArgs)
+    }
+
+    # session.read("res.partner", ["name","email"])   -- explicit field list
+    # session.read("res.partner")                     -- nil fields -> all fields
+    # session.read("res.partner", nil)                -- same, explicit
+    task read(modelName, fields = nil) {
+        give ReadQuery(self, modelName, fields)
+    }
+
+    # session.write("res.partner").value("name","x").condition("id=87429").exec()
+    #
+    # Odoo's write() takes ids, not a domain, so the condition is resolved with
+    # a search() first and the write() applied to whatever matches. Two RPC
+    # calls under one chain.
+    task write(modelName) {
+        give WriteQuery(self, modelName)
+    }
+
+    task create(modelName, values) {
+        give self.callKw(modelName, "create", [values], {})
+    }
+
+    task unlink(modelName, ids) {
+        give self.callKw(modelName, "unlink", [ids], {})
+    }
+
+    task count(modelName, conditionExpr = nil) {
+        domain = []
+        when conditionExpr != nil { domain = domainAnd(domain, parseCondition(conditionExpr)) }
+        give self.callKw(modelName, "search_count", [domain], {})
+    }
+
+    # session.inspect("res.partner") -> { fieldName: { type, string, required, ... } }
+    task inspect(modelName, attributes = nil) {
+        wanted = attributes
+        when wanted == nil {
+            wanted = ["string", "type", "required", "readonly", "relation", "help", "selection"]
+        }
+        give self.callKw(modelName, "fields_get", [], { "attributes": wanted })
+    }
+}
+
+# ── ReadQuery — chainable search_read builder ───────────────────────────────
+
+export model ReadQuery {
+
+    init(session, modelName, fields) {
+        self.session = session
+        self.modelName = modelName
+        self.fields = fields
+        self.domain = []
+        self.limitCount = nil
+        self.offsetCount = 0
+        self.orderStr = nil
+    }
+
+    task condition(expr) {
+        self.domain = domainAnd(self.domain, parseCondition(expr))
+        give self
+    }
+
+    task OR(expr) {
+        self.domain = domainOr(self.domain, parseCondition(expr))
+        give self
+    }
+
+    task limit(n) {
+        self.limitCount = n
+        give self
+    }
+
+    task offset(n) {
+        self.offsetCount = n
+        give self
+    }
+
+    task orderBy(spec) {
+        self.orderStr = spec
+        give self
+    }
+
+    task exec() {
+        kwargs = { "offset": self.offsetCount }
+        when self.fields != nil { kwargs["fields"] = self.fields }
+        when self.limitCount != nil { kwargs["limit"] = self.limitCount }
+        when self.orderStr != nil { kwargs["order"] = self.orderStr }
+        give self.session.callKw(self.modelName, "search_read", [self.domain], kwargs)
+    }
+
+    task first() {
+        self.limitCount = 1
+        rows = self.exec()
+        when len(rows) == 0 { give nil }
+        give rows[0]
+    }
+}
+
+# ── WriteQuery — chainable search + write builder ───────────────────────────
+
+export model WriteQuery {
+
+    init(session, modelName) {
+        self.session = session
+        self.modelName = modelName
+        self.values = {}
+        self.domain = []
+        self.explicitIds = nil
+    }
+
+    task value(field, val) {
+        self.values[field] = val
+        give self
+    }
+
+    task condition(expr) {
+        self.domain = domainAnd(self.domain, parseCondition(expr))
+        give self
+    }
+
+    task OR(expr) {
+        self.domain = domainOr(self.domain, parseCondition(expr))
+        give self
+    }
+
+    # Writes directly to known ids, skipping the search -- for when you
+    # already have them instead of a condition.
+    task ids(idList) {
+        self.explicitIds = idList
+        give self
+    }
+
+    task exec() {
+        when len(keys(self.values)) == 0 {
+            throw Exception("odoox: write() needs at least one .value(field, val) before exec()")
+        }
+        targetIds = nil
+        when self.explicitIds != nil { targetIds = self.explicitIds }
+        other {
+            when len(self.domain) == 0 {
+                throw Exception("odoox: write() needs .condition(...) or .ids([...]) before exec() -- refusing to write every row")
+            }
+            targetIds = self.session.callKw(self.modelName, "search", [self.domain], {})
+        }
+        when len(targetIds) == 0 { give false }
+        give self.session.callKw(self.modelName, "write", [targetIds, self.values], {})
+    }
+}

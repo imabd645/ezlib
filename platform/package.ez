@@ -1,0 +1,4 @@
+﻿name = "platform"
+version = "1.0.0"
+description = "Cross-platform runtime and dynamic library loading helper for EZ"
+main = "main.ez"

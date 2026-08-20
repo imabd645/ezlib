@@ -1,0 +1,48 @@
+use "providers/registry.ez"
+
+task _toHex(bytes) {
+    hc = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+    }
+    give result
+}
+
+model RangeError extends Exception
+{
+    init(message)
+    {
+        super(message)
+    }
+    
+}
+export model SecureRandom {
+    static task bytes(n) { give Provider.get().randomBytes(n) }
+    
+    static task hex(n) { give _toHex(SecureRandom.bytes(n)) }
+    
+    static task randInt(minV, maxV) {
+        range = maxV - minV + 1
+        when range <= 0 { throw RangeError("Invalid range for the Secure Random") }
+        b = SecureRandom.bytes(4)
+        val = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+        val = val & 0x7FFFFFFF
+        give minV + (val % range)
+    }
+    
+    static task randFloat() {
+        b = SecureRandom.bytes(4)
+        val = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]
+        val = val & 0x7FFFFFFF
+        give val / 2147483648.0
+    }
+    
+    static task uuid4() {
+        b = SecureRandom.bytes(16)
+        b[6] = (b[6] & 0x0F) | 0x40
+        b[8] = (b[8] & 0x3F) | 0x80
+        h = _toHex(b)
+        give substr(h, 0, 8) + "-" + substr(h, 8, 4) + "-" + substr(h, 12, 4) + "-" + substr(h, 16, 4) + "-" + substr(h, 20, 12)
+    }
+}

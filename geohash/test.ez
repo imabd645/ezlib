@@ -1,0 +1,127 @@
+# ============================================================================
+# geohash — tests
+#
+# The encode/decode vectors are NOT produced by running this package and
+# writing down what came out -- that would lock in whatever the code does.
+# They come from an independent reference implementation and from the one
+# canonical geohash example ("u4pruydqqvj" == 57.64911, 10.40744), so an
+# error in bit-ordering or the alphabet shows up as a wrong string.
+# ============================================================================
+
+use "geohash"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+task refused(name, threw) { checkTrue(name, threw) }
+task near(a, b) { give abs(a - b) < 0.0001 }
+
+# ── encoding ─────────────────────────────────────────────────────────────────
+
+out "encoding"
+
+# "u4pruydqqvj" is the geohash every tutorial cites; it must come out exactly.
+check("canonical 11-char", ghEncode(57.64911, 10.40744, 11), "u4pruydqqvj")
+check("curitiba", ghEncode(-25.383, -49.266, 5), "6gkzw")
+check("san francisco", ghEncode(37.421542, -122.085589, 8), "9q9hvu7u")
+check("null island", ghEncode(0, 0, 6), "s00000")
+check("eiffel tower", ghEncode(48.8584, 2.2945, 7), "u09tunq")
+check("london", ghEncode(51.5074, -0.1278, 7), "gcpvj0d")
+
+# A shorter hash is the prefix of a longer one for the same point.
+check("precision is a prefix", ghEncode(57.64911, 10.40744, 5), "u4pru")
+check("precision 1", len(ghEncode(0, 0, 1)), 1)
+check("precision 12", len(ghEncode(0, 0, 12)), 12)
+
+# ── decoding ─────────────────────────────────────────────────────────────────
+
+out "decoding"
+
+d = ghDecode("u4pruydqqvj")
+checkTrue("decode lat", near(d["lat"], 57.64911))
+checkTrue("decode lng", near(d["lng"], 10.40744))
+checkTrue("cell is tiny at 11 chars", d["latErr"] < 0.00001)
+
+d6 = ghDecode("9q9hvu")
+checkTrue("center lat", near(d6["lat"], 37.422180))
+checkTrue("center lng", near(d6["lng"], -122.085571))
+
+# Decode inverts encode: re-encoding the decoded centre gives the hash back.
+check("round-trip 6", ghEncode(d6["lat"], d6["lng"], 6), "9q9hvu")
+
+# ── neighbours ───────────────────────────────────────────────────────────────
+
+out "neighbours"
+
+n = ghNeighbors("9q9hvu")
+check("north", n["n"], "9q9hvv")
+check("south", n["s"], "9q9hvg")
+check("east", n["e"], "9q9hyh")
+check("west", n["w"], "9q9hvs")
+check("north-east", n["ne"], "9q9hyj")
+check("north-west", n["nw"], "9q9hvt")
+check("south-east", n["se"], "9q9hy5")
+check("south-west", n["sw"], "9q9hve")
+
+# A neighbour is genuinely adjacent: its prefix matches the original.
+checkTrue("north shares a prefix", startsWith(n["n"], substr("9q9hvu", 0, 5)))
+checkTrue("all eight distinct", n["n"] != n["s"] and n["e"] != n["w"] and n["ne"] != n["sw"])
+
+# ── validation and bounds ────────────────────────────────────────────────────
+
+out "validation and bounds"
+
+checkTrue("a valid hash", ghValidate("u4pruydqqvj"))
+checkTrue("uppercase is not in the alphabet", ghValidate("u4pruyDqqvj") == false)
+checkTrue("'a' is not in the alphabet", ghValidate("abc") == false)
+checkTrue("empty is invalid", ghValidate("") == false)
+checkTrue("nil is invalid", ghValidate(nil) == false)
+
+bb = ghBoundingBox("9q9hvu")
+checkTrue("minLat below maxLat", bb["minLat"] < bb["maxLat"])
+checkTrue("minLng below maxLng", bb["minLng"] < bb["maxLng"])
+checkTrue("centre inside the box",
+          bb["minLat"] <= d6["lat"] and d6["lat"] <= bb["maxLat"] and
+          bb["minLng"] <= d6["lng"] and d6["lng"] <= bb["maxLng"])
+
+# ── errors ───────────────────────────────────────────────────────────────────
+
+out "errors"
+
+threw = false
+try { ghEncode(91, 0) } catch (e) { threw = true }
+refused("latitude above 90 is refused", threw)
+
+threw = false
+try { ghEncode(0, 181) } catch (e) { threw = true }
+refused("longitude above 180 is refused", threw)
+
+threw = false
+try { ghEncode(0, 0, 13) } catch (e) { threw = true }
+refused("precision above 12 is refused", threw)
+
+threw = false
+try { ghDecode("u4pruydq!qvj") } catch (e) { threw = true }
+refused("a punctuation character is refused", threw)
+
+out ""
+when failed == 0 {
+    out `geohash: all {passed} checks passed`
+}
+other {
+    out `geohash: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

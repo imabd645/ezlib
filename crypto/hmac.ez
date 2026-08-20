@@ -1,0 +1,75 @@
+use "hash.ez"
+
+task _rawBytes(s) {
+    n = len(s)
+    when n == 0 { give [] }
+    buf = os_alloc(n + 1)
+    os_write_string(buf, 0, s)
+    res = []
+    repeat i = 0 to n - 1 { push(res, os_read_byte(buf, i) & 255) }
+    os_free(buf)
+    give res
+}
+
+task _toHex(bytes) {
+    hc = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+    }
+    give result
+}
+
+export model HMAC {
+    static task sha256(key, message) { give HMAC._compute(key, message, _CALG_SHA_256, 32, 64) }
+    # SHA-384/512 are 1024-bit-block hashes, so the HMAC block size is 128, not 64.
+    static task sha384(key, message) { give HMAC._compute(key, message, _CALG_SHA_384, 48, 128) }
+    static task sha512(key, message) { give HMAC._compute(key, message, _CALG_SHA_512, 64, 128) }
+    static task sha1(key, message)   { give HMAC._compute(key, message, _CALG_SHA1,    20, 64) }
+    static task md5(key, message)    { give HMAC._compute(key, message, _CALG_MD5,     16, 64) }
+
+    # RFC 2104. Everything here stays in BYTE ARRAYS.
+    #
+    # This used to assemble the padded key and the inner digest into STRINGS with
+    # chr() and concatenate them. An EZ string is UTF-8, so every byte >= 128
+    # became a two-byte sequence: the pads and the inner hash were both corrupted
+    # before hashing, and the result disagreed with the RFC 4231 vectors for
+    # essentially every input -- HMAC.sha256("key", "The quick brown fox jumps
+    # over the lazy dog") returned bff805b9... instead of f7bc83f4...
+    static task _compute(key, message, algId, hashLen, blockLen) {
+        give _toHex(HMAC.raw(_rawBytes(key), _rawBytes(message), algId, hashLen, blockLen))
+    }
+
+    # HMAC over byte ARRAYS, returning a byte array. Callers that need to feed one
+    # HMAC's output into the next (PBKDF2) must use this: round-tripping a digest
+    # through a string corrupts every byte >= 128.
+    static task raw(keyIn, msgBytes, algId, hashLen, blockLen) {
+        # Copy the key: push() below would otherwise mutate the caller's array,
+        # which PBKDF2 reuses across thousands of iterations.
+        keyBytes = []
+        get b in keyIn { push(keyBytes, b) }
+
+        # whenkey > block size, hash it down
+        when len(keyBytes) > blockLen {
+            keyBytes = _hashBytes(keyBytes, algId, hashLen)
+        }
+
+        # Zero-pad to block size
+        while len(keyBytes) < blockLen {
+            push(keyBytes, 0)
+        }
+
+        # Inner: H( (key ^ 0x36) ‖ message )
+        innerInput = []
+        repeat i = 0 to blockLen - 1 { push(innerInput, keyBytes[i] ^ 54) }
+        get b in msgBytes { push(innerInput, b) }
+        innerBytes = _hashBytes(innerInput, algId, hashLen)
+
+        # Outer: H( (key ^ 0x5C) ‖ innerHash )
+        outerInput = []
+        repeat i = 0 to blockLen - 1 { push(outerInput, keyBytes[i] ^ 92) }
+        get b in innerBytes { push(outerInput, b) }
+
+        give _hashBytes(outerInput, algId, hashLen)
+    }
+}

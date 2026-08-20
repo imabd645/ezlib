@@ -1,0 +1,203 @@
+# OpenSSL libcrypto Provider
+
+model DLLError extends Exception {
+
+    init(message) {
+        super(message)
+    }
+}
+current_platform = os()
+__ssl = 0
+when current_platform == "windows" { __ssl = os_load_lib("libcrypto-3-x64.dll") }
+other when current_platform == "macos" { __ssl = os_load_lib("libcrypto.dylib") }
+other {
+    __ssl = os_load_lib("libcrypto.so.3")
+    when __ssl == 0 { __ssl = os_load_lib("libcrypto.so.1.1") }
+    when __ssl == 0 { __ssl = os_load_lib("libcrypto.so") }
+}
+
+when __ssl == 0 { throw DLLError("ezcrypto: failed to load OpenSSL libcrypto")s }
+
+fCtxNew = os_get_func(__ssl, "EVP_MD_CTX_new")
+fCtxFree = os_get_func(__ssl, "EVP_MD_CTX_free")
+fSha256 = os_get_func(__ssl, "EVP_sha256")
+fSha384 = os_get_func(__ssl, "EVP_sha384")
+fSha512 = os_get_func(__ssl, "EVP_sha512")
+fSha1 = os_get_func(__ssl, "EVP_sha1")
+fMd5 = os_get_func(__ssl, "EVP_md5")
+fDigestInit = os_get_func(__ssl, "EVP_DigestInit_ex")
+fDigestUpdate = os_get_func(__ssl, "EVP_DigestUpdate")
+fDigestFinal = os_get_func(__ssl, "EVP_DigestFinal_ex")
+
+fRandBytes = os_get_func(__ssl, "RAND_bytes")
+
+fCipherCtxNew = os_get_func(__ssl, "EVP_CIPHER_CTX_new")
+fCipherCtxFree = os_get_func(__ssl, "EVP_CIPHER_CTX_free")
+fAes128Cbc = os_get_func(__ssl, "EVP_aes_128_cbc")
+fAes192Cbc = os_get_func(__ssl, "EVP_aes_192_cbc")
+fAes256Cbc = os_get_func(__ssl, "EVP_aes_256_cbc")
+fEncryptInit = os_get_func(__ssl, "EVP_EncryptInit_ex")
+fEncryptUpdate = os_get_func(__ssl, "EVP_EncryptUpdate")
+fEncryptFinal = os_get_func(__ssl, "EVP_EncryptFinal_ex")
+fDecryptInit = os_get_func(__ssl, "EVP_DecryptInit_ex")
+fDecryptUpdate = os_get_func(__ssl, "EVP_DecryptUpdate")
+fDecryptFinal = os_get_func(__ssl, "EVP_DecryptFinal_ex")
+fCipherCtxSetPadding = os_get_func(__ssl, "EVP_CIPHER_CTX_set_padding")
+
+fPbkdf2 = os_get_func(__ssl, "PKCS5_PBKDF2_HMAC")
+
+# Helpers
+task _toHex(bytes) {
+    hc = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+    }
+    give result
+}
+
+task _readByte(buf, offset) { give os_read_byte(buf, offset) & 255 }
+
+task _readBuffer(buf, size) {
+    result = []
+    i = 0
+    while i + 8 <= size {
+        chunk = os_read_uint64(buf, i)
+        repeat j = 0 to 7 { push(result, (chunk >> (j * 8)) & 255) }
+        i = i + 8
+    }
+    while i < size {
+        push(result, os_read_byte(buf, i) & 255)
+        i = i + 1
+    }
+    give result
+}
+
+export model OpenSSLCryptoProvider {
+
+    static task hashBytes(text, algId, hashSize) {
+        ctx = os_call(fCtxNew, "ptr")
+        md = os_call(algId, "ptr")
+        os_call(fDigestInit, "int", ctx, md, 0)
+
+        inBuf = 0
+        inLen = 0
+        ownsBuf = false
+        when typeOf(text) == "array" {
+            inLen = len(text)
+            inBuf = os_alloc(inLen + 1)
+            ownsBuf = true
+            repeat i = 0 to inLen - 1 { os_write_byte(inBuf, i, text[i] & 255) }
+        } other {
+            inLen = len(text)
+            inBuf = os_alloc(inLen + 1)
+            ownsBuf = true
+            os_write_string(inBuf, 0, text)
+        }
+
+        os_call(fDigestUpdate, "int", ctx, inBuf, inLen)
+        when ownsBuf { os_free(inBuf) }
+
+        outBuf = os_alloc(hashSize + 8)
+        lenBuf = os_alloc(8)
+        os_call(fDigestFinal, "int", ctx, outBuf, lenBuf)
+
+        res = _readBuffer(outBuf, hashSize)
+        os_free(outBuf)
+        os_free(lenBuf)
+        os_call(fCtxFree, "void", ctx)
+
+        give res
+    }
+
+    static task sha256Bytes(text) { give OpenSSLCryptoProvider.hashBytes(text, fSha256, 32) }
+    static task sha384Bytes(text) { give OpenSSLCryptoProvider.hashBytes(text, fSha384, 48) }
+    static task sha512Bytes(text) { give OpenSSLCryptoProvider.hashBytes(text, fSha512, 64) }
+    static task sha1Bytes(text) { give OpenSSLCryptoProvider.hashBytes(text, fSha1, 20) }
+    static task md5Bytes(text) { give OpenSSLCryptoProvider.hashBytes(text, fMd5, 16) }
+
+    static task randomBytes(n) {
+        buf = os_alloc(n + 8)
+        os_call(fRandBytes, "int", buf, n)
+        res = _readBuffer(buf, n)
+        os_free(buf)
+        give res
+    }
+
+    static task pbkdf2Bytes(passwordBytes, saltBytes, iter, keyLen) {
+        # PKCS5_PBKDF2_HMAC(pass, passlen, salt, saltlen, iter, digest, keylen, out)
+        pBuf = os_alloc(len(passwordBytes) + 8)
+        repeat i = 0 to len(passwordBytes) - 1 { os_write_byte(pBuf, i, passwordBytes[i] & 255) }
+
+        sBuf = os_alloc(len(saltBytes) + 8)
+        repeat i = 0 to len(saltBytes) - 1 { os_write_byte(sBuf, i, saltBytes[i] & 255) }
+
+        outBuf = os_alloc(keyLen + 8)
+        md = os_call(fSha256, "ptr")
+
+        rc = os_call(fPbkdf2, "int", pBuf, len(passwordBytes), sBuf, len(saltBytes), iter, md, keyLen, outBuf)
+        when rc == 0 { throw "ezcrypto: PKCS5_PBKDF2_HMAC failed" }
+
+        res = _readBuffer(outBuf, keyLen)
+        os_free(pBuf)
+        os_free(sBuf)
+        os_free(outBuf)
+        give res
+    }
+
+    static task aesProcess(keyBytes, ivBytes, dataBytes, isEncrypt) {
+        alg = 0
+        when len(keyBytes) == 16 { alg = fAes128Cbc }
+        other when len(keyBytes) == 24 { alg = fAes192Cbc }
+        other when len(keyBytes) == 32 { alg = fAes256Cbc }
+        other { throw "ezcrypto: AES requires 16, 24, or 32 byte key" }
+
+        kBuf = os_alloc(len(keyBytes) + 8)
+        repeat i = 0 to len(keyBytes) - 1 { os_write_byte(kBuf, i, keyBytes[i] & 255) }
+
+        vBuf = os_alloc(len(ivBytes) + 8)
+        repeat i = 0 to len(ivBytes) - 1 { os_write_byte(vBuf, i, ivBytes[i] & 255) }
+
+        dBuf = os_alloc(len(dataBytes) + 8)
+        repeat i = 0 to len(dataBytes) - 1 { os_write_byte(dBuf, i, dataBytes[i] & 255) }
+
+        # Output buffer can be up to dataBytes length + block size
+        outBuf = os_alloc(len(dataBytes) + 32)
+        outlBuf = os_alloc(8)
+        totalLen = 0
+
+        ctx = os_call(fCipherCtxNew, "ptr")
+        md = os_call(alg, "ptr")
+
+        when isEncrypt {
+            os_call(fEncryptInit, "int", ctx, md, 0, kBuf, vBuf)
+            os_call(fEncryptUpdate, "int", ctx, outBuf, outlBuf, dBuf, len(dataBytes))
+            totalLen = totalLen + (os_read_uint64(outlBuf, 0) & 0xFFFFFFFF)
+
+            os_call(fEncryptFinal, "int", ctx, outBuf + totalLen, outlBuf)
+            totalLen = totalLen + (os_read_uint64(outlBuf, 0) & 0xFFFFFFFF)
+        } other {
+            os_call(fDecryptInit, "int", ctx, md, 0, kBuf, vBuf)
+            rcUpdate = os_call(fDecryptUpdate, "int", ctx, outBuf, outlBuf, dBuf, len(dataBytes))
+            totalLen = totalLen + (os_read_uint64(outlBuf, 0) & 0xFFFFFFFF)
+
+            rcFinal = os_call(fDecryptFinal, "int", ctx, outBuf + totalLen, outlBuf)
+            when rcFinal == 0 {
+                os_call(fCipherCtxFree, "void", ctx)
+                throw "ezcrypto: Decrypt failed (bad padding/key?)"
+            }
+            totalLen = totalLen + (os_read_uint64(outlBuf, 0) & 0xFFFFFFFF)
+        }
+
+        res = _readBuffer(outBuf, totalLen)
+
+        os_call(fCipherCtxFree, "void", ctx)
+        os_free(kBuf)
+        os_free(vBuf)
+        os_free(dBuf)
+        os_free(outBuf)
+        os_free(outlBuf)
+
+        give res
+    }
+}

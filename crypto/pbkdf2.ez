@@ -1,0 +1,86 @@
+use "providers/registry.ez"
+use "hmac.ez"
+
+task _rawBytes(s) {
+    n = len(s)
+    when n == 0 { give [] }
+    buf = os_alloc(n + 1)
+    os_write_string(buf, 0, s)
+    res = []
+    repeat i = 0 to n - 1 { push(res, os_read_byte(buf, i) & 255) }
+    os_free(buf)
+    give res
+}
+
+task _toHex(bytes) {
+    hc = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+    }
+    give result
+}
+
+export model PBKDF2 {
+    static task deriveBytes(passwordBytes, saltBytes, iterations, keyLen) {
+        # Attempt to use the native FFI implementation
+        fast = Provider.get().pbkdf2Bytes(passwordBytes, saltBytes, iterations, keyLen)
+        when fast != nil { give fast }
+        
+        # Fallback to pure EZ HMAC
+        hex = PBKDF2.derive(bytesToString(passwordBytes), bytesToString(saltBytes), iterations, keyLen)
+        octets = []
+        index = 0
+        while index + 1 < len(hex) {
+            hiStr = substr(hex, index, 1)
+            loStr = substr(hex, index + 1, 1)
+            hi = indexOf("0123456789abcdef", hiStr)
+            lo = indexOf("0123456789abcdef", loStr)
+            push(octets, hi * 16 + lo)
+            index = index + 2
+        }
+        give octets
+    }
+    
+    static task derive(password, salt, iterations, keyLen) {
+        when not iterations { iterations = 100000 }
+        when not keyLen     { keyLen     = 32      }
+
+        result   = []
+        block    = 1
+        pwBytes  = typeOf(password) == "array" ? password : _rawBytes(password)
+        saltBytes = typeOf(salt) == "array" ? salt : _rawBytes(salt)
+        
+        fast = Provider.get().pbkdf2Bytes(pwBytes, saltBytes, iterations, keyLen)
+        when fast != nil { give _toHex(fast) }
+
+        while len(result) < keyLen {
+            msg = []
+            get b in saltBytes { push(msg, b) }
+            push(msg, (block >> 24) & 255)
+            push(msg, (block >> 16) & 255)
+            push(msg, (block >> 8) & 255)
+            push(msg, block & 255)
+
+            u = HMAC.sha256(pwBytes, msg)
+            uBytes = hex_to_bytes(u)
+            accumulator = uBytes
+
+            repeat i = 2 to iterations {
+                u = HMAC.sha256(pwBytes, uBytes)
+                uBytes = hex_to_bytes(u)
+                repeat j = 0 to len(uBytes) - 1 {
+                    accumulator[j] = accumulator[j] ^ uBytes[j]
+                }
+            }
+
+            get b in accumulator { push(result, b) }
+            block = block + 1
+        }
+
+        # Truncate
+        resBytes = []
+        repeat i = 0 to keyLen - 1 { push(resBytes, result[i]) }
+        give _toHex(resBytes)
+    }
+}

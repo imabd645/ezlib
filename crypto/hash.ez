@@ -1,0 +1,24 @@
+use "providers/registry.ez"
+
+task _toHex(bytes) {
+    hc = "0123456789abcdef"
+    result = ""
+    get b in bytes {
+        result = result + substr(hc, (b >> 4) & 15, 1) + substr(hc, b & 15, 1)
+    }
+    give result
+}
+
+export model Hash {
+    static task sha256(text) { give _toHex(Provider.get().sha256Bytes(text)) }
+    static task sha384(text) { give _toHex(Provider.get().sha384Bytes(text)) }
+    static task sha512(text) { give _toHex(Provider.get().sha512Bytes(text)) }
+    static task sha1(text)   { give _toHex(Provider.get().sha1Bytes(text)) }
+    static task md5(text)    { give _toHex(Provider.get().md5Bytes(text)) }
+
+    static task sha256Bytes(text) { give Provider.get().sha256Bytes(text) }
+    static task sha384Bytes(text) { give Provider.get().sha384Bytes(text) }
+    static task sha512Bytes(text) { give Provider.get().sha512Bytes(text) }
+    static task sha1Bytes(text)   { give Provider.get().sha1Bytes(text) }
+    static task md5Bytes(text)    { give Provider.get().md5Bytes(text) }
+}

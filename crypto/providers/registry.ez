@@ -1,0 +1,11 @@
+use "providers/windows.ez"
+use "providers/openssl.ez"
+
+export model Provider {
+    static task get() {
+        when current_platform == "windows" {
+            give WindowsCryptoProvider
+        }
+        give OpenSSLCryptoProvider
+    }
+}

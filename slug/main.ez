@@ -1,0 +1,71 @@
+# ============================================================================
+# slug — turn any text into a URL-safe slug
+#
+#   use "slug"
+#
+#   slug("Café déjà vu!")   # "cafe-deja-vu"
+#   slug("Rock & Roll")     # "rock-roll"
+#   slug("hello_world", "_") # "hello_world"
+#
+# Lowercases, transliterates common Latin accents to ASCII, then replaces every
+# run of non-alphanumeric characters with a single separator and trims the
+# ends. The result is safe in a URL, a filename, or an id column.
+# ============================================================================
+
+# Accented characters are mapped to ASCII so "café" and "cafe" slug the same
+# way rather than one silently losing its last letter. Both cases are listed
+# because lowercase-then-transliterate would drop an uppercase accented letter
+# entirely if the lowercasing step does not fold it.
+TRANSLIT = [
+    ["á", "a"], ["à", "a"], ["â", "a"], ["ä", "a"], ["ã", "a"], ["å", "a"],
+    ["é", "e"], ["è", "e"], ["ê", "e"], ["ë", "e"],
+    ["í", "i"], ["ì", "i"], ["î", "i"], ["ï", "i"],
+    ["ó", "o"], ["ò", "o"], ["ô", "o"], ["ö", "o"], ["õ", "o"], ["ø", "o"],
+    ["ú", "u"], ["ù", "u"], ["û", "u"], ["ü", "u"],
+    ["ý", "y"], ["ÿ", "y"],
+    ["ñ", "n"], ["ç", "c"], ["ß", "ss"],
+    ["æ", "ae"], ["œ", "oe"],
+    ["Á", "a"], ["À", "a"], ["Â", "a"], ["Ä", "a"], ["Ã", "a"], ["Å", "a"],
+    ["É", "e"], ["È", "e"], ["Ê", "e"], ["Ë", "e"],
+    ["Í", "i"], ["Ì", "i"], ["Î", "i"], ["Ï", "i"],
+    ["Ó", "o"], ["Ò", "o"], ["Ô", "o"], ["Ö", "o"], ["Õ", "o"], ["Ø", "o"],
+    ["Ú", "u"], ["Ù", "u"], ["Û", "u"], ["Ü", "u"],
+    ["Ý", "y"], ["Ñ", "n"], ["Ç", "c"], ["Æ", "ae"], ["Œ", "oe"]
+]
+
+task _isAlnum(c) {
+    code = ord(c)
+    give (code >= 48 and code <= 57) or (code >= 97 and code <= 122)
+}
+
+export task slug(text, sep = "-") {
+    when text == nil { give "" }
+    result = lower(str(text))
+
+    # Transliterate before stripping: an accented letter must become a letter,
+    # not a separator, or "café" turns into "caf".
+    get pair in TRANSLIT {
+        result = replace(result, pair[0], pair[1])
+    }
+
+    out_ = ""
+    prevSep = false
+    repeat i = 0 to len(result) - 1 {
+        c = substr(result, i, 1)
+        when _isAlnum(c) {
+            out_ = out_ + c
+            prevSep = false
+        } other {
+            when not prevSep and len(out_) > 0 {
+                out_ = out_ + sep
+                prevSep = true
+            }
+        }
+    }
+
+    # Trim a trailing separator; the loop never emits a leading one.
+    when len(out_) > 0 and endsWith(out_, sep) {
+        out_ = substr(out_, 0, len(out_) - len(sep))
+    }
+    give out_
+}

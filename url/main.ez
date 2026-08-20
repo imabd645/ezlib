@@ -1,0 +1,260 @@
+# ============================================================================
+# url — URL parsing, encoding, and query strings
+#
+#   use "url"
+#
+#   urlParse("https://u:p@example.com:8080/a?q=1#f")["host"]  # "example.com"
+#   urlEncodeComponent("a b&c")       # "a%20b%26c"
+#   urlDecodeComponent("a%20b")       # "a b"
+#   urlBuildQuery({ "a": 1, "b": "x y" })   # "a=1&b=x%20y"
+#   urlParseQuery("a=1&b=x+y")        # { a: "1", b: "x y" }
+#
+# Percent-encoding follows RFC 3986: only A-Z a-z 0-9 - _ . ~ stay literal,
+# everything else becomes %XX of its bytes (so UTF-8 text becomes %C3%A9).
+# ============================================================================
+
+HEX = "0123456789ABCDEF"
+
+task _isUnreserved(c) {
+    code = ord(c)
+    give (code >= 48 and code <= 57) or
+         (code >= 65 and code <= 90) or
+         (code >= 97 and code <= 122) or
+         c == "-" or c == "_" or c == "." or c == "~"
+}
+
+task _hexVal(c) {
+    when c >= "0" and c <= "9" { give ord(c) - 48 }
+    when c >= "A" and c <= "F" { give ord(c) - 55 }
+    when c >= "a" and c <= "f" { give ord(c) - 87 }
+    give -1
+}
+
+task _allDigits(s) {
+    when s == "" { give false }
+    repeat i = 0 to len(s) - 1 {
+        c = substr(s, i, 1)
+        when not (ord(c) >= 48 and ord(c) <= 57) { give false }
+    }
+    give true
+}
+
+# Encode every byte that is not an RFC 3986 unreserved character.
+export task urlEncodeComponent(s) {
+    when s == nil { give "" }
+    body = str(s)
+    out_ = ""
+    repeat i = 0 to len(body) - 1 {
+        c = substr(body, i, 1)
+        when _isUnreserved(c) {
+            out_ = out_ + c
+        } other {
+            code = ord(c)
+            out_ = out_ + "%" + substr(HEX, floor(code / 16), 1) + substr(HEX, code % 16, 1)
+        }
+    }
+    give out_
+}
+
+# Decode a list of raw byte values (0..255) as UTF-8, producing a string.
+# `chr` takes a codepoint rather than a byte, so multi-byte escapes like
+# %C3%A9 must be re-assembled into a codepoint before chr sees them -- the
+# same walk the `clipboard` package uses to push UTF-8 through the Win32 API.
+task _utf8Decode(bytes) {
+    out_ = ""
+    i = 0
+    n = len(bytes)
+    while i < n {
+        b = bytes[i]
+        cp = b
+        adv = 1
+        when b >= 0xF0 {
+            cp = ((b - 0xF0) * 262144) + ((bytes[i + 1] - 0x80) * 4096) +
+                 ((bytes[i + 2] - 0x80) * 64) + (bytes[i + 3] - 0x80)
+            adv = 4
+        } other when b >= 0xE0 {
+            cp = ((b - 0xE0) * 4096) + ((bytes[i + 1] - 0x80) * 64) + (bytes[i + 2] - 0x80)
+            adv = 3
+        } other when b >= 0xC0 {
+            cp = ((b - 0xC0) * 64) + (bytes[i + 1] - 0x80)
+            adv = 2
+        }
+        out_ = out_ + chr(cp)
+        i = i + adv
+    }
+    give out_
+}
+
+# Decode %XX escapes; a "+" is also treated as a space, matching how browsers
+# submit forms, so a query string can be decoded the same way as a path.
+export task urlDecodeComponent(s) {
+    when s == nil { give "" }
+    body = str(s)
+    bytes = []
+    i = 0
+    n = len(body)
+    while i < n {
+        c = substr(body, i, 1)
+        when c == "+" {
+            push(bytes, 32)
+            i = i + 1
+        } other when c == "%" and i + 2 < n {
+            hi = _hexVal(substr(body, i + 1, 1))
+            lo = _hexVal(substr(body, i + 2, 1))
+            when hi >= 0 and lo >= 0 {
+                push(bytes, hi * 16 + lo)
+                i = i + 3
+            } other {
+                push(bytes, ord(c))
+                i = i + 1
+            }
+        } other {
+            push(bytes, ord(c))
+            i = i + 1
+        }
+    }
+    give _utf8Decode(bytes)
+}
+
+# Build a query string from a dictionary. Keys are sorted so the output is
+# deterministic. A list value is repeated once per element ("a=1&a=2").
+export task urlBuildQuery(params) {
+    parts = []
+    keys_ = sort(keys(params))
+    get k in keys_ {
+        v = params[k]
+        when typeOf(v) == "array" {
+            get item in v {
+                push(parts, urlEncodeComponent(str(k)) + "=" + urlEncodeComponent(str(item)))
+            }
+        } other when v == nil {
+            push(parts, urlEncodeComponent(str(k)) + "=")
+        } other {
+            push(parts, urlEncodeComponent(str(k)) + "=" + urlEncodeComponent(str(v)))
+        }
+    }
+    give join(parts, "&")
+}
+
+# Parse a query string. A repeated key collects into a list; "+" and "%20" both
+# decode to a space.
+export task urlParseQuery(qs) {
+    result = {}
+    when qs == nil { give result }
+    body = str(qs)
+    when startsWith(body, "?") { body = substr(body, 1, len(body) - 1) }
+    when body == "" { give result }
+
+    pairs = split(body, "&")
+    get pair in pairs {
+        when pair != "" {
+            eqAt = indexOf(pair, "=")
+            key = ""
+            val = ""
+            when eqAt >= 0 {
+                key = urlDecodeComponent(substr(pair, 0, eqAt))
+                val = urlDecodeComponent(substr(pair, eqAt + 1, len(pair) - eqAt - 1))
+            } other {
+                key = urlDecodeComponent(pair)
+            }
+            when has_key(result, key) {
+                when typeOf(result[key]) == "array" {
+                    push(result[key], val)
+                } other {
+                    result[key] = [result[key], val]
+                }
+            } other {
+                result[key] = val
+            }
+        }
+    }
+    give result
+}
+
+# Split a URL into its parts. Fields that are absent are nil, not "".
+export task urlParse(url) {
+    when url == nil { throw Exception("url: a URL is required") }
+    s = str(url)
+
+    # fragment
+    fragment = nil
+    hashAt = indexOf(s, "#")
+    when hashAt >= 0 {
+        fragment = substr(s, hashAt + 1, len(s) - hashAt - 1)
+        s = substr(s, 0, hashAt)
+    }
+
+    # query
+    query = nil
+    qAt = indexOf(s, "?")
+    when qAt >= 0 {
+        query = substr(s, qAt + 1, len(s) - qAt - 1)
+        s = substr(s, 0, qAt)
+    }
+
+    # scheme: the colon that precedes any "/"
+    scheme = nil
+    colonAt = indexOf(s, ":")
+    slashAt = indexOf(s, "/")
+    when colonAt >= 0 and (slashAt < 0 or colonAt < slashAt) {
+        scheme = lower(substr(s, 0, colonAt))
+        s = substr(s, colonAt + 1, len(s) - colonAt - 1)
+    }
+
+    # authority (only for the "//" form)
+    userinfo = nil
+    host = nil
+    port = nil
+    path = s
+    when startsWith(s, "//") {
+        s = substr(s, 2, len(s) - 2)
+        slashAt = indexOf(s, "/")
+        authority = s
+        path = "/"
+        when slashAt >= 0 {
+            authority = substr(s, 0, slashAt)
+            path = substr(s, slashAt, len(s) - slashAt)
+        }
+
+        atAt = indexOf(authority, "@")
+        hostPort = authority
+        when atAt >= 0 {
+            userinfo = substr(authority, 0, atAt)
+            hostPort = substr(authority, atAt + 1, len(authority) - atAt - 1)
+        }
+
+        # host[:port], with IPv6 kept in brackets
+        when startsWith(hostPort, "[") {
+            close = indexOf(hostPort, "]")
+            when close >= 0 {
+                host = substr(hostPort, 0, close + 1)
+                when close + 1 < len(hostPort) and substr(hostPort, close + 1, 1) == ":" {
+                    p = substr(hostPort, close + 2, len(hostPort) - close - 2)
+                    when _allDigits(p) { port = num(p) }
+                }
+            } other {
+                host = hostPort
+            }
+        } other {
+            cAt = indexOf(hostPort, ":")
+            when cAt >= 0 {
+                host = substr(hostPort, 0, cAt)
+                p = substr(hostPort, cAt + 1, len(hostPort) - cAt - 1)
+                when _allDigits(p) { port = num(p) }
+            } other {
+                host = hostPort
+            }
+        }
+        when host == "" { host = nil }
+    }
+
+    give {
+        "scheme": scheme,
+        "userinfo": userinfo,
+        "host": host,
+        "port": port,
+        "path": path,
+        "query": query,
+        "fragment": fragment
+    }
+}

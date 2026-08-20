@@ -1,0 +1,11 @@
+{
+  "name": "slug",
+  "version": "1.0.0",
+  "description": "Turn any text into a URL-safe slug: lowercase, transliterate accents to ASCII, and collapse non-alphanumerics into a separator.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["slug", "slugify", "url", "seo", "text", "transliterate"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

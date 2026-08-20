@@ -1,0 +1,168 @@
+# ============================================================================
+# geohash — encode latitude/longitude to a geohash and back
+#
+#   use "geohash"
+#
+#   ghEncode(57.64911, 10.40744, 11)   # "u4pruydqqvj"
+#   ghDecode("u4pruydqqvj")            # { lat, lng, latErr, lngErr, ... }
+#   ghNeighbors("9q9hvu")["n"]         # "9q9hvv"
+#
+# A geohash compresses a coordinate pair into a short base-32 string by
+# interleaving the bits of the two coordinates. Each extra character halves the
+# cell, so a longer hash pinpoints a smaller area, and nearby places share a
+# prefix -- the key property that makes "do these two points sit in the same
+# city" a prefix match instead of a distance calculation.
+#
+# The alphabet is the standard geohash base-32; "a", "i", "l" and "o" are
+# dropped so a hash cannot spell a word. Precision runs 1..12, where 12 is a
+# ~37mm square -- far finer than any consumer GPS actually reports.
+# ============================================================================
+
+ALPHABET = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+# Encode a point to a geohash string of `precision` characters.
+export task ghEncode(lat, lng, precision = 12) {
+    when lat == nil or lng == nil {
+        throw Exception("geohash: latitude and longitude are required")
+    }
+    when lat < -90 or lat > 90 {
+        throw Exception("geohash: latitude must be between -90 and 90")
+    }
+    when lng < -180 or lng > 180 {
+        throw Exception("geohash: longitude must be between -180 and 180")
+    }
+    when precision < 1 or precision > 12 {
+        throw Exception("geohash: precision must be between 1 and 12")
+    }
+
+    latMin = -90.0
+    latMax = 90.0
+    lngMin = -180.0
+    lngMax = 180.0
+    result = ""
+    bit = 0
+    ch = 0
+    even = true
+    repeat n = 1 to precision * 5 {
+        when even {
+            mid = (lngMin + lngMax) / 2
+            when lng >= mid {
+                ch = ch * 2 + 1
+                lngMin = mid
+            } other {
+                ch = ch * 2
+                lngMax = mid
+            }
+        } other {
+            mid = (latMin + latMax) / 2
+            when lat >= mid {
+                ch = ch * 2 + 1
+                latMin = mid
+            } other {
+                ch = ch * 2
+                latMax = mid
+            }
+        }
+        even = not even
+        bit = bit + 1
+        when bit == 5 {
+            result = result + substr(ALPHABET, ch, 1)
+            bit = 0
+            ch = 0
+        }
+    }
+    give result
+}
+
+# Decode a geohash back to its cell centre and the half-extents of the cell.
+# The returned dictionary also carries the raw bounds.
+export task ghDecode(hash) {
+    when hash == nil { throw Exception("geohash: a hash is required") }
+    body = lower(str(hash))
+    when len(body) == 0 { throw Exception("geohash: a hash is required") }
+    repeat i = 0 to len(body) - 1 {
+        when contains(ALPHABET, substr(body, i, 1)) == false {
+            throw Exception("geohash: invalid character '" + substr(body, i, 1) + "'")
+        }
+    }
+
+    latMin = -90.0
+    latMax = 90.0
+    lngMin = -180.0
+    lngMax = 180.0
+    even = true
+    repeat i = 0 to len(body) - 1 {
+        code = indexOf(ALPHABET, substr(body, i, 1))
+        repeat b = 0 to 4 {
+            pos = 4 - b
+            bit = floor(code / pow(2, pos)) % 2
+            when even {
+                when bit == 1 { lngMin = (lngMin + lngMax) / 2 } other { lngMax = (lngMin + lngMax) / 2 }
+            } other {
+                when bit == 1 { latMin = (latMin + latMax) / 2 } other { latMax = (latMin + latMax) / 2 }
+            }
+            even = not even
+        }
+    }
+
+    give {
+        "lat": (latMin + latMax) / 2,
+        "lng": (lngMin + lngMax) / 2,
+        "latErr": (latMax - latMin) / 2,
+        "lngErr": (lngMax - lngMin) / 2,
+        "minLat": latMin,
+        "maxLat": latMax,
+        "minLng": lngMin,
+        "maxLng": lngMax
+    }
+}
+
+# The four corners of the cell, as a dictionary.
+export task ghBoundingBox(hash) {
+    d = ghDecode(hash)
+    give {
+        "minLat": d["minLat"],
+        "maxLat": d["maxLat"],
+        "minLng": d["minLng"],
+        "maxLng": d["maxLng"]
+    }
+}
+
+# Is this a well-formed geohash string?
+export task ghValidate(hash) {
+    when hash == nil { give false }
+    body = str(hash)
+    when len(body) == 0 { give false }
+    repeat i = 0 to len(body) - 1 {
+        when contains(ALPHABET, substr(body, i, 1)) == false { give false }
+    }
+    give true
+}
+
+# The eight cells adjacent to this one. Each is found by decoding the centre,
+# stepping one full cell in a direction, and re-encoding -- simpler and easier
+# to trust than the classic bit-twiddling neighbour table, and no less correct.
+task _neighbor(hash, dlat, dlng) {
+    d = ghDecode(hash)
+    precision = len(hash)
+    lat = d["lat"] + dlat * d["latErr"] * 2
+    lng = d["lng"] + dlng * d["lngErr"] * 2
+    when lng > 180 { lng = lng - 360 }
+    when lng < -180 { lng = lng + 360 }
+    when lat > 90 { lat = 90 }
+    when lat < -90 { lat = -90 }
+    give ghEncode(lat, lng, precision)
+}
+
+export task ghNeighbors(hash) {
+    give {
+        "n":  _neighbor(hash, 1, 0),
+        "ne": _neighbor(hash, 1, 1),
+        "e":  _neighbor(hash, 0, 1),
+        "se": _neighbor(hash, -1, 1),
+        "s":  _neighbor(hash, -1, 0),
+        "sw": _neighbor(hash, -1, -1),
+        "w":  _neighbor(hash, 0, -1),
+        "nw": _neighbor(hash, 1, -1)
+    }
+}

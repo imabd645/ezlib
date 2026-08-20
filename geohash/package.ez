@@ -1,0 +1,11 @@
+{
+  "name": "geohash",
+  "version": "1.0.0",
+  "description": "Geohash encoding and decoding for EZ: compress a latitude/longitude pair to a short base-32 string, decode it back, and compute neighbours and bounding boxes.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["geohash", "geo", "location", "latitude", "longitude", "gis", "map", "proximity"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

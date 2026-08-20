@@ -1,0 +1,11 @@
+{
+  "name": "url",
+  "version": "1.0.0",
+  "description": "URL parsing, RFC 3986 percent-encoding, and query-string building/parsing for EZ.",
+  "author": "Abdullah Masood",
+  "main": "main.ez",
+  "license": "MIT",
+  "keywords": ["url", "uri", "query", "query string", "percent", "encode", "decode", "parse"],
+  "repository": "https://github.com/imabd645/EZ",
+  "dependencies": {}
+}

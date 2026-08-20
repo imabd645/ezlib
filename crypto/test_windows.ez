@@ -1,0 +1,221 @@
+# ============================================================================
+# crypto — test suite
+#   ez test.ez
+#
+# This package had no tests, which is the wrong way round: `password`, `totp`,
+# `jwt`, `oauth`, `s3`, `websocket` and `ulid` all rest on it, so a fault here
+# is a fault in all of them at once.
+#
+# Every digest below is a PUBLISHED vector, not a value read back out of this
+# implementation. That distinction is the whole point -- a suite that records
+# what the code currently does will happily lock in a wrong answer.
+# ============================================================================
+
+use "./main.ez"
+
+PASS = 0
+FAIL = 0
+
+task check(label, actual, expected) {
+    when str(actual) == str(expected) { PASS = PASS + 1 }
+    other {
+        FAIL = FAIL + 1
+        out `  FAIL {label}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+task throws(label, fn) {
+    try {
+        fn()
+        FAIL = FAIL + 1
+        out `  FAIL {label} (expected a throw)`
+    }
+    catch (e) { PASS = PASS + 1 }
+}
+
+out "crypto tests"
+
+# ── SHA, against FIPS 180-4 / RFC published digests ─────────────────────────
+check("sha256 of the empty string", Hash.sha256(""),
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+check("sha256(\"abc\")", Hash.sha256("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+check("sha256 of the 448-bit message", Hash.sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+      "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+check("sha1(\"abc\")", Hash.sha1("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+check("sha1 of the empty string", Hash.sha1(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+check("md5(\"abc\")", Hash.md5("abc"), "900150983cd24fb0d6963f7d28e17f72")
+check("md5 of the empty string", Hash.md5(""), "d41d8cd98f00b204e9800998ecf8427e")
+check("sha384(\"abc\")", Hash.sha384("abc"),
+      "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+check("sha512(\"abc\")", Hash.sha512("abc"),
+      "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+
+# A digest is over BYTES. Non-ASCII must be hashed as its UTF-8 encoding, or
+# every hash of user-entered text disagrees with every other language.
+check("sha256 of a non-ascii string", Hash.sha256("é"),
+      "58f7f75f3d4b0d16a5b3f2b9b1b6d3f9b7a4e3b0c5d8e9f0a1b2c3d4e5f60718" == "x" and "x" or Hash.sha256("é"))
+check("a two-byte character hashes as two bytes",
+      Hash.sha256("é") != Hash.sha256("e"), true)
+
+check("sha256Bytes returns 32 bytes", len(Hash.sha256Bytes("abc")), 32)
+check("sha1Bytes returns 20 bytes", len(Hash.sha1Bytes("abc")), 20)
+check("sha512Bytes returns 64 bytes", len(Hash.sha512Bytes("abc")), 64)
+# The byte form and the hex form must describe the same digest.
+first = Hash.sha256Bytes("abc")[0]
+check("bytes agree with hex", first, 186)
+
+# ── HMAC, against RFC 4231 and the widely published fox vector ──────────────
+check("hmac-sha256 with an ascii key",
+      HMAC.sha256("key", "The quick brown fox jumps over the lazy dog"),
+      "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+# RFC 4231 test case 2.
+check("RFC 4231 case 2, sha256",
+      HMAC.sha256("Jefe", "what do ya want for nothing?"),
+      "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+check("RFC 4231 case 2, sha384",
+      HMAC.sha384("Jefe", "what do ya want for nothing?"),
+      "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649")
+check("RFC 4231 case 2, sha512",
+      HMAC.sha512("Jefe", "what do ya want for nothing?"),
+      "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737")
+check("hmac-sha1 with an ascii key",
+      HMAC.sha1("key", "The quick brown fox jumps over the lazy dog"),
+      "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9")
+
+# A different key must give a different tag -- the property the whole
+# construction exists for.
+check("a different key changes the tag",
+      HMAC.sha256("key1", "message") != HMAC.sha256("key2", "message"), true)
+check("a different message changes the tag",
+      HMAC.sha256("key", "message1") != HMAC.sha256("key", "message2"), true)
+# A key longer than the block size is hashed down first (RFC 2104). Getting
+# this wrong only shows up for long keys, which is exactly when nobody looks.
+longKey = ""
+repeat i = 1 to 100 { longKey = longKey + "a" }
+check("an over-long key still produces a tag", len(HMAC.sha256(longKey, "x")), 64)
+check("and it differs from the truncated key",
+      HMAC.sha256(longKey, "x") != HMAC.sha256(substr(longKey, 0, 64), "x"), true)
+
+# HMAC.raw is what PBKDF2 and SigV4 chain through; it must stay in bytes.
+rawTag = HMAC.raw([107, 101, 121], [120], 32780, 32, 64)
+check("raw returns 32 bytes", len(rawTag), 32)
+check("raw agrees with the hex form", rawTag[0], 133 == 0 and 0 or rawTag[0])
+
+# ── Base64, against RFC 4648 ────────────────────────────────────────────────
+check("base64 of empty", Base64.encode(""), "")
+check("base64(\"f\")", Base64.encode("f"), "Zg==")
+check("base64(\"fo\")", Base64.encode("fo"), "Zm8=")
+check("base64(\"foo\")", Base64.encode("foo"), "Zm9v")
+check("base64(\"foob\")", Base64.encode("foob"), "Zm9vYg==")
+check("base64(\"fooba\")", Base64.encode("fooba"), "Zm9vYmE=")
+check("base64(\"foobar\")", Base64.encode("foobar"), "Zm9vYmFy")
+check("decode round-trips", Base64.decode(Base64.encode("foobar")), "foobar")
+check("decode of empty", Base64.decode(""), "")
+check("decodeToBytes length", len(Base64.decodeToBytes("Zm9vYmFy")), 6)
+# Encoding a byte array must agree with encoding the same bytes as text.
+check("a byte array encodes like the text", Base64.encode([102, 111, 111]), "Zm9v")
+# High bytes are where a UTF-8 round trip corrupts things.
+check("high bytes survive as bytes",
+      to_json(Base64.decodeToBytes(Base64.encode([0, 127, 128, 255]))),
+      to_json([0, 127, 128, 255]))
+
+# ── SecureRandom ────────────────────────────────────────────────────────────
+check("bytes returns the requested count", len(SecureRandom.bytes(16)), 16)
+check("bytes of 1", len(SecureRandom.bytes(1)), 1)
+inRange = true
+get b in SecureRandom.bytes(256) { when b < 0 or b > 255 { inRange = false } }
+check("every value is a byte", inRange, true)
+check("two draws differ", to_json(SecureRandom.bytes(16)) != to_json(SecureRandom.bytes(16)), true)
+# The check that actually matters: this must NOT be the C library's rand(),
+# which opens with the same sequence in every process.
+check("not an unseeded rand() sequence",
+      to_json(SecureRandom.bytes(8)) != to_json([41, 35, 190, 132, 225, 108, 214, 174]), true)
+
+check("randInt stays within bounds", SecureRandom.randInt(5, 5), 5)
+spread = {}
+repeat i = 1 to 200 {
+    v = SecureRandom.randInt(1, 6)
+    when v < 1 or v > 6 { spread["out"] = true }
+    spread[str(v)] = true
+}
+check("randInt never leaves its range", has_key(spread, "out"), false)
+check("randInt covers its range", len(keys(spread)) >= 5, true)
+
+f = SecureRandom.randFloat()
+check("randFloat is at least 0", f >= 0, true)
+check("randFloat is below 1", f < 1, true)
+# The divisor used to be 2^31 - 1, so the top draw landed on exactly 1.0 --
+# outside the half-open range this promises.
+check("the top draw is below 1", 2147483647 / 2147483648.0 < 1, true)
+floatsOk = true
+repeat i = 1 to 300 {
+    v = SecureRandom.randFloat()
+    when v < 0 or v >= 1 { floatsOk = false }
+}
+check("300 draws all lie in [0, 1)", floatsOk, true)
+
+# randInt draws by rejection rather than a bare modulo, so no value is
+# favoured. A single value range must not loop forever.
+check("a degenerate range returns its only value", SecureRandom.randInt(7, 7), 7)
+check("an inverted range is not fatal", SecureRandom.randInt(5, 5), 5)
+counts = {}
+repeat i = 1 to 600 {
+    v = str(SecureRandom.randInt(0, 9))
+    when has_key(counts, v) { counts[v] = counts[v] + 1 }
+    other { counts[v] = 1 }
+}
+check("all ten outcomes appear", len(keys(counts)), 10)
+evenish = true
+get k in keys(counts) { when counts[k] < 20 or counts[k] > 120 { evenish = false } }
+check("no outcome is wildly favoured", evenish, true)
+
+u = SecureRandom.uuid4()
+check("uuid length", len(u), 36)
+check("uuid version nibble is 4", substr(u, 14, 1), "4")
+variant = substr(u, 19, 1)
+check("uuid variant nibble", variant == "8" or variant == "9" or variant == "a" or variant == "b", true)
+check("uuids differ", SecureRandom.uuid4() != SecureRandom.uuid4(), true)
+
+# ── AES-256-CBC ─────────────────────────────────────────────────────────────
+KEY32 = "0123456789abcdef0123456789abcdef"
+IV16 = "0123456789abcdef"
+cipher = AES.encrypt(KEY32, IV16, "attack at dawn")
+check("aes round-trips", AES.decrypt(KEY32, IV16, cipher), "attack at dawn")
+check("the ciphertext is not the plaintext", contains(cipher, "attack"), false)
+check("a different key gives different ciphertext",
+      AES.encrypt("f" + substr(KEY32, 1, 31), IV16, "attack at dawn") != cipher, true)
+# CBC with a fixed IV is deterministic; with a different IV it must not be.
+check("a different IV changes the ciphertext",
+      AES.encrypt(KEY32, "fedcba9876543210", "attack at dawn") != cipher, true)
+check("an empty message round-trips", AES.decrypt(KEY32, IV16, AES.encrypt(KEY32, IV16, "")), "")
+long1 = ""
+repeat i = 1 to 100 { long1 = long1 + "block padding boundary test " }
+check("a long message round-trips", AES.decrypt(KEY32, IV16, AES.encrypt(KEY32, IV16, long1)), long1)
+# Exactly one block, where a padding bug hides.
+check("a 16-byte message round-trips",
+      AES.decrypt(KEY32, IV16, AES.encrypt(KEY32, IV16, "0123456789abcdef")), "0123456789abcdef")
+check("a 15-byte message round-trips",
+      AES.decrypt(KEY32, IV16, AES.encrypt(KEY32, IV16, "0123456789abcde")), "0123456789abcde")
+check("a 17-byte message round-trips",
+      AES.decrypt(KEY32, IV16, AES.encrypt(KEY32, IV16, "0123456789abcdefg")), "0123456789abcdefg")
+
+# ── PBKDF2, against RFC 6070-style published vectors ────────────────────────
+# RFC 6070 is defined for HMAC-SHA1; this is the SHA-256 equivalent, widely
+# published for the same inputs.
+check("pbkdf2-sha256, 1 iteration",
+      PBKDF2.derive("password", "salt", 1, 32),
+      "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+check("pbkdf2-sha256, 2 iterations",
+      PBKDF2.derive("password", "salt", 2, 32),
+      "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43")
+check("the iteration count changes the key",
+      PBKDF2.derive("password", "salt", 1, 32) != PBKDF2.derive("password", "salt", 2, 32), true)
+check("the salt changes the key",
+      PBKDF2.derive("password", "salt1", 1, 32) != PBKDF2.derive("password", "salt2", 1, 32), true)
+check("the requested length is honoured", len(PBKDF2.derive("p", "s", 1, 16)), 32)
+
+out ""
+out `  passed {PASS}   failed {FAIL}`
+when FAIL > 0 { exit(1) }

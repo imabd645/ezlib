@@ -1,0 +1,82 @@
+# ============================================================================
+# slug — tests
+# ============================================================================
+
+use "slug"
+
+passed = 0
+failed = 0
+
+task check(name, actual, expected) {
+    when actual == expected {
+        passed = passed + 1
+    }
+    other {
+        failed = failed + 1
+        out `  FAIL {name}`
+        out `    expected: {expected}`
+        out `    actual:   {actual}`
+    }
+}
+
+task checkTrue(name, value) { check(name, value, true) }
+
+# ── basics ───────────────────────────────────────────────────────────────────
+
+out "basics"
+
+check("a simple phrase", slug("Hello World"), "hello-world")
+check("already lowercase", slug("hello world"), "hello-world")
+check("uppercase is lowered", slug("HELLO WORLD"), "hello-world")
+check("punctuation collapses", slug("Hello, World!"), "hello-world")
+check("an ampersand", slug("Rock & Roll"), "rock-roll")
+check("a percent", slug("100% Free"), "100-free")
+check("a number survives", slug("File 42"), "file-42")
+check("an empty string", slug(""), "")
+check("only punctuation", slug("!!!"), "")
+check("nil", slug(nil), "")
+
+# ── accents ──────────────────────────────────────────────────────────────────
+
+out "accents"
+
+# The core promise: an accented letter becomes its ASCII base, not a separator.
+check("café", slug("Café déjà vu!"), "cafe-deja-vu")
+check("crème brûlée", slug("Crème Brûlée"), "creme-brulee")
+check("straße", slug("Straße"), "strasse")
+check("espana", slug("España"), "espana")
+check("münchen", slug("München"), "munchen")
+check("français", slug("Français"), "francais")
+check("uppercase accented", slug("ÉCOLE"), "ecole")
+check("scandinavian", slug("Ångström Øresund"), "angstrom-oresund")
+check("ligatures", slug("encyclopædia"), "encyclopaedia")
+
+# ── separators and whitespace ────────────────────────────────────────────────
+
+out "separators and whitespace"
+
+check("leading/trailing space", slug("  Trim   Me  "), "trim-me")
+check("runs collapse", slug("a---b"), "a-b")
+check("underscore becomes dash", slug("hello_world"), "hello-world")
+check("custom separator", slug("hello world", "_"), "hello_world")
+check("custom multi-char separator", slug("hello world", "--"), "hello--world")
+check("tab and newline", slug("a\tb\nc"), "a-b-c")
+
+# ── non-latin ────────────────────────────────────────────────────────────────
+
+out "non-latin"
+
+# Scripts with no ASCII mapping are dropped rather than left as raw bytes in a
+# URL; a slug that keeps CJK is not safe in a path segment on every platform.
+check("cjk is dropped", slug("你好世界"), "")
+check("cjk between latin", slug("hello 世界 world"), "hello-world")
+check("emoji dropped", slug("hi 🎉 there"), "hi-there")
+
+out ""
+when failed == 0 {
+    out `slug: all {passed} checks passed`
+}
+other {
+    out `slug: {failed} of {passed + failed} checks FAILED`
+    exit(1)
+}

@@ -1,0 +1,35 @@
+use "base64.ez"
+export model RC4 {
+    hidden S
+
+    init(key) {
+        self.S = []
+        repeat i = 0 to 255 { push(self.S, i) }
+        j = 0
+        keyLen = len(key)
+        repeat i = 0 to 255 {
+            j = (j + self.S[i] + ord(substr(key, i % keyLen, 1))) % 256
+            temp = self.S[i]  self.S[i] = self.S[j]  self.S[j] = temp
+        }
+    }
+
+    task processBytes(input) {
+        res   = []
+        i     = 0
+        j     = 0
+        isStr = type(input) == "string"
+        l     = len(input)
+        when l == 0 { give [] }
+
+        repeat k = 0 to l - 1 {
+            i = (i + 1) % 256
+            j = (j + self.S[i]) % 256
+            temp = self.S[i]  self.S[i] = self.S[j]  self.S[j] = temp
+            K = self.S[(self.S[i] + self.S[j]) % 256]
+            b = 0
+            when isStr { b = ord(substr(input, k, 1)) } other { b = input[k] }
+            push(res, b ^ K)
+        }
+        give res
+    }
+}

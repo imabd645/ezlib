@@ -1,0 +1,168 @@
+# odoox/test.ez — no live Odoo needed. Every request is answered by a fake
+# transport that inspects the JSON-RPC body and returns a canned response.
+
+use "odoox/main.ez"
+
+passCount = 0
+failCount = 0
+
+task check(label, condition) {
+    when condition {
+        passCount = passCount + 1
+        out "  ok  " + label
+    }
+    other {
+        failCount = failCount + 1
+        out "  FAIL " + label
+    }
+}
+
+task rpcResponse(result) {
+    give to_json({ "jsonrpc": "2.0", "id": 1, "result": result })
+}
+
+task rpcErrorResponse(message) {
+    give to_json({ "jsonrpc": "2.0", "id": 1, "error": { "code": 200, "message": "Odoo Server Error", "data": { "message": message } } })
+}
+
+# ============================================================================
+out "=== domain building ==="
+# ============================================================================
+
+d1 = domainAnd([], parseCondition("id=87429"))
+check("AND single term", d1[0][0] == "id" and d1[0][1] == "=" and d1[0][2] == 87429)
+
+d2 = domainOr(d1, parseCondition("id=8129"))
+check("OR wraps with |", d2[0] == "|")
+check("OR keeps first term", d2[1][2] == 87429)
+check("OR appends second term", d2[2][2] == 8129)
+
+d3 = domainAnd(d2, parseCondition("active=true"))
+check("AND after OR appends at top level", len(d3) == 4 and d3[3][2] == true)
+
+check("string value quoted", parseCondition("name='Bob'")[2] == "Bob")
+check("string value double-quoted", parseCondition("name=\"Bob\"")[2] == "Bob")
+check("float value", parseCondition("price>=12.5")[2] == 12.5)
+check("negative int", parseCondition("balance<-5")[2] == -5)
+check(">= before >", parseCondition("age>=18")[1] == ">=")
+check("!= parses", parseCondition("state!='done'")[1] == "!=")
+
+# ============================================================================
+out "\n=== login + read, via a fake transport ==="
+# ============================================================================
+
+client = Odoo()
+client.url = "https://example.odoo.com"
+client.db = "example"
+client.email = "admin@example.com"
+client.pass = "secret"
+
+task mainTransport(request) {
+    body = parse_json(request["body"])
+    params = body["params"]
+    when params["service"] == "common" and params["method"] == "login" {
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(7) }
+    }
+    when params["method"] == "search_read" {
+        rows = [{ "id": 87429, "name": "Alice" }, { "id": 8129, "name": "Bob" }]
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(rows) }
+    }
+    when params["method"] == "search" {
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse([87429]) }
+    }
+    when params["method"] == "write" {
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(true) }
+    }
+    when params["method"] == "fields_get" {
+        info = { "name": { "type": "char", "string": "Name", "required": true } }
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(info) }
+    }
+    give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(false) }
+}
+
+client.http = client.http.useTransport(mainTransport)
+
+session = client.login()
+check("login sets uid", session.odoo.uid == 7)
+
+rows = session.read("res.partner", ["name"])
+    .condition("id=87429")
+    .OR("id=8129")
+    .limit(10)
+    .exec()
+check("read returns rows", len(rows) == 2)
+check("read row shape", rows[0]["name"] == "Alice")
+
+written = session.write("res.partner")
+    .value("name", "Updated")
+    .condition("id=87429")
+    .exec()
+check("write returns true", written == true)
+
+fields = session.inspect("res.partner")
+check("inspect returns field map", fields["name"]["type"] == "char")
+
+try {
+    session.write("res.partner").value("name", "x").exec()
+    check("write with no target throws", false)
+}
+catch (e) { check("write with no target throws", true) }
+
+try {
+    session.write("res.partner").condition("id=1").exec()
+    check("write with no value throws", false)
+}
+catch (e) { check("write with no value throws", true) }
+
+# ============================================================================
+out "\n=== a failed login ==="
+# ============================================================================
+
+badClient = Odoo()
+badClient.url = "https://example.odoo.com"
+badClient.db = "example"
+badClient.email = "wrong@example.com"
+badClient.pass = "wrong"
+
+task badTransport(request) {
+    give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(false) }
+}
+badClient.http = badClient.http.useTransport(badTransport)
+
+try {
+    badClient.login()
+    check("bad login throws", false)
+}
+catch (e) { check("bad login throws", true) }
+
+# ============================================================================
+out "\n=== an Odoo-side RPC error ==="
+# ============================================================================
+
+errClient = Odoo()
+errClient.url = "https://example.odoo.com"
+errClient.db = "example"
+errClient.email = "admin@example.com"
+errClient.pass = "secret"
+
+task errTransport(request) {
+    body = parse_json(request["body"])
+    when body["params"]["method"] == "login" {
+        give { "ok": true, "status": 200, "headers": "", "body": rpcResponse(7) }
+    }
+    give { "ok": true, "status": 200, "headers": "", "body": rpcErrorResponse("Access Denied") }
+}
+errClient.http = errClient.http.useTransport(errTransport)
+
+errSession = errClient.login()
+try {
+    errSession.read("res.partner").exec()
+    check("RPC error throws", false)
+}
+catch (e) {
+    check("RPC error throws", true)
+    check("RPC error message carries detail", contains(str(e), "Access Denied"))
+}
+
+# ============================================================================
+out "\n" + str(passCount) + " passed, " + str(failCount) + " failed"

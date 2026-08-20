@@ -282,13 +282,13 @@ dec = RC4("key").processBytes(enc)  # ✅ Fresh instance
 ```
 
 ### Binary Data
-If encoding binary data (non-text), use `Base64.decodeToBytes()` and work with byte arrays directly. `Base64.decode()` calls `chr()` on each byte, which only works correctly for ASCII range (0-127).
+whenencoding binary data (non-text), use `Base64.decodeToBytes()` and work with byte arrays directly. `Base64.decode()` calls `chr()` on each byte, which only works correctly for ASCII range (0-127).
 
 ### Non-ASCII Characters
 `Base64.encode()` uses `ord()` on each character, which works correctly for ASCII. For multibyte Unicode strings, `ord()` returns the code point of the first byte only — behavior may be unexpected for non-ASCII input.
 
 ### Invalid Base64 Input
-If the input to `Base64.decodeToBytes()` or `Base64.decode()` contains characters not in the Base64 alphabet, `indexOf()` returns `-1` which is treated as index `0`. This means corrupted/invalid Base64 data will silently produce wrong output rather than an error.
+whenthe input to `Base64.decodeToBytes()` or `Base64.decode()` contains characters not in the Base64 alphabet, `indexOf()` returns `-1` which is treated as index `0`. This means corrupted/invalid Base64 data will silently produce wrong output rather than an error.
 
 ---
 
@@ -408,7 +408,7 @@ out verifyPassword("wrongPassword", salt, stored)   # → false
 ### Base64 Encoding
 - Processes input in 3-byte groups
 - Converts each 3 bytes to 4 Base64 characters using 6-bit shifts
-- Pads with `=` if input length is not divisible by 3
+- Pads with `=` wheninput length is not divisible by 3
 - Padding: `rem == 1` → `==`, `rem == 2` → `=`
 
 ### RC4 Key Scheduling Algorithm (KSA)
