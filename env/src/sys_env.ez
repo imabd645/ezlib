@@ -1,0 +1,73 @@
+// ============================================================================
+// ezenv / sys_env.ez -- Cross-Platform Host System Environment Abstraction
+// ============================================================================
+// Provides memory-safe, zero-crash FFI bindings to C runtime environment:
+//   - Windows: msvcrt.dll (getenv / _putenv_s)
+//   - Linux:   libc.so.6 / libc.so (getenv / setenv)
+//   - macOS:   libSystem.B.dylib / libc.dylib (getenv / setenv)
+// ============================================================================
+
+export model SysEnv {
+    static _isWin = false
+    static _fGetEnv = nil
+    static _fSetEnv = nil
+    static _initDone = false
+
+    // Initialize C-runtime library handles
+    static task init() {
+        when SysEnv._initDone { give nil }
+        SysEnv._initDone = true
+
+        curOs = os()
+        when curOs == "windows" {
+            SysEnv._isWin = true
+            try {
+                msv = os_load_lib("msvcrt.dll")
+                when msv != nil and msv != 0 {
+                    SysEnv._fGetEnv = os_get_func(msv, "getenv")
+                    SysEnv._fSetEnv = os_get_func(msv, "_putenv_s")
+                }
+            } catch e {}
+        } other {
+            candidates = ["libc.so.6", "libc.so", "libSystem.B.dylib", "libc.dylib"]
+            get cand in candidates {
+                try {
+                    libc = os_load_lib(cand)
+                    when libc != nil and libc != 0 {
+                        SysEnv._fGetEnv = os_get_func(libc, "getenv")
+                        SysEnv._fSetEnv = os_get_func(libc, "setenv")
+                        break
+                    }
+                } catch e {}
+            }
+        }
+    }
+
+    // Get an environment variable from the host process
+    static task get(key) {
+        SysEnv.init()
+        when SysEnv._fGetEnv == nil { give nil }
+        try {
+            ptr = os_call(SysEnv._fGetEnv, "ptr", str(key))
+            when ptr == 0 or ptr == nil { give nil }
+            give os_read_string_ptr(ptr)
+        } catch e {
+            give nil
+        }
+    }
+
+    // Set an environment variable in the host process
+    static task set(key, value) {
+        SysEnv.init()
+        when SysEnv._fSetEnv == nil { give false }
+        try {
+            when SysEnv._isWin {
+                give os_call(SysEnv._fSetEnv, "int", str(key), str(value)) == 0
+            } other {
+                give os_call(SysEnv._fSetEnv, "int", str(key), str(value), 1) == 0
+            }
+        } catch e {
+            give false
+        }
+    }
+}

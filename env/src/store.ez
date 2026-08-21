@@ -2,33 +2,45 @@
 // ezenv / store.ez -- the Env model.
 //
 // Wraps the flat { key: value } dictionary returned by the parser and adds the
-// API you actually use at runtime: get, set, has, require, typed accessors.
-//
-// An Env never mutates the process environment or the .env file on disk.
-// It is a read-write in-memory store seeded from one or more files.
+// API you actually use at runtime: get, set, has, require, typed accessors,
+// and host system/server environment synchronization.
 // ============================================================================
 
 use "errors.ez"
 use "parser.ez"
+use "sys_env.ez"
 
 export model Env {
     // Construct an Env from a pre-parsed dictionary.
-    // Use load() or load_file() from main.ez instead of calling this directly.
-    init(data = nil) {
+    init(data = nil, options = nil) {
         when typeOf(data) == "nil" { data = {} }
+        when typeOf(options) == "nil" { options = {} }
         self._data = data
         self._required = []
+        self._system = false
+
+        when has_key(options, "system") {
+            self._system = options["system"]
+        }
     }
 
     // ── Core accessors ──────────────────────────────────────────────────
 
-    // Get a value by key. Returns `fallback` if the key is not set.
+    // Get a value by key. Checks server environment if system option is enabled.
     task get(key, fallback = nil) {
-        when has_key(self._data, key) { give self._data[key] }
+        when self._system {
+            sysVal = SysEnv.get(key)
+            when sysVal != nil and sysVal != "" {
+                give sysVal
+            }
+        }
+        when has_key(self._data, key) {
+            give self._data[key]
+        }
         give fallback
     }
 
-    // Set a value. Overwrites any existing value for this key.
+    // Set a value. Overwrites any existing value for this key in-memory.
     task set(key, value) {
         self._data[key] = str(value)
         give self
@@ -36,7 +48,12 @@ export model Env {
 
     // Check if a key exists.
     task has(key) {
-        give has_key(self._data, key)
+        when has_key(self._data, key) { give true }
+        when self._system {
+            sysVal = SysEnv.get(key)
+            when sysVal != nil and sysVal != "" { give true }
+        }
+        give false
     }
 
     // Delete a key. No-op if it doesn't exist.
@@ -72,10 +89,19 @@ export model Env {
         give len(keys(self._data))
     }
 
+    // Populate all in-memory variables into the host OS process environment
+    task populate(overwrite = false) {
+        get k in keys(self._data) {
+            when overwrite or SysEnv.get(k) == nil {
+                SysEnv.set(k, self._data[k])
+            }
+        }
+        give self
+    }
+
     // ── Required keys ───────────────────────────────────────────────────
 
-    // Mark one or more keys as required. `validate()` will throw if any are
-    // missing. Accepts a single string or an array of strings.
+    // Mark one or more keys as required.
     task require(keysOrKey) {
         when typeOf(keysOrKey) == "string" {
             push(self._required, keysOrKey)
@@ -90,7 +116,12 @@ export model Env {
     // Throw a KeyError for the first required key that is not set.
     task validate() {
         get k in self._required {
-            when not has_key(self._data, k) {
+            found = has_key(self._data, k)
+            when not found and self._system {
+                sysVal = SysEnv.get(k)
+                when sysVal != nil and sysVal != "" { found = true }
+            }
+            when not found {
                 raise_key_error(k)
             }
         }
@@ -98,51 +129,48 @@ export model Env {
     }
 
     // ── Typed accessors ─────────────────────────────────────────────────
-    // Every value in a .env file is a string. These helpers coerce to the
-    // requested type and throw a TypeError on failure.
 
     // Get a value as an integer.
     task getInt(key, fallback = nil) {
-        when not has_key(self._data, key) { give fallback }
-        raw = self._data[key]
+        val = self.get(key)
+        when val == nil { give fallback }
         result = nil
         try {
-            result = num(raw)
+            result = num(val)
         } catch e {
-            raise_type_error(key, "integer", raw)
+            raise_type_error(key, "integer", val)
         }
         give result
     }
 
     // Get a value as a float.
     task getFloat(key, fallback = nil) {
-        when not has_key(self._data, key) { give fallback }
-        raw = self._data[key]
+        val = self.get(key)
+        when val == nil { give fallback }
         result = nil
         try {
-            result = num(raw)
+            result = num(val)
         } catch e {
-            raise_type_error(key, "float", raw)
+            raise_type_error(key, "float", val)
         }
         give result
     }
 
     // Get a value as a boolean.
-    // Truthy: "true", "1", "yes", "on"  (case-insensitive)
-    // Falsy:  "false", "0", "no", "off", ""
     task getBool(key, fallback = nil) {
-        when not has_key(self._data, key) { give fallback }
-        raw = lower(self._data[key])
+        val = self.get(key)
+        when val == nil { give fallback }
+        raw = lower(str(val))
         when raw == "true" or raw == "1" or raw == "yes" or raw == "on" { give true }
         when raw == "false" or raw == "0" or raw == "no" or raw == "off" or raw == "" { give false }
-        raise_type_error(key, "bool", self._data[key])
+        raise_type_error(key, "bool", val)
     }
 
     // Get a value as an array by splitting on a delimiter.
     task getList(key, delimiter = ",", fallback = nil) {
-        when not has_key(self._data, key) { give fallback }
-        raw = self._data[key]
-        parts = split(raw, delimiter)
+        val = self.get(key)
+        when val == nil { give fallback }
+        parts = split(str(val), delimiter)
         result = []
         get p in parts {
             trimmed = self._trimValue(p)
@@ -155,16 +183,11 @@ export model Env {
 
     // ── Merge ───────────────────────────────────────────────────────────
 
-    // Merge another Env or dictionary into this one. Existing keys are NOT
-    // overwritten unless `overwrite` is true. This matches the convention that
-    // the first file loaded wins, and per-environment overrides are loaded
-    // second with overwrite=true.
     task merge(source_env, overwrite = false) {
         source = {}
         when typeOf(source_env) == "dictionary" {
             source = source_env
         } other {
-            // Assume it's an Env instance.
             source = source_env.all()
         }
         get k in keys(source) {

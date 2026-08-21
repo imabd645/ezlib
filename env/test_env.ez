@@ -275,6 +275,32 @@ try {
 }
 assert(caught, "getBool throws TypeError for ambiguous value")
 
+// ── System & Server Environment Integration ────────────────────────────────
+out "--- System / Server environment ---"
+
+// 1. Direct sys() function
+SysEnv.set("EZ_TEST_SYS_VAR", "FromHostSystem")
+assertEq(sys("EZ_TEST_SYS_VAR"), "FromHostSystem", "sys() reads host environment")
+assertEq(sys("EZ_NONEXISTENT_VAR_123", "fallback"), "fallback", "sys() returns fallback on missing")
+
+// 2. System precedence over .env file
+SysEnv.set("OVERRIDE_ME", "HostServerValue")
+envSys = load_string("OVERRIDE_ME=DotEnvValue\nLOCAL_ONLY=LocalVal", { "system": true })
+assertEq(envSys.get("OVERRIDE_ME"), "HostServerValue", "system env takes precedence over .env")
+assertEq(envSys.get("LOCAL_ONLY"), "LocalVal", "falls back to .env when not in system")
+assert(envSys.has("OVERRIDE_ME"), "has() returns true for system variable")
+
+// 3. Required key validation satisfied by server environment (Docker / K8s secret)
+SysEnv.set("K8S_SECRET_TOKEN", "super-secret-token")
+envSecret = load_string("DB_HOST=localhost", { "system": true, "required": ["K8S_SECRET_TOKEN", "DB_HOST"] })
+assert(envSecret.has("K8S_SECRET_TOKEN"), "server secret exists in env")
+assertEq(envSecret.get("K8S_SECRET_TOKEN"), "super-secret-token", "server secret accessible")
+
+// 4. Populate in-memory values to system environment
+envPop = load_string("EZ_POPULATED_VAR=PopulatedSuccess")
+envPop.populate(true)
+assertEq(SysEnv.get("EZ_POPULATED_VAR"), "PopulatedSuccess", "populate() writes to host OS environment")
+
 // ── Summary ─────────────────────────────────────────────────────────────────
 
 out ""

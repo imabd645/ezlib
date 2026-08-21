@@ -1,9 +1,7 @@
 # env — .env file loading for EZ
 
-> **Version:** 1.0.0  
-> **Import:** `use "env"`  
-> **File:** `C:\ezlib\env\main.ez`  
-> **Requires:** nothing — pure EZ, no FFI, no DLLs
+> **Version:** 1.1.0  
+
 
 ---
 
@@ -87,7 +85,9 @@ env = load(".env", { "defaults": { "PORT": "8080" } })
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `required` | array | Keys that must be present. Throws `KeyError` on the first miss. |
+| `system` | bool | If `true`, host/server environment variables take precedence over `.env` file values. |
+| `populate` | bool | If `true`, exports loaded `.env` variables into the host OS process environment (`setenv`). |
+| `required` | array | Keys that must be present (checked against `.env` and host environment). Throws `KeyError` on miss. |
 | `defaults` | dict | Fallback values for keys not found in the file. File values always win. |
 
 ### `load_string(content, options = nil)` → `Env`
@@ -121,9 +121,10 @@ Every `load*` function returns an `Env` instance.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `env.get(key, fallback = nil)` | string or fallback | Get a value. Returns `fallback` if the key is not set. |
+| `env.get(key, fallback = nil)` | string or fallback | Get a value. Checks server environment if `system: true`. |
 | `env.set(key, value)` | `self` | Set a value (in memory only, never writes to disk). |
-| `env.has(key)` | bool | Check if a key exists. |
+| `env.has(key)` | bool | Check if a key exists in `.env` or host system environment. |
+| `env.populate(overwrite = false)` | `self` | Write all in-memory variables into the host OS process environment. |
 | `env.remove(key)` | `self` | Delete a key. |
 | `env.all()` | dict | Return all key-value pairs as a dictionary. |
 | `env.keys()` | array | Return all keys. |
