@@ -1,35 +1,24 @@
-# env — .env file loading for EZ
+# env — .env and system environment loading for EZ
 
-> **Version:** 1.1.0  
-
+> **Version:** 1.1.0
 
 ---
 
 ## Overview
 
-`env` loads `.env` files into your EZ scripts. A `.env` file is a plain text
-file of `KEY=value` pairs, one per line, that keeps configuration — database
-URLs, API keys, debug flags — out of source code.
+`env` loads `.env` files into your EZ scripts, and gives you direct,
+cross-platform access to the host system environment too. A `.env` file is a
+plain text file of `KEY=value` pairs, one per line, that keeps configuration
+— database URLs, API keys, debug flags — out of source code.
 
 - **Parse** `.env` files with full quoting and escaping support
 - **Typed accessors** — `getInt`, `getFloat`, `getBool`, `getList`
 - **Required keys** — declare what must exist; get a clear error if it doesn't
 - **Multi-file merge** — layer `.env`, `.env.local`, `.env.production`
+- **Host system environment** — read and write real OS process environment
+  variables on Windows, Linux, and macOS
 - **Structured errors** — `ParseError`, `KeyError`, `TypeError`, all with
   line numbers and filenames
-
-The library is modular, following the same architecture as `sqlite`:
-
-```
-env/
-  package.ez         ← manifest
-  main.ez            ← public surface (load, load_string, load_files)
-  src/
-    errors.ez        ← structured error builders
-    parser.ez        ← the only file that reads raw .env content
-    store.ez         ← Env model: get/set/has/require/typed accessors
-  test_env.ez        ← test suite
-```
 
 ---
 
@@ -93,13 +82,13 @@ env = load(".env", { "defaults": { "PORT": "8080" } })
 ### `load_string(content, options = nil)` → `Env`
 
 Parse from a string instead of a file. Useful for testing or when `.env` data
-arrives from a network response.
+arrives from a network response. Accepts the same options as `load()`.
 
 ```ez
 env = load_string("PORT=3000\nDEBUG=true")
 ```
 
-### `load_files(paths, priority = "first")` → `Env`
+### `load_files(paths, priority = "first", options = nil)` → `Env`
 
 Load multiple files and merge them. Missing files are silently skipped.
 
@@ -121,9 +110,9 @@ Every `load*` function returns an `Env` instance.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `env.get(key, fallback = nil)` | string or fallback | Get a value. Checks server environment if `system: true`. |
+| `env.get(key, fallback = nil)` | string or fallback | Get a value. Checks host system environment first if `system: true`. |
 | `env.set(key, value)` | `self` | Set a value (in memory only, never writes to disk). |
-| `env.has(key)` | bool | Check if a key exists in `.env` or host system environment. |
+| `env.has(key)` | bool | Check if a key exists in `.env` or (if `system: true`) the host environment. |
 | `env.populate(overwrite = false)` | `self` | Write all in-memory variables into the host OS process environment. |
 | `env.remove(key)` | `self` | Delete a key. |
 | `env.all()` | dict | Return all key-value pairs as a dictionary. |
@@ -177,6 +166,52 @@ base.merge(overrides, false)    # new keys added, existing keys kept
 base.merge(overrides, true)     # new keys added, existing keys overwritten
 ```
 
+`merge` also accepts a plain dictionary in place of an `Env` instance.
+
+---
+
+## Host System Environment
+
+`env` isn't limited to `.env` files — it can talk to the real OS process
+environment directly, on Windows, Linux, and macOS.
+
+### `sys(key, fallback = nil)`
+
+Read a variable straight from the host system environment, no `Env` instance
+required.
+
+```ez
+use "env"
+
+token = sys("K8S_SECRET_TOKEN")
+region = sys("AWS_REGION", "us-east-1")
+```
+
+### `system` option
+
+Pass `{ "system": true }` to any `load*` function to have host environment
+variables take precedence over `.env` file values on `get()` and `has()` —
+handy for letting a real deployment environment override local config.
+
+```ez
+env = load(".env", { "system": true })
+port = env.get("PORT")   # host PORT wins if set, otherwise falls back to .env
+```
+
+### `populate` option / `env.populate()`
+
+Push variables the other direction — write everything loaded from `.env`
+into the host OS process environment, so subsequently-spawned processes or
+other libraries reading `getenv()` can see them.
+
+```ez
+env = load(".env", { "populate": true })
+
+# or manually:
+env = load()
+env.populate(true)   # true = overwrite existing host variables
+```
+
 ---
 
 ## `.env` Syntax
@@ -215,7 +250,7 @@ All errors are thrown as formatted strings with a structured prefix.
 try {
     env = load(".env", { "required": ["MISSING_KEY"] })
 } catch e {
-    out e    # "env: KeyError: required environment variable 'MISSING_KEY' is not set"
+    out e    # "ezenv: KeyError: required environment variable 'MISSING_KEY' is not set"
 }
 ```
 
@@ -240,17 +275,20 @@ app.run(env.getInt("PORT", 8080))
 
 ### Per-environment layering
 
-```
-.env                ← base config, committed to git
-.env.local          ← local overrides, gitignored
-.env.production     ← production secrets, gitignored
-```
-
 ```ez
 use "env"
 
 mode = "production"   # or read from argv
 env = load_files([".env", ".env.local", ".env." + mode], "last")
+```
+
+### Letting the real deployment environment win
+
+```ez
+use "env"
+
+# In production, host-set PORT/DATABASE_URL override .env defaults.
+env = load(".env", { "system": true })
 ```
 
 ### Defaults for development
@@ -278,34 +316,9 @@ ez test_env.ez
 55+ assertions covering: basic parsing, spaces, comments, inline comments,
 all three quoting styles, escape sequences, export prefix, empty values,
 duplicate keys, typed accessors (int, float, bool, list), fallbacks,
-set/remove/has, require/validate, merge, defaults, and error handling
-(ParseError, KeyError, TypeError).
-
----
-
-## Architecture
-
-Following the same modular pattern as `sqlite`:
-
-| File | Responsibility |
-|------|----------------|
-| `main.ez` | Public surface — `load()`, `load_string()`, `load_files()`. No logic. |
-| `src/parser.ez` | The only file that reads raw `.env` content. Handles all quoting, escaping, comments, and key validation. |
-| `src/store.ez` | The `Env` model. All runtime API: accessors, typed coercion, require/validate, merge. |
-| `src/errors.ez` | Structured error builders. Every failure is diagnosable by type. |
-
----
-
-## Not covered
-
-- **Process environment variables**: `env` does not read or write the OS
-  process environment (`getenv`/`setenv`). It is an in-memory store seeded
-  from files.
-- **Variable interpolation**: `DB_URL=${DB_HOST}:${DB_PORT}` is not expanded.
-  This is a deliberate omission — interpolation interacts badly with quoting
-  and with values that contain `$` literally (API keys).
-- **Multi-line values**: A value cannot span multiple lines, even when quoted.
-  Use `\n` inside double quotes instead.
+set/remove/has, require/validate, merge, defaults, host system environment
+(`sys()`, `system` option, `populate`), and error handling (ParseError,
+KeyError, TypeError).
 
 ---
 
